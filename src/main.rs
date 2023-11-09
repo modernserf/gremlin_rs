@@ -42,11 +42,6 @@ impl Tok {
     fn new(kind: TokKind) -> Self {
         Self { kind }
     }
-    fn end_of_input() -> Self {
-        Self {
-            kind: TokKind::EndOfInput,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -338,11 +333,15 @@ impl Parser {
         }
     }
 
-    fn expr(&mut self) -> ParseOpt<Expr> {
-        if let Some(mut left) = self.base_expr()? {
+    fn left_op_expr(
+        &mut self,
+        parse_operand: fn(&mut Self) -> ParseOpt<Expr>,
+        parse_operator: fn(&mut Self) -> ParseOpt<OpKind>,
+    ) -> ParseOpt<Expr> {
+        if let Some(mut left) = parse_operand(self)? {
             loop {
-                if let Some(operator) = self.binary_op()? {
-                    let right = expect("expr", self.base_expr())?;
+                if let Some(operator) = parse_operator(self)? {
+                    let right = expect("expr", parse_operand(self))?;
                     left = Expr {
                         kind: ExprKind::BinaryOp(Box::new(BinaryOp {
                             operator,
@@ -358,18 +357,28 @@ impl Parser {
         Ok(None)
     }
 
-    fn binary_op(&mut self) -> ParseOpt<OpKind> {
-        match self.peek() {
+    fn expr(&mut self) -> ParseOpt<Expr> {
+        self.add_expr()
+    }
+
+    fn add_expr(&mut self) -> ParseOpt<Expr> {
+        self.left_op_expr(Self::mult_expr, |p| match p.peek() {
             TokKind::Plus => {
-                self.advance();
+                p.advance();
                 Ok(Some(OpKind::Add))
             }
+            _ => Ok(None),
+        })
+    }
+
+    fn mult_expr(&mut self) -> ParseOpt<Expr> {
+        self.left_op_expr(Self::base_expr, |p| match p.peek() {
             TokKind::Star => {
-                self.advance();
+                p.advance();
                 Ok(Some(OpKind::Mult))
             }
             _ => Ok(None),
-        }
+        })
     }
 
     fn base_expr(&mut self) -> ParseOpt<Expr> {
@@ -474,5 +483,10 @@ mod test {
     #[test]
     fn add_mult_paren() {
         assert_expr_eq("2 * (4 + 5)", 18);
+    }
+
+    #[test]
+    fn add_mult_pemdas() {
+        assert_expr_eq("5 + 4 * 2", 13);
     }
 }
