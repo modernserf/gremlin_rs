@@ -139,7 +139,6 @@ fn keyword_tokens() -> KeywordTokens {
 
 thread_local! {
   static KEYWORD_TOKENS: KeywordTokens = keyword_tokens();
-//   static OPERATORS: HashSet<char> = HashSet::from_iter("~!@$%^&*-+=|/.,<>".chars());
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
@@ -194,6 +193,10 @@ impl Lexer {
             ' ' | '\t' | '\n' => self.whitespace(),
             '0'..='9' => self.number(),
             'a'..='z' | 'A'..='Z' => self.identifier_or_keyword(),
+            '+' => {
+                self.advance();
+                TokKind::Plus
+            }
             _ => panic!("unknown char"),
         }
     }
@@ -331,7 +334,33 @@ impl Parser {
     }
 
     fn expr(&mut self) -> ParseOpt<Expr> {
-        self.base_expr()
+        if let Some(mut left) = self.base_expr()? {
+            loop {
+                if let Some(operator) = self.binary_op()? {
+                    let right = expect("expr", self.base_expr())?;
+                    left = Expr {
+                        kind: ExprKind::BinaryOp(Box::new(BinaryOp {
+                            operator,
+                            left,
+                            right,
+                        })),
+                    };
+                } else {
+                    return Ok(Some(left));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn binary_op(&mut self) -> ParseOpt<OpKind> {
+        match self.peek() {
+            TokKind::Plus => {
+                self.advance();
+                Ok(Some(OpKind::Plus))
+            }
+            _ => Ok(None),
+        }
     }
 
     fn base_expr(&mut self) -> ParseOpt<Expr> {
@@ -357,6 +386,13 @@ impl Interpreter {
     fn eval_expr(&mut self, expr: Expr) -> Result<u128, ()> {
         match expr.kind {
             ExprKind::IntLiteral(payload) => Ok(payload.value),
+            ExprKind::BinaryOp(payload) => {
+                let left = self.eval_expr(payload.left)?;
+                let right = self.eval_expr(payload.right)?;
+                match payload.operator {
+                    OpKind::Plus => Ok(left + right),
+                }
+            }
             _ => unimplemented!(),
         }
     }
@@ -407,5 +443,10 @@ mod test {
         ",
             123,
         );
+    }
+
+    #[test]
+    fn addition() {
+        assert_expr_eq("1 + 2 + 3", 6);
     }
 }
