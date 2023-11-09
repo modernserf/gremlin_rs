@@ -207,6 +207,10 @@ mod lexer {
                     continue;
                 }
                 if tok_kind == TokKind::EndOfInput {
+                    out.push(Tok {
+                        kind: TokKind::EndOfInput,
+                        source_info: SourceInfo { start, length: 0 },
+                    });
                     return out;
                 }
 
@@ -250,6 +254,8 @@ mod lexer {
                 '*' => self.adv_next(TokKind::Star),
                 '(' => self.adv_next(TokKind::ParLeft),
                 ')' => self.adv_next(TokKind::ParRight),
+                '&' => self.adv_next(TokKind::And),
+                '@' => self.adv_next(TokKind::At),
                 _ => self.adv_next(TokKind::Invalid),
             }
         }
@@ -298,44 +304,50 @@ mod lexer {
     mod test {
         use super::*;
 
+        fn assert_lex_eq(str: &str, tokens: Vec<Tok>) {
+            let mut res = Lexer::lex(str);
+            res.pop().expect("end of input");
+            assert_eq!(res, tokens);
+        }
+
         #[test]
         fn empty_program() {
-            assert_eq!(Lexer::lex(""), vec![])
+            assert_lex_eq("", vec![])
         }
 
         #[test]
         fn token_with_source_info() {
-            assert_eq!(
-                Lexer::lex("  123  "),
+            assert_lex_eq(
+                "  123  ",
                 vec![Tok {
                     kind: TokKind::IntLiteral(IntLiteral { value: 123 }),
                     source_info: SourceInfo {
                         start: 2,
-                        length: 3
-                    }
-                }]
+                        length: 3,
+                    },
+                }],
             )
         }
 
         #[test]
         fn invalid_token() {
-            assert_eq!(
-                Lexer::lex(" \x01 "),
+            assert_lex_eq(
+                " \x01 ",
                 vec![Tok {
                     kind: TokKind::Invalid,
                     source_info: SourceInfo {
                         start: 1,
-                        length: 1
-                    }
-                }]
+                        length: 1,
+                    },
+                }],
             )
         }
     }
 }
 
-mod parser {
+mod ast {
     use crate::source_info::SourceInfo;
-    use crate::token::{IntLiteral, Tok, TokKind};
+    use crate::token::IntLiteral;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct Expr {
@@ -346,21 +358,40 @@ mod parser {
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum ExprKind {
         IntLiteral(IntLiteral),
+        UnaryOp(Box<UnaryOp>),
         BinaryOp(Box<BinaryOp>),
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct UnaryOp {
+        pub operator: UnOpKind,
+        pub expr: Expr,
+    }
+
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub enum UnOpKind {
+        Ref,
+        Deref,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct BinaryOp {
-        pub operator: OpKind,
+        pub operator: BinOpKind,
         pub left: Expr,
         pub right: Expr,
     }
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-    pub enum OpKind {
+    pub enum BinOpKind {
         Add,
         Mult,
     }
+}
+
+mod parser {
+    use crate::ast::*;
+    use crate::source_info::SourceInfo;
+    use crate::token::{Tok, TokKind};
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct Parser {
@@ -401,7 +432,9 @@ mod parser {
     impl Parser {
         pub fn parse_expr(tokens: Vec<Tok>) -> Parse<Expr> {
             let mut parser = Self::new(tokens);
-            parser.expect_p("expr", Self::expr)
+            let expr = parser.expect_p("expr", Self::expr);
+            parser.expect_token(TokKind::EndOfInput)?;
+            expr
         }
 
         fn new(tokens: Vec<Tok>) -> Self {
@@ -411,17 +444,14 @@ mod parser {
             self.tokens
                 .get(self.index)
                 .map(|t| t.kind.clone())
-                .unwrap_or(TokKind::EndOfInput)
+                .expect("token")
         }
 
         fn peek_source(&self) -> SourceInfo {
             self.tokens
                 .get(self.index)
                 .map(|t| t.source_info)
-                .unwrap_or(SourceInfo {
-                    start: self.index,
-                    length: 0,
-                })
+                .expect("token")
         }
 
         fn advance(&mut self) {
@@ -449,7 +479,7 @@ mod parser {
         fn left_op_expr(
             &mut self,
             parse_operand: fn(&mut Self) -> ParseOpt<Expr>,
-            parse_operator: fn(&mut Self) -> ParseOpt<OpKind>,
+            parse_operator: fn(&mut Self) -> ParseOpt<BinOpKind>,
         ) -> ParseOpt<Expr> {
             if let Some(mut left) = parse_operand(self)? {
                 loop {
@@ -480,20 +510,41 @@ mod parser {
             self.left_op_expr(Self::mult_expr, |p| match p.peek() {
                 TokKind::Plus => {
                     p.advance();
-                    Ok(Some(OpKind::Add))
+                    Ok(Some(BinOpKind::Add))
                 }
                 _ => Ok(None),
             })
         }
 
         fn mult_expr(&mut self) -> ParseOpt<Expr> {
-            self.left_op_expr(Self::base_expr, |p| match p.peek() {
+            self.left_op_expr(Self::un_op_expr, |p| match p.peek() {
                 TokKind::Star => {
                     p.advance();
-                    Ok(Some(OpKind::Mult))
+                    Ok(Some(BinOpKind::Mult))
                 }
                 _ => Ok(None),
             })
+        }
+
+        fn un_op_expr(&mut self) -> ParseOpt<Expr> {
+            let op_source = self.peek_source();
+            let operator = match self.peek() {
+                TokKind::And => {
+                    self.advance();
+                    UnOpKind::Ref
+                }
+                TokKind::At => {
+                    self.advance();
+                    UnOpKind::Deref
+                }
+                _ => return self.base_expr(),
+            };
+            let expr = self.expect_p("expr", Self::un_op_expr)?;
+            let source_info = op_source.span(expr.source_info);
+            Ok(Some(Expr {
+                kind: ExprKind::UnaryOp(Box::new(UnaryOp { operator, expr })),
+                source_info,
+            }))
         }
 
         fn base_expr(&mut self) -> ParseOpt<Expr> {
@@ -521,9 +572,15 @@ mod parser {
     mod test {
         use super::*;
         use crate::lexer::Lexer;
+        use crate::token::IntLiteral;
 
         fn assert_expr_eq(str: &str, expected: Expr) {
             let result = Parser::parse_expr(Lexer::lex(str)).expect("expr");
+            assert_eq!(result, expected);
+        }
+
+        fn assert_err(str: &str, expected: ParseError) {
+            let result = Parser::parse_expr(Lexer::lex(str)).expect_err("parse error");
             assert_eq!(result, expected);
         }
 
@@ -533,7 +590,7 @@ mod parser {
                 "  1 + 2 ",
                 Expr {
                     kind: ExprKind::BinaryOp(Box::new(BinaryOp {
-                        operator: OpKind::Add,
+                        operator: BinOpKind::Add,
                         left: Expr {
                             kind: ExprKind::IntLiteral(IntLiteral { value: 1 }),
                             source_info: SourceInfo {
@@ -556,40 +613,115 @@ mod parser {
                 },
             )
         }
+
+        #[test]
+        fn missing_end_paren() {
+            assert_err(
+                "(123",
+                ParseError::expected_token(
+                    TokKind::ParRight,
+                    SourceInfo {
+                        start: 4,
+                        length: 0,
+                    },
+                ),
+            )
+        }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Interpreter {}
+mod runtime {
+    use crate::ast::{BinOpKind, Expr, ExprKind, UnOpKind};
 
-impl Interpreter {
-    fn new() -> Self {
-        Self {}
+    // FIXME
+    type Word = u128;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct RuntimeError {
+        kind: RunErrKind,
     }
-    fn eval_expr(&mut self, expr: Expr) -> Result<u128, ()> {
-        match expr.kind {
-            ExprKind::IntLiteral(payload) => Ok(payload.value),
-            ExprKind::BinaryOp(payload) => {
-                let left = self.eval_expr(payload.left)?;
-                let right = self.eval_expr(payload.right)?;
-                match payload.operator {
-                    OpKind::Add => Ok(left + right),
-                    OpKind::Mult => Ok(left * right),
-                }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum RunErrKind {}
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Interpreter {
+        sp: usize,
+        memory: Vec<Word>,
+    }
+
+    impl Interpreter {
+        pub fn new() -> Self {
+            let size = 128;
+            Self {
+                sp: size - 1,
+                memory: vec![0; size],
             }
-            _ => unimplemented!(),
+        }
+        pub fn poke(&mut self, index: usize, value: Word) {
+            self.memory[index] = value;
+        }
+        pub fn peek(&self, index: usize) -> Word {
+            self.memory[index]
+        }
+        pub fn push_stk(&mut self, value: Word) {
+            self.memory[self.sp] = value;
+            self.sp -= 1;
+        }
+        pub fn top_stk(&mut self) -> Word {
+            self.memory[self.sp + 1]
+        }
+        pub fn pop_stk(&mut self) -> Word {
+            self.sp += 1;
+            self.memory[self.sp]
+        }
+        pub fn eval_expr(&mut self, expr: Expr) {
+            match expr.kind {
+                ExprKind::IntLiteral(payload) => {
+                    self.push_stk(payload.value);
+                }
+                ExprKind::BinaryOp(payload) => {
+                    self.eval_expr(payload.left);
+                    self.eval_expr(payload.right);
+                    let right = self.pop_stk();
+                    let left = self.pop_stk();
+                    let val = match payload.operator {
+                        BinOpKind::Add => left + right,
+                        BinOpKind::Mult => left * right,
+                    };
+                    self.push_stk(val);
+                }
+                ExprKind::UnaryOp(payload) => match payload.operator {
+                    UnOpKind::Ref => unimplemented!(),
+                    UnOpKind::Deref => {
+                        self.eval_expr(payload.expr);
+                        let val = self.pop_stk();
+                        self.push_stk(self.peek(val as usize));
+                    }
+                },
+            };
+        }
+    }
+
+    #[cfg(test)]
+    mod test {
+        use super::*;
+        #[test]
+        fn push_pop() {
+            let mut interpreter = Interpreter::new();
+            interpreter.push_stk(123);
+            assert_eq!(interpreter.pop_stk(), 123);
         }
     }
 }
 
 use crate::lexer::Lexer;
-use crate::parser::{Expr, ExprKind, OpKind, Parser};
+use crate::parser::Parser;
+use crate::runtime::Interpreter;
 
 fn main() {
     println!("Hello, world!");
-    Interpreter::new()
-        .eval_expr(Parser::parse_expr(Lexer::lex("123")).unwrap())
-        .unwrap();
+    Interpreter::new().eval_expr(Parser::parse_expr(Lexer::lex("123")).unwrap());
 }
 
 #[cfg(test)]
@@ -597,10 +729,10 @@ mod test {
     use super::*;
 
     fn assert_expr_eq(str: &str, expected: u128) {
-        let result = Interpreter::new()
-            .eval_expr(Parser::parse_expr(Lexer::lex(str)).expect("expr"))
-            .expect("value");
-        assert_eq!(result, expected);
+        let mut interpreter = Interpreter::new();
+        interpreter.eval_expr(Parser::parse_expr(Lexer::lex(str)).expect("expr"));
+
+        assert_eq!(interpreter.pop_stk(), expected);
     }
 
     #[test]
