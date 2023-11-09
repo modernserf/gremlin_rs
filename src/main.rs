@@ -333,186 +333,228 @@ mod lexer {
     }
 }
 
-use crate::lexer::Lexer;
-use crate::source_info::SourceInfo;
-use crate::token::{IntLiteral, Tok, TokKind};
+mod parser {
+    use crate::source_info::SourceInfo;
+    use crate::token::{IntLiteral, Tok, TokKind};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Expr {
-    kind: ExprKind,
-    source_info: SourceInfo,
-}
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Expr {
+        pub kind: ExprKind,
+        pub source_info: SourceInfo,
+    }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ExprKind {
-    IntLiteral(IntLiteral),
-    BinaryOp(Box<BinaryOp>),
-}
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum ExprKind {
+        IntLiteral(IntLiteral),
+        BinaryOp(Box<BinaryOp>),
+    }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BinaryOp {
-    operator: OpKind,
-    left: Expr,
-    right: Expr,
-}
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct BinaryOp {
+        pub operator: OpKind,
+        pub left: Expr,
+        pub right: Expr,
+    }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum OpKind {
-    Add,
-    Mult,
-}
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub enum OpKind {
+        Add,
+        Mult,
+    }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Parser {
-    tokens: Vec<Tok>,
-    index: usize,
-}
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Parser {
+        tokens: Vec<Tok>,
+        index: usize,
+    }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ParseError {
-    kind: ParseErrKind,
-    source_info: SourceInfo,
-}
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct ParseError {
+        pub kind: ParseErrKind,
+        pub source_info: SourceInfo,
+    }
 
-impl ParseError {
-    fn expected_token(tok: TokKind, source_info: SourceInfo) -> Self {
-        Self {
-            kind: ParseErrKind::ExpectedToken(tok),
-            source_info,
+    impl ParseError {
+        pub fn expected_token(tok: TokKind, source_info: SourceInfo) -> Self {
+            Self {
+                kind: ParseErrKind::ExpectedToken(tok),
+                source_info,
+            }
         }
-    }
-    fn expected(name: &str, source_info: SourceInfo) -> Self {
-        Self {
-            kind: ParseErrKind::Expected(String::from(name)),
-            source_info,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ParseErrKind {
-    Expected(String),
-    ExpectedToken(TokKind),
-}
-
-type Parse<T> = Result<T, ParseError>;
-type ParseOpt<T> = Result<Option<T>, ParseError>;
-
-impl Parser {
-    pub fn parse_expr(tokens: Vec<Tok>) -> Parse<Expr> {
-        let mut parser = Self::new(tokens);
-        parser.expect_p("expr", Self::expr)
-    }
-
-    fn new(tokens: Vec<Tok>) -> Self {
-        Self { tokens, index: 0 }
-    }
-    fn peek(&self) -> TokKind {
-        self.tokens
-            .get(self.index)
-            .map(|t| t.kind.clone())
-            .unwrap_or(TokKind::EndOfInput)
-    }
-
-    fn peek_source(&self) -> SourceInfo {
-        self.tokens
-            .get(self.index)
-            .map(|t| t.source_info)
-            .unwrap_or(SourceInfo {
-                start: self.index,
-                length: 0,
-            })
-    }
-
-    fn advance(&mut self) {
-        self.index += 1
-    }
-
-    fn expect_p<T>(&mut self, name: &str, get_value: fn(&mut Self) -> ParseOpt<T>) -> Parse<T> {
-        let val = get_value(self);
-        match val {
-            Ok(Some(value)) => Ok(value),
-            Ok(None) => Err(ParseError::expected(name, self.peek_source())),
-            Err(e) => Err(e),
+        pub fn expected(name: &str, source_info: SourceInfo) -> Self {
+            Self {
+                kind: ParseErrKind::Expected(String::from(name)),
+                source_info,
+            }
         }
     }
 
-    fn expect_token(&mut self, tok: TokKind) -> Parse<()> {
-        if self.peek() == tok {
-            self.advance();
-            Ok(())
-        } else {
-            Err(ParseError::expected_token(tok, self.peek_source()))
-        }
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum ParseErrKind {
+        Expected(String),
+        ExpectedToken(TokKind),
     }
 
-    fn left_op_expr(
-        &mut self,
-        parse_operand: fn(&mut Self) -> ParseOpt<Expr>,
-        parse_operator: fn(&mut Self) -> ParseOpt<OpKind>,
-    ) -> ParseOpt<Expr> {
-        if let Some(mut left) = parse_operand(self)? {
-            loop {
-                if let Some(operator) = parse_operator(self)? {
-                    let right = self.expect_p("expr", parse_operand)?;
-                    let source_info = left.source_info.span(right.source_info);
-                    left = Expr {
-                        kind: ExprKind::BinaryOp(Box::new(BinaryOp {
-                            operator,
-                            left,
-                            right,
-                        })),
-                        source_info,
-                    };
-                } else {
-                    return Ok(Some(left));
+    type Parse<T> = Result<T, ParseError>;
+    type ParseOpt<T> = Result<Option<T>, ParseError>;
+
+    impl Parser {
+        pub fn parse_expr(tokens: Vec<Tok>) -> Parse<Expr> {
+            let mut parser = Self::new(tokens);
+            parser.expect_p("expr", Self::expr)
+        }
+
+        fn new(tokens: Vec<Tok>) -> Self {
+            Self { tokens, index: 0 }
+        }
+        fn peek(&self) -> TokKind {
+            self.tokens
+                .get(self.index)
+                .map(|t| t.kind.clone())
+                .unwrap_or(TokKind::EndOfInput)
+        }
+
+        fn peek_source(&self) -> SourceInfo {
+            self.tokens
+                .get(self.index)
+                .map(|t| t.source_info)
+                .unwrap_or(SourceInfo {
+                    start: self.index,
+                    length: 0,
+                })
+        }
+
+        fn advance(&mut self) {
+            self.index += 1
+        }
+
+        fn expect_p<T>(&mut self, name: &str, get_value: fn(&mut Self) -> ParseOpt<T>) -> Parse<T> {
+            let val = get_value(self);
+            match val {
+                Ok(Some(value)) => Ok(value),
+                Ok(None) => Err(ParseError::expected(name, self.peek_source())),
+                Err(e) => Err(e),
+            }
+        }
+
+        fn expect_token(&mut self, tok: TokKind) -> Parse<()> {
+            if self.peek() == tok {
+                self.advance();
+                Ok(())
+            } else {
+                Err(ParseError::expected_token(tok, self.peek_source()))
+            }
+        }
+
+        fn left_op_expr(
+            &mut self,
+            parse_operand: fn(&mut Self) -> ParseOpt<Expr>,
+            parse_operator: fn(&mut Self) -> ParseOpt<OpKind>,
+        ) -> ParseOpt<Expr> {
+            if let Some(mut left) = parse_operand(self)? {
+                loop {
+                    if let Some(operator) = parse_operator(self)? {
+                        let right = self.expect_p("expr", parse_operand)?;
+                        let source_info = left.source_info.span(right.source_info);
+                        left = Expr {
+                            kind: ExprKind::BinaryOp(Box::new(BinaryOp {
+                                operator,
+                                left,
+                                right,
+                            })),
+                            source_info,
+                        };
+                    } else {
+                        return Ok(Some(left));
+                    }
                 }
             }
+            Ok(None)
         }
-        Ok(None)
+
+        fn expr(&mut self) -> ParseOpt<Expr> {
+            self.add_expr()
+        }
+
+        fn add_expr(&mut self) -> ParseOpt<Expr> {
+            self.left_op_expr(Self::mult_expr, |p| match p.peek() {
+                TokKind::Plus => {
+                    p.advance();
+                    Ok(Some(OpKind::Add))
+                }
+                _ => Ok(None),
+            })
+        }
+
+        fn mult_expr(&mut self) -> ParseOpt<Expr> {
+            self.left_op_expr(Self::base_expr, |p| match p.peek() {
+                TokKind::Star => {
+                    p.advance();
+                    Ok(Some(OpKind::Mult))
+                }
+                _ => Ok(None),
+            })
+        }
+
+        fn base_expr(&mut self) -> ParseOpt<Expr> {
+            match self.peek() {
+                TokKind::ParLeft => {
+                    self.advance();
+                    let expr = self.expect_p("expr", Self::expr)?;
+                    self.expect_token(TokKind::ParRight)?;
+                    Ok(Some(expr))
+                }
+                TokKind::IntLiteral(payload) => {
+                    let source_info = self.peek_source();
+                    self.advance();
+                    Ok(Some(Expr {
+                        kind: ExprKind::IntLiteral(payload),
+                        source_info,
+                    }))
+                }
+                _ => Ok(None),
+            }
+        }
     }
 
-    fn expr(&mut self) -> ParseOpt<Expr> {
-        self.add_expr()
-    }
+    #[cfg(test)]
+    mod test {
+        use super::*;
+        use crate::lexer::Lexer;
 
-    fn add_expr(&mut self) -> ParseOpt<Expr> {
-        self.left_op_expr(Self::mult_expr, |p| match p.peek() {
-            TokKind::Plus => {
-                p.advance();
-                Ok(Some(OpKind::Add))
-            }
-            _ => Ok(None),
-        })
-    }
+        fn assert_expr_eq(str: &str, expected: Expr) {
+            let result = Parser::parse_expr(Lexer::lex(str)).expect("expr");
+            assert_eq!(result, expected);
+        }
 
-    fn mult_expr(&mut self) -> ParseOpt<Expr> {
-        self.left_op_expr(Self::base_expr, |p| match p.peek() {
-            TokKind::Star => {
-                p.advance();
-                Ok(Some(OpKind::Mult))
-            }
-            _ => Ok(None),
-        })
-    }
-
-    fn base_expr(&mut self) -> ParseOpt<Expr> {
-        match self.peek() {
-            TokKind::ParLeft => {
-                self.advance();
-                let expr = self.expect_p("expr", Self::expr)?;
-                self.expect_token(TokKind::ParRight)?;
-                Ok(Some(expr))
-            }
-            TokKind::IntLiteral(payload) => {
-                let source_info = self.peek_source();
-                self.advance();
-                Ok(Some(Expr {
-                    kind: ExprKind::IntLiteral(payload),
-                    source_info,
-                }))
-            }
-            _ => Ok(None),
+        #[test]
+        fn parse_op_expr() {
+            assert_expr_eq(
+                "  1 + 2 ",
+                Expr {
+                    kind: ExprKind::BinaryOp(Box::new(BinaryOp {
+                        operator: OpKind::Add,
+                        left: Expr {
+                            kind: ExprKind::IntLiteral(IntLiteral { value: 1 }),
+                            source_info: SourceInfo {
+                                start: 2,
+                                length: 1,
+                            },
+                        },
+                        right: Expr {
+                            kind: ExprKind::IntLiteral(IntLiteral { value: 2 }),
+                            source_info: SourceInfo {
+                                start: 6,
+                                length: 1,
+                            },
+                        },
+                    })),
+                    source_info: SourceInfo {
+                        start: 2,
+                        length: 5,
+                    },
+                },
+            )
         }
     }
 }
@@ -539,6 +581,9 @@ impl Interpreter {
         }
     }
 }
+
+use crate::lexer::Lexer;
+use crate::parser::{Expr, ExprKind, OpKind, Parser};
 
 fn main() {
     println!("Hello, world!");
