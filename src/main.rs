@@ -878,7 +878,13 @@ mod runtime {
                     self.push_stk(val);
                 }
                 ExprKind::UnaryOp(payload) => match payload.operator {
-                    UnOpKind::Ref => unimplemented!(),
+                    UnOpKind::Ref => match &payload.expr.kind {
+                        ExprKind::Ident(ident) => {
+                            let addr = self.get_binding_addr(&ident.value);
+                            self.push_stk(addr as Word);
+                        }
+                        _ => panic!("expected place expr"),
+                    },
                     UnOpKind::Deref => {
                         self.eval_expr(&payload.expr);
                         let val = self.pop_stk();
@@ -971,8 +977,8 @@ mod test {
         assert_expr_eq(
             "
             let a := 123
-            let c := 789
             let b := 456
+            let c := 789
             b
             ",
             456,
@@ -980,14 +986,23 @@ mod test {
     }
 
     #[test]
-    fn deref() {
-        let mut interpreter = Interpreter::new();
-        let addr = 3;
-        let value = 23;
-        interpreter.poke(3, 23);
-        interpreter
-            .eval_body(&Parser::parse_body(Lexer::lex(&format!("@{}", addr))).expect("expr"));
-
-        assert_eq!(interpreter.pop_stk(), value);
+    fn ref_deref() {
+        assert_expr_eq(
+            "
+                let foo := 123
+                let ptr := &foo
+                @ptr
+            ",
+            123,
+        );
+        assert_expr_eq(
+            "
+                # stack ptr goes high to low
+                let foo_1 := 456
+                let foo_0 := 123
+                @(&foo_0 + 1) 
+            ",
+            123,
+        );
     }
 }
