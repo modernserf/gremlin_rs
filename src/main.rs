@@ -178,7 +178,7 @@ mod token {
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
     pub struct Identifier {
-        value: String,
+        pub value: String,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -256,6 +256,13 @@ mod lexer {
                 ')' => self.adv_next(TokKind::ParRight),
                 '&' => self.adv_next(TokKind::And),
                 '@' => self.adv_next(TokKind::At),
+                ':' => {
+                    self.advance();
+                    match self.peek() {
+                        '=' => self.adv_next(TokKind::ColonEq),
+                        _ => TokKind::Colon,
+                    }
+                }
                 _ => self.adv_next(TokKind::Invalid),
             }
         }
@@ -346,8 +353,49 @@ mod lexer {
 }
 
 mod ast {
-    use crate::source_info::SourceInfo;
+    use crate::source_info::{self, SourceInfo};
     use crate::token::IntLiteral;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Stmt {
+        pub kind: StmtKind,
+        pub source_info: SourceInfo,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum StmtKind {
+        Let(Box<LetStmt>),
+        Assign(Box<AssignStmt>),
+        Expr(Box<Expr>),
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct LetStmt {
+        pub binding: Bind,
+        pub expr: Expr,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct AssignStmt {
+        pub target: Expr,
+        pub expr: Expr,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Bind {
+        pub kind: BindKind,
+        pub source_info: SourceInfo,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum BindKind {
+        Ident(IdentBind),
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct IdentBind {
+        pub value: String,
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct Expr {
@@ -357,9 +405,15 @@ mod ast {
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum ExprKind {
-        IntLiteral(IntLiteral),
+        Int(IntLiteral),
+        Ident(IdentExpr),
         UnaryOp(Box<UnaryOp>),
         BinaryOp(Box<BinaryOp>),
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct IdentExpr {
+        pub value: String,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -389,9 +443,9 @@ mod ast {
 }
 
 mod parser {
-    use crate::ast::*;
     use crate::source_info::SourceInfo;
     use crate::token::{Tok, TokKind};
+    use crate::{ast::*, source_info};
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct Parser {
@@ -430,12 +484,19 @@ mod parser {
     type ParseOpt<T> = Result<Option<T>, ParseError>;
 
     impl Parser {
-        pub fn parse_expr(tokens: Vec<Tok>) -> Parse<Expr> {
+        pub fn parse_body(tokens: Vec<Tok>) -> Parse<Vec<Stmt>> {
             let mut parser = Self::new(tokens);
-            let expr = parser.expect_p("expr", Self::expr);
+            let body = parser.body()?;
             parser.expect_token(TokKind::EndOfInput)?;
-            expr
+            Ok(body)
         }
+
+        // pub fn parse_expr(tokens: Vec<Tok>) -> Parse<Expr> {
+        //     let mut parser = Self::new(tokens);
+        //     let expr = parser.expect_p("expr", Self::expr)?;
+        //     parser.expect_token(TokKind::EndOfInput)?;
+        //     Ok(expr)
+        // }
 
         fn new(tokens: Vec<Tok>) -> Self {
             Self { tokens, index: 0 }
@@ -502,6 +563,63 @@ mod parser {
             Ok(None)
         }
 
+        fn repeat<T>(&mut self, parse_item: fn(&mut Self) -> ParseOpt<T>) -> Parse<Vec<T>> {
+            let mut output: Vec<T> = vec![];
+            loop {
+                if let Some(item) = parse_item(self)? {
+                    output.push(item);
+                } else {
+                    return Ok(output);
+                }
+            }
+        }
+
+        fn body(&mut self) -> Parse<Vec<Stmt>> {
+            self.repeat(Self::stmt)
+        }
+
+        fn stmt(&mut self) -> ParseOpt<Stmt> {
+            let start_source = self.peek_source();
+            match self.peek() {
+                TokKind::Let => {
+                    self.advance();
+                    let binding = self.expect_p("binding", Self::binding)?;
+                    // TODO: type assertion
+                    self.expect_token(TokKind::ColonEq)?;
+                    let expr = self.expect_p("expr", Self::expr)?;
+                    let source_info = start_source.span(expr.source_info);
+                    Ok(Some(Stmt {
+                        kind: StmtKind::Let(Box::new(LetStmt { binding, expr })),
+                        source_info: source_info,
+                    }))
+                }
+                _ => {
+                    if let Some(expr) = self.expr()? {
+                        if self.peek() == TokKind::ColonEq {
+                            self.advance();
+                            let value = self.expect_p("expr", Self::expr)?;
+                            let source_info = start_source.span(value.source_info);
+                            Ok(Some(Stmt {
+                                kind: StmtKind::Assign(Box::new(AssignStmt {
+                                    target: expr,
+                                    expr: value,
+                                })),
+                                source_info,
+                            }))
+                        } else {
+                            let source_info = expr.source_info;
+                            Ok(Some(Stmt {
+                                kind: StmtKind::Expr(Box::new(expr)),
+                                source_info,
+                            }))
+                        }
+                    } else {
+                        Ok(None)
+                    }
+                }
+            }
+        }
+
         fn expr(&mut self) -> ParseOpt<Expr> {
             self.add_expr()
         }
@@ -559,7 +677,33 @@ mod parser {
                     let source_info = self.peek_source();
                     self.advance();
                     Ok(Some(Expr {
-                        kind: ExprKind::IntLiteral(payload),
+                        kind: ExprKind::Int(payload),
+                        source_info,
+                    }))
+                }
+                TokKind::Identifier(payload) => {
+                    let source_info = self.peek_source();
+                    self.advance();
+                    Ok(Some(Expr {
+                        kind: ExprKind::Ident(IdentExpr {
+                            value: payload.value,
+                        }),
+                        source_info,
+                    }))
+                }
+                _ => Ok(None),
+            }
+        }
+
+        fn binding(&mut self) -> ParseOpt<Bind> {
+            match self.peek() {
+                TokKind::Identifier(payload) => {
+                    let source_info = self.peek_source();
+                    self.advance();
+                    Ok(Some(Bind {
+                        kind: BindKind::Ident(IdentBind {
+                            value: payload.value,
+                        }),
                         source_info,
                     }))
                 }
@@ -575,12 +719,19 @@ mod parser {
         use crate::token::IntLiteral;
 
         fn assert_expr_eq(str: &str, expected: Expr) {
-            let result = Parser::parse_expr(Lexer::lex(str)).expect("expr");
-            assert_eq!(result, expected);
+            let result = Parser::parse_body(Lexer::lex(str)).expect("expr");
+            let source_info = expected.source_info;
+            assert_eq!(
+                result,
+                vec![Stmt {
+                    kind: StmtKind::Expr(Box::new(expected),),
+                    source_info
+                }]
+            );
         }
 
         fn assert_err(str: &str, expected: ParseError) {
-            let result = Parser::parse_expr(Lexer::lex(str)).expect_err("parse error");
+            let result = Parser::parse_body(Lexer::lex(str)).expect_err("parse error");
             assert_eq!(result, expected);
         }
 
@@ -592,14 +743,14 @@ mod parser {
                     kind: ExprKind::BinaryOp(Box::new(BinaryOp {
                         operator: BinOpKind::Add,
                         left: Expr {
-                            kind: ExprKind::IntLiteral(IntLiteral { value: 1 }),
+                            kind: ExprKind::Int(IntLiteral { value: 1 }),
                             source_info: SourceInfo {
                                 start: 2,
                                 length: 1,
                             },
                         },
                         right: Expr {
-                            kind: ExprKind::IntLiteral(IntLiteral { value: 2 }),
+                            kind: ExprKind::Int(IntLiteral { value: 2 }),
                             source_info: SourceInfo {
                                 start: 6,
                                 length: 1,
@@ -631,7 +782,10 @@ mod parser {
 }
 
 mod runtime {
-    use crate::ast::{BinOpKind, Expr, ExprKind, UnOpKind};
+    use crate::ast::{
+        BinOpKind, Bind, BindKind, Expr, ExprKind, LetStmt, Stmt, StmtKind, UnOpKind,
+    };
+    use std::collections::HashMap;
 
     // FIXME
     type Word = u128;
@@ -648,6 +802,7 @@ mod runtime {
     pub struct Interpreter {
         sp: usize,
         memory: Vec<Word>,
+        bindings: HashMap<String, usize>,
     }
 
     impl Interpreter {
@@ -656,6 +811,7 @@ mod runtime {
             Self {
                 sp: size - 1,
                 memory: vec![0; size],
+                bindings: HashMap::new(),
             }
         }
         pub fn poke(&mut self, index: usize, value: Word) {
@@ -675,14 +831,44 @@ mod runtime {
             self.sp += 1;
             self.memory[self.sp]
         }
-        pub fn eval_expr(&mut self, expr: Expr) {
-            match expr.kind {
-                ExprKind::IntLiteral(payload) => {
+        pub fn eval_body(&mut self, body: &[Stmt]) {
+            for stmt in body {
+                self.eval_stmt(stmt);
+            }
+        }
+        fn set_binding(&mut self, binding: &Bind) {
+            match &binding.kind {
+                BindKind::Ident(ident) => {
+                    self.bindings.insert(ident.value.to_string(), self.sp);
+                }
+            }
+        }
+        fn get_binding_addr(&mut self, key: &str) -> usize {
+            *self.bindings.get(key).expect("binding")
+        }
+        fn eval_stmt(&mut self, stmt: &Stmt) {
+            match &stmt.kind {
+                StmtKind::Expr(expr) => self.eval_expr(&expr),
+                StmtKind::Let(let_stmt) => {
+                    self.set_binding(&let_stmt.binding);
+                    self.eval_expr(&let_stmt.expr);
+                }
+                _ => unimplemented!(),
+            }
+        }
+        fn eval_expr(&mut self, expr: &Expr) {
+            match &expr.kind {
+                ExprKind::Int(payload) => {
                     self.push_stk(payload.value);
                 }
+                ExprKind::Ident(ident) => {
+                    let addr = self.get_binding_addr(&ident.value);
+                    let value = self.peek(addr);
+                    self.push_stk(value);
+                }
                 ExprKind::BinaryOp(payload) => {
-                    self.eval_expr(payload.left);
-                    self.eval_expr(payload.right);
+                    self.eval_expr(&payload.left);
+                    self.eval_expr(&payload.right);
                     let right = self.pop_stk();
                     let left = self.pop_stk();
                     let val = match payload.operator {
@@ -694,11 +880,12 @@ mod runtime {
                 ExprKind::UnaryOp(payload) => match payload.operator {
                     UnOpKind::Ref => unimplemented!(),
                     UnOpKind::Deref => {
-                        self.eval_expr(payload.expr);
+                        self.eval_expr(&payload.expr);
                         let val = self.pop_stk();
                         self.push_stk(self.peek(val as usize));
                     }
                 },
+                _ => unimplemented!(),
             };
         }
     }
@@ -721,7 +908,7 @@ use crate::runtime::Interpreter;
 
 fn main() {
     println!("Hello, world!");
-    Interpreter::new().eval_expr(Parser::parse_expr(Lexer::lex("123")).unwrap());
+    Interpreter::new().eval_body(&Parser::parse_body(Lexer::lex("123")).unwrap());
 }
 
 #[cfg(test)]
@@ -730,7 +917,7 @@ mod test {
 
     fn assert_expr_eq(str: &str, expected: u128) {
         let mut interpreter = Interpreter::new();
-        interpreter.eval_expr(Parser::parse_expr(Lexer::lex(str)).expect("expr"));
+        interpreter.eval_body(&Parser::parse_body(Lexer::lex(str)).expect("expr"));
 
         assert_eq!(interpreter.pop_stk(), expected);
     }
@@ -777,5 +964,30 @@ mod test {
     #[test]
     fn add_mult_pemdas() {
         assert_expr_eq("5 + 4 * 2", 13);
+    }
+
+    #[test]
+    fn identifiers() {
+        assert_expr_eq(
+            "
+            let a := 123
+            let c := 789
+            let b := 456
+            b
+            ",
+            456,
+        )
+    }
+
+    #[test]
+    fn deref() {
+        let mut interpreter = Interpreter::new();
+        let addr = 3;
+        let value = 23;
+        interpreter.poke(3, 23);
+        interpreter
+            .eval_body(&Parser::parse_body(Lexer::lex(&format!("@{}", addr))).expect("expr"));
+
+        assert_eq!(interpreter.pop_stk(), value);
     }
 }
