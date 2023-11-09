@@ -186,6 +186,10 @@ impl Lexer {
         }
         self.index += 1;
     }
+    fn adv_next(&mut self, tok: TokKind) -> TokKind {
+        self.advance();
+        tok
+    }
     fn next(&mut self) -> TokKind {
         match self.peek() {
             '\0' => TokKind::EndOfInput,
@@ -193,10 +197,10 @@ impl Lexer {
             ' ' | '\t' | '\n' => self.whitespace(),
             '0'..='9' => self.number(),
             'a'..='z' | 'A'..='Z' => self.identifier_or_keyword(),
-            '+' => {
-                self.advance();
-                TokKind::Plus
-            }
+            '+' => self.adv_next(TokKind::Plus),
+            '*' => self.adv_next(TokKind::Star),
+            '(' => self.adv_next(TokKind::ParLeft),
+            ')' => self.adv_next(TokKind::ParRight),
             _ => panic!("unknown char"),
         }
     }
@@ -231,7 +235,7 @@ impl Lexer {
         let mut str = String::new();
         loop {
             let ch = self.peek();
-            if ch.is_alphanumeric() || ch == '\'' || ch == '_' {
+            if ch.is_alphanumeric() || ch == '_' {
                 self.advance();
                 str.push(ch);
             } else {
@@ -261,7 +265,8 @@ struct BinaryOp {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum OpKind {
-    Plus,
+    Add,
+    Mult,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -295,7 +300,7 @@ enum ParseErrKind {
 }
 
 type Parse<T> = Result<T, ParseError>;
-pub type ParseOpt<T> = Result<Option<T>, ParseError>;
+type ParseOpt<T> = Result<Option<T>, ParseError>;
 
 fn expect<T>(name: &str, value: ParseOpt<T>) -> Parse<T> {
     match value {
@@ -357,7 +362,11 @@ impl Parser {
         match self.peek() {
             TokKind::Plus => {
                 self.advance();
-                Ok(Some(OpKind::Plus))
+                Ok(Some(OpKind::Add))
+            }
+            TokKind::Star => {
+                self.advance();
+                Ok(Some(OpKind::Mult))
             }
             _ => Ok(None),
         }
@@ -365,6 +374,12 @@ impl Parser {
 
     fn base_expr(&mut self) -> ParseOpt<Expr> {
         match self.peek() {
+            TokKind::ParLeft => {
+                self.advance();
+                let expr = expect("expr", self.expr())?;
+                self.expect_token(TokKind::ParRight)?;
+                Ok(Some(expr))
+            }
             TokKind::IntLiteral(payload) => {
                 self.advance();
                 Ok(Some(Expr {
@@ -390,7 +405,8 @@ impl Interpreter {
                 let left = self.eval_expr(payload.left)?;
                 let right = self.eval_expr(payload.right)?;
                 match payload.operator {
-                    OpKind::Plus => Ok(left + right),
+                    OpKind::Add => Ok(left + right),
+                    OpKind::Mult => Ok(left * right),
                 }
             }
             _ => unimplemented!(),
@@ -448,5 +464,15 @@ mod test {
     #[test]
     fn addition() {
         assert_expr_eq("1 + 2 + 3", 6);
+    }
+
+    #[test]
+    fn add_mult() {
+        assert_expr_eq("2 * 4 + 5", 13);
+    }
+
+    #[test]
+    fn add_mult_paren() {
+        assert_expr_eq("2 * (4 + 5)", 18);
     }
 }
