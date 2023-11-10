@@ -99,6 +99,12 @@ impl Compiler {
         match &stmt.kind {
             StmtKind::Let(payload) => {
                 let res = self.expr(&payload.expr)?;
+
+                if let Some(ty) = &payload.ty {
+                    let type_id = self.get_type_id(ty)?;
+                    type_id.check(res.type_id, payload.expr.source_info)?;
+                }
+
                 self.init_local(&payload.binding, res.type_id)?;
             }
             StmtKind::Assign(payload) => {
@@ -394,6 +400,20 @@ mod test {
 
         check_err(
             "let x := false; x + 1",
+            CompileError {
+                kind: CmpErrKind::TypeError {
+                    expected: INT_TYPE,
+                    received: BOOL_TYPE,
+                },
+                source_info: SourceInfo {
+                    start: 16,
+                    length: 1,
+                },
+            },
+        );
+
+        check_err(
+            "let x : bool := 1",
             CompileError {
                 kind: CmpErrKind::TypeError {
                     expected: INT_TYPE,

@@ -19,6 +19,7 @@ pub enum StmtKind {
 pub struct LetStmt {
     pub binding: Bind,
     pub expr: Expr,
+    pub ty: Option<TyExpr>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

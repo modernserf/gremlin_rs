@@ -132,12 +132,20 @@ impl Parser {
             TokKind::Let => {
                 self.advance();
                 let binding = self.expect_p("binding", Self::binding)?;
-                // TODO: type assertion
+
+                let ty = match self.peek() {
+                    TokKind::Colon => {
+                        self.advance();
+                        Some(self.expect_p("type expr", Self::type_expr)?)
+                    }
+                    _ => None,
+                };
+
                 self.expect_token(TokKind::ColonEq)?;
                 let expr = self.expect_p("expr", Self::expr)?;
                 let source_info = start_source.span(expr.source_info);
                 Ok(Some(Stmt {
-                    kind: StmtKind::Let(Box::new(LetStmt { binding, expr })),
+                    kind: StmtKind::Let(Box::new(LetStmt { binding, expr, ty })),
                     source_info,
                 }))
             }
