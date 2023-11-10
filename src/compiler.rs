@@ -1,42 +1,9 @@
 use crate::{
     ast::{BinOpKind, Bind, BindKind, Expr, ExprKind, Stmt, StmtKind, UnOpKind},
+    ir::{IRDest, IRKind, IRSrc, Word, IR},
     source_info::SourceInfo,
 };
 use std::collections::HashMap;
-
-pub type Word = u32;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IR {
-    kind: IRKind,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum IRKind {
-    // pop an address from the stack & push the value at that address
-    // Deref,
-    Move(IRDest, IRSrc),
-    Add(IRDest, IRSrc),
-    Mult(IRDest, IRSrc),
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum IRDest {
-    PushStack,
-    R0,
-    StackOffset(Word),
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum IRSrc {
-    Immediate(Word),
-    Address(Word),
-    StackOffset(Word),
-    R0,
-    AtR0,
-    StackPointer,
-    PopStack,
-}
 
 pub type Compile<T> = Result<T, CompileError>;
 
@@ -205,80 +172,6 @@ impl Compiler {
                 let stack_offset = self.current_frame_offset - scope_rec.frame_offset;
                 debug_assert!(stack_offset >= 0);
                 Ok(stack_offset as Word)
-            }
-        }
-    }
-}
-
-pub struct IRRuntime {
-    r0: Word,
-    sp: Word,
-    ip: usize,
-    memory: Vec<Word>,
-}
-
-impl IRRuntime {
-    pub fn eval(program: &[IR]) -> Word {
-        let mut runtime = Self::new(128);
-        runtime.run_program(program);
-        runtime.memory[runtime.sp as usize]
-    }
-    fn new(memory_size: Word) -> Self {
-        Self {
-            r0: 0,
-            sp: memory_size,
-            ip: 0,
-            memory: vec![0; memory_size as usize],
-        }
-    }
-    fn run_program(&mut self, program: &[IR]) {
-        while self.ip < program.len() {
-            let instruction = &program[self.ip];
-            self.ip += 1;
-            self.run_instr(instruction);
-        }
-    }
-    fn run_instr(&mut self, instr: &IR) {
-        match &instr.kind {
-            IRKind::Move(dest, src) => {
-                let value = self.get_src(*src);
-                let dest_ptr = self.get_dest(*dest);
-                *dest_ptr = value;
-            }
-            IRKind::Add(dest, src) => {
-                let value = self.get_src(*src);
-                let dest_ptr = self.get_dest(*dest);
-                *dest_ptr += value;
-            }
-            IRKind::Mult(dest, src) => {
-                let value = self.get_src(*src);
-                let dest_ptr = self.get_dest(*dest);
-                *dest_ptr *= value;
-            }
-        }
-    }
-    fn get_src(&mut self, src: IRSrc) -> Word {
-        match src {
-            IRSrc::Immediate(value) => value,
-            IRSrc::Address(addr) => self.memory[addr as usize],
-            IRSrc::R0 => self.r0,
-            IRSrc::AtR0 => self.memory[self.r0 as usize],
-            IRSrc::StackPointer => self.sp,
-            IRSrc::StackOffset(offset) => self.memory[(self.sp + offset) as usize],
-            IRSrc::PopStack => {
-                let value = self.memory[self.sp as usize];
-                self.sp += 1;
-                value
-            }
-        }
-    }
-    fn get_dest<'a>(&'a mut self, dest: IRDest) -> &'a mut Word {
-        match dest {
-            IRDest::R0 => &mut self.r0,
-            IRDest::StackOffset(offset) => &mut self.memory[(self.sp + offset) as usize],
-            IRDest::PushStack => {
-                self.sp -= 1;
-                &mut self.memory[self.sp as usize]
             }
         }
     }

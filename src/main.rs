@@ -32,19 +32,21 @@ Comment = "#" ... eol
 
 mod ast;
 mod compiler;
+mod ir;
 mod lexer;
 mod parser;
+mod runtime;
 mod source_info;
 mod token;
 
 use crate::compiler::Compiler;
-use crate::compiler::IRRuntime;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
+use crate::runtime::Runtime;
 
 fn main() {
     let program = "123";
-    IRRuntime::eval(
+    Runtime::eval(
         &Compiler::compile(&Parser::parse_body(Lexer::lex(&program)).expect("expr")).expect("ir"),
     );
 }
@@ -52,12 +54,12 @@ fn main() {
 #[cfg(test)]
 mod test {
     use crate::compiler::Compiler;
-    use crate::compiler::IRRuntime;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
+    use crate::runtime::Runtime;
 
     fn assert_expr_eq(str: &str, expected: u32) {
-        let result = IRRuntime::eval(
+        let result = Runtime::eval(
             &Compiler::compile(&Parser::parse_body(Lexer::lex(str)).expect("expr")).expect("ir"),
         );
         assert_eq!(result, expected);
