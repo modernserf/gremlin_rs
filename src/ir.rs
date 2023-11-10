@@ -11,6 +11,9 @@ pub enum IRKind {
     LoadAddress(IRDest, IRSrc),
     Add(IRDest, IRSrc),
     Mult(IRDest, IRSrc),
+    And(IRDest, IRSrc),
+    Or(IRDest, IRSrc),
+    Not(IRDest, IRSrc),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

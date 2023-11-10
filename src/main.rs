@@ -155,4 +155,14 @@ mod test {
             3,
         );
     }
+
+    #[test]
+    fn bools() {
+        assert_expr_eq("false", 0);
+        assert_expr_eq("true", 1);
+
+        assert_expr_eq("true and false", 0);
+        assert_expr_eq("true or false", 1);
+        assert_expr_eq("not false", 1);
+    }
 }

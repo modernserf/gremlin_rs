@@ -176,7 +176,27 @@ impl Parser {
     }
 
     fn expr(&mut self) -> ParseOpt<Expr> {
-        self.add_expr()
+        self.or_expr()
+    }
+
+    fn or_expr(&mut self) -> ParseOpt<Expr> {
+        self.left_op_expr(Self::and_expr, |p| match p.peek() {
+            TokKind::Or => {
+                p.advance();
+                Ok(Some(BinOpKind::Or))
+            }
+            _ => Ok(None),
+        })
+    }
+
+    fn and_expr(&mut self) -> ParseOpt<Expr> {
+        self.left_op_expr(Self::add_expr, |p| match p.peek() {
+            TokKind::And => {
+                p.advance();
+                Ok(Some(BinOpKind::And))
+            }
+            _ => Ok(None),
+        })
     }
 
     fn add_expr(&mut self) -> ParseOpt<Expr> {
@@ -202,13 +222,17 @@ impl Parser {
     fn un_op_expr(&mut self) -> ParseOpt<Expr> {
         let op_source = self.peek_source();
         let operator = match self.peek() {
-            TokKind::And => {
+            TokKind::Ampersand => {
                 self.advance();
                 UnOpKind::Ref
             }
             TokKind::At => {
                 self.advance();
                 UnOpKind::Deref
+            }
+            TokKind::Not => {
+                self.advance();
+                UnOpKind::Not
             }
             _ => return self.base_expr(),
         };
@@ -243,6 +267,22 @@ impl Parser {
                     kind: ExprKind::Ident(IdentExpr {
                         value: payload.value,
                     }),
+                    source_info,
+                }))
+            }
+            TokKind::True => {
+                let source_info = self.peek_source();
+                self.advance();
+                Ok(Some(Expr {
+                    kind: ExprKind::True,
+                    source_info,
+                }))
+            }
+            TokKind::False => {
+                let source_info = self.peek_source();
+                self.advance();
+                Ok(Some(Expr {
+                    kind: ExprKind::False,
                     source_info,
                 }))
             }

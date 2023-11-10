@@ -54,6 +54,8 @@ pub enum ExprKind {
     Ident(IdentExpr),
     UnaryOp(Box<UnaryOp>),
     BinaryOp(Box<BinaryOp>),
+    True,
+    False,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,6 +73,7 @@ pub struct UnaryOp {
 pub enum UnOpKind {
     Ref,
     Deref,
+    Not,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,4 +87,6 @@ pub struct BinaryOp {
 pub enum BinOpKind {
     Add,
     Mult,
+    And,
+    Or,
 }

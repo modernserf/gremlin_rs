@@ -64,7 +64,7 @@ impl Lexer {
             '*' => self.adv_next(TokKind::Star),
             '(' => self.adv_next(TokKind::ParLeft),
             ')' => self.adv_next(TokKind::ParRight),
-            '&' => self.adv_next(TokKind::And),
+            '&' => self.adv_next(TokKind::Ampersand),
             '@' => self.adv_next(TokKind::At),
             ':' => {
                 self.advance();

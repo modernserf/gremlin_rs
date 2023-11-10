@@ -50,6 +50,21 @@ impl Runtime {
                 let dest_ptr = self.get_dest(*dest);
                 *dest_ptr *= value;
             }
+            IRKind::Not(dest, src) => {
+                let value = self.get_src(*src);
+                let dest_ptr = self.get_dest(*dest);
+                *dest_ptr = value ^ 1;
+            }
+            IRKind::And(dest, src) => {
+                let value = self.get_src(*src);
+                let dest_ptr = self.get_dest(*dest);
+                *dest_ptr &= value;
+            }
+            IRKind::Or(dest, src) => {
+                let value = self.get_src(*src);
+                let dest_ptr = self.get_dest(*dest);
+                *dest_ptr |= value;
+            }
         }
     }
     fn get_src(&mut self, src: IRSrc) -> Word {
@@ -75,10 +90,7 @@ impl Runtime {
     fn get_dest<'a>(&'a mut self, dest: IRDest) -> &'a mut Word {
         match dest {
             IRDest::R0 => &mut self.r0,
-            IRDest::StackOffset(offset) => {
-                println!("sp: {} offset: {}", self.sp, offset);
-                &mut self.memory[(self.sp + offset) as usize]
-            }
+            IRDest::StackOffset(offset) => &mut self.memory[(self.sp + offset) as usize],
             IRDest::PushStack => {
                 self.sp -= 1;
                 &mut self.memory[self.sp as usize]

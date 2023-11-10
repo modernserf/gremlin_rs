@@ -91,6 +91,18 @@ impl Compiler {
                 });
                 self.inc_frame_offset();
             }
+            ExprKind::True => {
+                self.program.push(IR {
+                    kind: IRKind::Move(IRDest::PushStack, IRSrc::Immediate(1)),
+                });
+                self.inc_frame_offset();
+            }
+            ExprKind::False => {
+                self.program.push(IR {
+                    kind: IRKind::Move(IRDest::PushStack, IRSrc::Immediate(0)),
+                });
+                self.inc_frame_offset();
+            }
             ExprKind::Ident(payload) => {
                 let stack_offset = self.get_stack_offset(&payload.value, expr.source_info)?;
                 self.program.push(IR {
@@ -116,6 +128,12 @@ impl Compiler {
                         });
                         self.inc_frame_offset();
                     }
+                    UnOpKind::Not => {
+                        self.expr(&payload.expr)?;
+                        self.program.push(IR {
+                            kind: IRKind::Not(IRDest::StackOffset(0), IRSrc::StackOffset(0)),
+                        });
+                    }
                 };
             }
             ExprKind::BinaryOp(payload) => {
@@ -130,6 +148,16 @@ impl Compiler {
                     BinOpKind::Mult => {
                         self.program.push(IR {
                             kind: IRKind::Mult(IRDest::StackOffset(0), IRSrc::PopStack),
+                        });
+                    }
+                    BinOpKind::And => {
+                        self.program.push(IR {
+                            kind: IRKind::And(IRDest::StackOffset(0), IRSrc::PopStack),
+                        });
+                    }
+                    BinOpKind::Or => {
+                        self.program.push(IR {
+                            kind: IRKind::Or(IRDest::StackOffset(0), IRSrc::PopStack),
                         });
                     }
                 }

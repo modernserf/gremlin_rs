@@ -11,34 +11,19 @@ pub struct Tok {
 pub enum TokKind {
     // keywords
     Let,
-    While,
-    Do,
-    End,
-    Return,
-    Func,
-    Struct,
-    If,
-    Then,
-    Else,
-    As,
     True,
     False,
+    And,
+    Or,
+    Not,
     // punctuation
     Colon,
     ColonEq,
     ParLeft,
     ParRight,
-    Arrow,
-    Semi,
-    AngleLeft,
-    AngleRight,
-    And,
-    Dot,
-    Comma,
+    Ampersand,
     Plus,
-    Minus,
     Star,
-    Slash,
     At,
     Identifier(Identifier),
     IntLiteral(IntLiteral),
@@ -57,14 +42,6 @@ impl TokKind {
             .cloned()
             .unwrap_or(TokKind::Identifier(Identifier { value: str }))
     }
-
-    fn to_keyword(&self) -> Option<String> {
-        KEYWORD_TOKENS
-            .with(|pair| pair.clone())
-            .1
-            .get(self)
-            .map(|s| s.to_string())
-    }
 }
 
 type KeywordTokens = Rc<(HashMap<String, TokKind>, HashMap<TokKind, String>)>;
@@ -72,17 +49,11 @@ type KeywordTokens = Rc<(HashMap<String, TokKind>, HashMap<TokKind, String>)>;
 fn keyword_tokens() -> KeywordTokens {
     let pairs = vec![
         (TokKind::Let, "let"),
-        (TokKind::While, "while"),
-        (TokKind::Func, "func"),
-        (TokKind::Struct, "struct"),
-        (TokKind::Do, "do"),
-        (TokKind::Return, "return"),
-        (TokKind::If, "if"),
-        (TokKind::Then, "then"),
-        (TokKind::Else, "else"),
-        (TokKind::End, "end"),
         (TokKind::True, "true"),
         (TokKind::False, "false"),
+        (TokKind::And, "and"),
+        (TokKind::Or, "or"),
+        (TokKind::Not, "not"),
     ];
 
     Rc::new((
