@@ -66,6 +66,7 @@ impl Lexer {
             ')' => self.adv_next(TokKind::ParRight),
             '&' => self.adv_next(TokKind::Ampersand),
             '@' => self.adv_next(TokKind::At),
+            ';' => self.adv_next(TokKind::Semicolon),
             ':' => {
                 self.advance();
                 match self.peek() {

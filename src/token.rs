@@ -17,6 +17,7 @@ pub enum TokKind {
     Or,
     Not,
     // punctuation
+    Semicolon,
     Colon,
     ColonEq,
     ParLeft,

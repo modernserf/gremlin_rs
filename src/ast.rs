@@ -12,6 +12,7 @@ pub enum StmtKind {
     Let(Box<LetStmt>),
     Assign(Box<AssignStmt>),
     Expr(Box<Expr>),
+    Noop,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

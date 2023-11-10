@@ -110,6 +110,7 @@ impl Compiler {
             StmtKind::Expr(expr) => {
                 self.expr(expr)?;
             }
+            StmtKind::Noop => {}
         };
         Ok(())
     }
@@ -368,17 +369,14 @@ mod test {
         );
 
         check_err(
-            "
-                let x := false
-                x + 1
-            ",
+            "let x := false; x + 1",
             CompileError {
                 kind: CmpErrKind::TypeError {
                     expected: INT_TYPE,
                     received: BOOL_TYPE,
                 },
                 source_info: SourceInfo {
-                    start: 48,
+                    start: 16,
                     length: 1,
                 },
             },

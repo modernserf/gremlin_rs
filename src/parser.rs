@@ -46,13 +46,6 @@ impl Parser {
         Ok(body)
     }
 
-    // pub fn parse_expr(tokens: Vec<Tok>) -> Parse<Expr> {
-    //     let mut parser = Self::new(tokens);
-    //     let expr = parser.expect_p("expr", Self::expr)?;
-    //     parser.expect_token(TokKind::EndOfInput)?;
-    //     Ok(expr)
-    // }
-
     fn new(tokens: Vec<Tok>) -> Self {
         Self { tokens, index: 0 }
     }
@@ -146,6 +139,13 @@ impl Parser {
                 Ok(Some(Stmt {
                     kind: StmtKind::Let(Box::new(LetStmt { binding, expr })),
                     source_info,
+                }))
+            }
+            TokKind::Semicolon => {
+                self.advance();
+                Ok(Some(Stmt {
+                    kind: StmtKind::Noop,
+                    source_info: start_source,
                 }))
             }
             _ => {
