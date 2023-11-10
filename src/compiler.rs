@@ -66,6 +66,12 @@ impl Compiler {
             }
             StmtKind::Assign(payload) => {
                 self.expr(&payload.expr)?;
+                // dest is relative to stack _after_ value is popped, so dec before getting offset
+                self.dec_frame_offset();
+                let dest = self.get_assign_dest(&payload.target)?;
+                self.program.push(IR {
+                    kind: IRKind::Move(dest, IRSrc::PopStack),
+                });
             }
             StmtKind::Expr(expr) => self.expr(expr)?,
         };
@@ -104,28 +110,11 @@ impl Compiler {
                         });
                     }
                     UnOpKind::Ref => {
-                        match &payload.expr.kind {
-                            ExprKind::Ident(payload) => {
-                                let stack_offset =
-                                    self.get_stack_offset(&payload.value, expr.source_info)?;
-                                self.program.push(IR {
-                                    kind: IRKind::Move(IRDest::PushStack, IRSrc::StackPointer),
-                                });
-                                self.program.push(IR {
-                                    kind: IRKind::Add(
-                                        IRDest::StackOffset(0),
-                                        IRSrc::Immediate(stack_offset),
-                                    ),
-                                });
-                                self.inc_frame_offset();
-                            }
-                            _ => {
-                                return Err(CompileError {
-                                    kind: CmpErrKind::InvalidReference,
-                                    source_info: expr.source_info,
-                                })
-                            }
-                        };
+                        let src = self.get_ref_src(&payload.expr)?;
+                        self.program.push(IR {
+                            kind: IRKind::LoadAddress(IRDest::PushStack, src),
+                        });
+                        self.inc_frame_offset();
                     }
                 };
             }
@@ -161,6 +150,30 @@ impl Compiler {
             }
         };
         Ok(())
+    }
+    fn get_assign_dest(&mut self, expr: &Expr) -> Compile<IRDest> {
+        match &expr.kind {
+            ExprKind::Ident(payload) => {
+                let offset = self.get_stack_offset(&payload.value, expr.source_info)?;
+                Ok(IRDest::StackOffset(offset))
+            }
+            _ => Err(CompileError {
+                kind: CmpErrKind::InvalidReference,
+                source_info: expr.source_info,
+            }),
+        }
+    }
+    fn get_ref_src(&mut self, expr: &Expr) -> Compile<IRSrc> {
+        match &expr.kind {
+            ExprKind::Ident(payload) => {
+                let offset = self.get_stack_offset(&payload.value, expr.source_info)?;
+                Ok(IRSrc::StackOffset(offset))
+            }
+            _ => Err(CompileError {
+                kind: CmpErrKind::InvalidReference,
+                source_info: expr.source_info,
+            }),
+        }
     }
     fn get_stack_offset(&mut self, key: &str, source_info: SourceInfo) -> Compile<Word> {
         match self.scope.get(key) {

@@ -142,4 +142,17 @@ mod test {
             456,
         );
     }
+
+    #[test]
+    fn assignment() {
+        assert_expr_eq(
+            "
+            let foo := 1
+            foo := 3
+            let bar := 5
+            foo
+        ",
+            3,
+        );
+    }
 }

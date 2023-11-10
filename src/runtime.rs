@@ -35,6 +35,11 @@ impl Runtime {
                 let dest_ptr = self.get_dest(*dest);
                 *dest_ptr = value;
             }
+            IRKind::LoadAddress(dest, src) => {
+                let effective_address = self.get_effective_address(*src);
+                let dest_ptr = self.get_dest(*dest);
+                *dest_ptr = effective_address;
+            }
             IRKind::Add(dest, src) => {
                 let value = self.get_src(*src);
                 let dest_ptr = self.get_dest(*dest);
@@ -53,7 +58,6 @@ impl Runtime {
             IRSrc::Address(addr) => self.memory[addr as usize],
             IRSrc::R0 => self.r0,
             IRSrc::AtR0 => self.memory[self.r0 as usize],
-            IRSrc::StackPointer => self.sp,
             IRSrc::StackOffset(offset) => self.memory[(self.sp + offset) as usize],
             IRSrc::PopStack => {
                 let value = self.memory[self.sp as usize];
@@ -62,10 +66,19 @@ impl Runtime {
             }
         }
     }
+    fn get_effective_address(&self, src: IRSrc) -> Word {
+        match src {
+            IRSrc::StackOffset(offset) => self.sp + offset,
+            _ => unimplemented!(),
+        }
+    }
     fn get_dest<'a>(&'a mut self, dest: IRDest) -> &'a mut Word {
         match dest {
             IRDest::R0 => &mut self.r0,
-            IRDest::StackOffset(offset) => &mut self.memory[(self.sp + offset) as usize],
+            IRDest::StackOffset(offset) => {
+                println!("sp: {} offset: {}", self.sp, offset);
+                &mut self.memory[(self.sp + offset) as usize]
+            }
             IRDest::PushStack => {
                 self.sp -= 1;
                 &mut self.memory[self.sp as usize]

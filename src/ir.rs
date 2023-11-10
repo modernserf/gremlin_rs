@@ -7,9 +7,8 @@ pub struct IR {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IRKind {
-    // pop an address from the stack & push the value at that address
-    // Deref,
     Move(IRDest, IRSrc),
+    LoadAddress(IRDest, IRSrc),
     Add(IRDest, IRSrc),
     Mult(IRDest, IRSrc),
 }
@@ -28,6 +27,5 @@ pub enum IRSrc {
     StackOffset(Word),
     R0,
     AtR0,
-    StackPointer,
     PopStack,
 }
