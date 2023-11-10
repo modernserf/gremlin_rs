@@ -176,7 +176,27 @@ impl Parser {
     }
 
     fn expr(&mut self) -> ParseOpt<Expr> {
-        self.or_expr()
+        self.as_expr()
+    }
+
+    fn as_expr(&mut self) -> ParseOpt<Expr> {
+        if let Some(expr) = self.or_expr()? {
+            let start_span = expr.source_info;
+            match self.peek() {
+                TokKind::As => {
+                    self.advance();
+                    let ty = self.expect_p("type expr", Self::type_expr)?;
+                    let source_info = start_span.span(ty.source_info);
+                    Ok(Some(Expr {
+                        kind: ExprKind::As(Box::new(AsExpr { expr, ty })),
+                        source_info,
+                    }))
+                }
+                _ => Ok(Some(expr)),
+            }
+        } else {
+            Ok(None)
+        }
     }
 
     fn or_expr(&mut self) -> ParseOpt<Expr> {
@@ -297,6 +317,22 @@ impl Parser {
                 self.advance();
                 Ok(Some(Bind {
                     kind: BindKind::Ident(IdentBind {
+                        value: payload.value,
+                    }),
+                    source_info,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn type_expr(&mut self) -> ParseOpt<TyExpr> {
+        match self.peek() {
+            TokKind::Identifier(payload) => {
+                let source_info = self.peek_source();
+                self.advance();
+                Ok(Some(TyExpr {
+                    kind: TyExprKind::Identifier(IdentTyExpr {
                         value: payload.value,
                     }),
                     source_info,

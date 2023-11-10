@@ -1,5 +1,7 @@
 use crate::{
-    ast::{BinOpKind, Bind, BindKind, Expr, ExprKind, Stmt, StmtKind, UnOpKind},
+    ast::{
+        BinOpKind, Bind, BindKind, Expr, ExprKind, Stmt, StmtKind, TyExpr, TyExprKind, UnOpKind,
+    },
     ir::{IRDest, IRKind, IRSrc, Word, IR},
     source_info::SourceInfo,
 };
@@ -16,6 +18,7 @@ pub struct CompileError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CmpErrKind {
     UnknownIdentifier,
+    UnknownTypeIdentifier,
     IntOutOfRange,
     InvalidReference,
     TypeError { expected: TypeId, received: TypeId },
@@ -153,6 +156,12 @@ impl Compiler {
                     type_id: local.type_id,
                 })
             }
+            ExprKind::As(payload) => {
+                // TODO: check for compatible sizes
+                self.expr(&payload.expr)?;
+                let type_id = self.get_type_id(&payload.ty)?;
+                Ok(ExprResult { type_id })
+            }
             ExprKind::UnaryOp(payload) => {
                 match &payload.operator {
                     UnOpKind::Deref => {
@@ -281,6 +290,21 @@ impl Compiler {
             }
         }
     }
+    fn get_type_id(&mut self, ty: &TyExpr) -> Compile<TypeId> {
+        match &ty.kind {
+            TyExprKind::Identifier(payload) => {
+                // TODO: table lookup
+                match payload.value.as_str() {
+                    "bool" => Ok(BOOL_TYPE),
+                    "int" => Ok(INT_TYPE),
+                    _ => Err(CompileError {
+                        kind: CmpErrKind::UnknownTypeIdentifier,
+                        source_info: ty.source_info,
+                    }),
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -381,5 +405,19 @@ mod test {
                 },
             },
         );
+    }
+
+    #[test]
+    fn unknown_type_identifier() {
+        check_err(
+            "123 as foobar",
+            CompileError {
+                kind: CmpErrKind::UnknownTypeIdentifier,
+                source_info: SourceInfo {
+                    start: 7,
+                    length: 6,
+                },
+            },
+        )
     }
 }

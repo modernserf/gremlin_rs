@@ -55,6 +55,7 @@ pub enum ExprKind {
     Ident(IdentExpr),
     UnaryOp(Box<UnaryOp>),
     BinaryOp(Box<BinaryOp>),
+    As(Box<AsExpr>),
     True,
     False,
 }
@@ -90,4 +91,26 @@ pub enum BinOpKind {
     Mult,
     And,
     Or,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AsExpr {
+    pub expr: Expr,
+    pub ty: TyExpr,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TyExpr {
+    pub kind: TyExprKind,
+    pub source_info: SourceInfo,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TyExprKind {
+    Identifier(IdentTyExpr),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentTyExpr {
+    pub value: String,
 }

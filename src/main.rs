@@ -165,4 +165,16 @@ mod test {
         assert_expr_eq("true or false", 1);
         assert_expr_eq("not false", 1);
     }
+
+    #[test]
+    fn type_casting() {
+        assert_expr_eq(
+            "
+            let a := true
+            let b := (a as int) + 1
+            b
+        ",
+            2,
+        )
+    }
 }
