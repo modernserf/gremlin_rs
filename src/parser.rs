@@ -145,7 +145,7 @@ impl Parser {
                 let source_info = start_source.span(expr.source_info);
                 Ok(Some(Stmt {
                     kind: StmtKind::Let(Box::new(LetStmt { binding, expr })),
-                    source_info: source_info,
+                    source_info,
                 }))
             }
             _ => {

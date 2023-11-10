@@ -31,30 +31,36 @@ Comment = "#" ... eol
 */
 
 mod ast;
+mod compiler;
 mod lexer;
 mod parser;
-mod runtime;
 mod source_info;
 mod token;
 
+use crate::compiler::Compiler;
+use crate::compiler::IRRuntime;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
-use crate::runtime::Interpreter;
 
 fn main() {
-    println!("Hello, world!");
-    Interpreter::new().eval_body(&Parser::parse_body(Lexer::lex("123")).unwrap());
+    let program = "123";
+    IRRuntime::eval(
+        &Compiler::compile(&Parser::parse_body(Lexer::lex(&program)).expect("expr")).expect("ir"),
+    );
 }
 
 #[cfg(test)]
 mod test {
-    use super::*;
+    use crate::compiler::Compiler;
+    use crate::compiler::IRRuntime;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
 
-    fn assert_expr_eq(str: &str, expected: u128) {
-        let mut interpreter = Interpreter::new();
-        interpreter.eval_body(&Parser::parse_body(Lexer::lex(str)).expect("expr"));
-
-        assert_eq!(interpreter.pop_stk(), expected);
+    fn assert_expr_eq(str: &str, expected: u32) {
+        let result = IRRuntime::eval(
+            &Compiler::compile(&Parser::parse_body(Lexer::lex(str)).expect("expr")).expect("ir"),
+        );
+        assert_eq!(result, expected);
     }
 
     #[test]
@@ -118,18 +124,18 @@ mod test {
     fn ref_deref() {
         assert_expr_eq(
             "
-                let foo := 123
+                let foo := 6
                 let ptr := &foo
                 @ptr
             ",
-            123,
+            6,
         );
         assert_expr_eq(
             "
                 # stack ptr goes high to low
                 let foo_1 := 456
                 let foo_0 := 123
-                @(&foo_0 + 1) 
+                @(&foo_0 + 1)
             ",
             456,
         );
