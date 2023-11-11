@@ -132,15 +132,6 @@ mod test {
             ",
             6,
         );
-        // assert_expr_eq(
-        //     "
-        //         # stack ptr goes high to low
-        //         let foo_1 := 456
-        //         let foo_0 := 123
-        //         @(&foo_0 + 1)
-        //     ",
-        //     456,
-        // );
     }
 
     #[test]
@@ -176,5 +167,18 @@ mod test {
         ",
             2,
         )
+    }
+
+    #[test]
+    fn pointer_math_casting() {
+        assert_expr_eq(
+            "
+                # stack ptr goes high to low
+                let foo_1 := 20
+                let foo_0 := 10
+                @((&foo_0 as int) + 1 as &int)
+            ",
+            20,
+        );
     }
 }

@@ -48,6 +48,7 @@ pub struct TypeError {
 // current stack pointer - current frame offset = original stack pointer
 type FrameOffset = isize;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Compiler {
     scope: HashMap<String, ScopeRec>,
     program: Vec<IR>,
@@ -365,8 +366,16 @@ impl Compiler {
             TyExprKind::Identifier(payload) => {
                 // TODO: table lookup
                 match payload.value.as_str() {
-                    "bool" => Ok(Ty::bool_type()),
-                    "int" => Ok(Ty::int_type()),
+                    "bool" => Ok({
+                        let mut out = Ty::bool_type();
+                        out.ref_level = ty.ref_level;
+                        out
+                    }),
+                    "int" => Ok({
+                        let mut out = Ty::int_type();
+                        out.ref_level = ty.ref_level;
+                        out
+                    }),
                     _ => Err(CompileError {
                         kind: CmpErrKind::UnknownTypeIdentifier,
                         source_info: ty.source_info,

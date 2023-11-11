@@ -104,6 +104,7 @@ pub struct AsExpr {
 pub struct TyExpr {
     pub kind: TyExprKind,
     pub source_info: SourceInfo,
+    pub ref_level: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

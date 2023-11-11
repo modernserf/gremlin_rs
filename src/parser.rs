@@ -344,7 +344,14 @@ impl Parser {
                         value: payload.value,
                     }),
                     source_info,
+                    ref_level: 0,
                 }))
+            }
+            TokKind::Ampersand => {
+                self.advance();
+                let mut next = self.expect_p("type expr", Self::type_expr)?;
+                next.ref_level += 1;
+                Ok(Some(next))
             }
             _ => Ok(None),
         }
