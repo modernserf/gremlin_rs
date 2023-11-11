@@ -13,6 +13,7 @@ pub enum StmtKind {
     Assign(Box<AssignStmt>),
     Expr(Box<Expr>),
     Noop,
+    TypeDef(Box<TypeDef>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +43,12 @@ pub enum BindKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IdentBind {
     pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeDef {
+    pub identifier: String,
+    pub ty: TyExpr,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

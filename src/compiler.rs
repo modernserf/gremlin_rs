@@ -49,13 +49,6 @@ pub struct TypeError {
 type FrameOffset = isize;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Compiler {
-    scope: HashMap<String, ScopeRec>,
-    program: Vec<IR>,
-    current_frame_offset: FrameOffset,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 struct ScopeRec {
     frame_offset: FrameOffset,
     ty: Ty,
@@ -128,6 +121,14 @@ struct LocalResult {
     stack_offset: Word,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Compiler {
+    scope: HashMap<String, ScopeRec>,
+    ty_scope: HashMap<String, Ty>,
+    program: Vec<IR>,
+    current_frame_offset: FrameOffset,
+}
+
 impl Compiler {
     pub fn compile(program: &[Stmt]) -> Compile<Vec<IR>> {
         let mut compiler = Self::new();
@@ -141,6 +142,10 @@ impl Compiler {
             scope: HashMap::new(),
             program: Vec::new(),
             current_frame_offset: 0,
+            ty_scope: HashMap::from_iter(vec![
+                ("int".to_string(), Ty::int_type()),
+                ("bool".to_string(), Ty::bool_type()),
+            ]),
         }
     }
     fn inc_frame_offset(&mut self) {
@@ -160,6 +165,10 @@ impl Compiler {
                 }
 
                 self.init_local(&payload.binding, res.ty)?;
+            }
+            StmtKind::TypeDef(payload) => {
+                let ty = self.get_ty(&payload.ty)?;
+                self.ty_scope.insert(payload.identifier.to_string(), ty);
             }
             StmtKind::Assign(payload) => {
                 self.expr(&payload.expr)?;
@@ -363,25 +372,17 @@ impl Compiler {
     }
     fn get_ty(&mut self, ty: &TyExpr) -> Compile<Ty> {
         match &ty.kind {
-            TyExprKind::Identifier(payload) => {
-                // TODO: table lookup
-                match payload.value.as_str() {
-                    "bool" => Ok({
-                        let mut out = Ty::bool_type();
-                        out.ref_level = ty.ref_level;
-                        out
-                    }),
-                    "int" => Ok({
-                        let mut out = Ty::int_type();
-                        out.ref_level = ty.ref_level;
-                        out
-                    }),
-                    _ => Err(CompileError {
-                        kind: CmpErrKind::UnknownTypeIdentifier,
-                        source_info: ty.source_info,
-                    }),
+            TyExprKind::Identifier(payload) => match self.ty_scope.get(payload.value.as_str()) {
+                Some(value) => {
+                    let mut out = value.clone();
+                    out.ref_level = ty.ref_level;
+                    Ok(out)
                 }
-            }
+                None => Err(CompileError {
+                    kind: CmpErrKind::UnknownTypeIdentifier,
+                    source_info: ty.source_info,
+                }),
+            },
         }
     }
 }

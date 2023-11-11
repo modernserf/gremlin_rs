@@ -26,9 +26,7 @@ pub enum IRDest {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum IRSrc {
     Immediate(Word),
-    Address(Word),
     StackOffset(Word),
-    R0,
     AtR0,
     PopStack,
 }

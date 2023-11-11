@@ -70,8 +70,6 @@ impl Runtime {
     fn get_src(&mut self, src: IRSrc) -> Word {
         match src {
             IRSrc::Immediate(value) => value,
-            IRSrc::Address(addr) => self.memory[addr as usize],
-            IRSrc::R0 => self.r0,
             IRSrc::AtR0 => self.memory[self.r0 as usize],
             IRSrc::StackOffset(offset) => self.memory[(self.sp + offset) as usize],
             IRSrc::PopStack => {

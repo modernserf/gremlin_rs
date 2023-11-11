@@ -149,6 +149,23 @@ impl Parser {
                     source_info,
                 }))
             }
+            TokKind::Type => {
+                self.advance();
+                let identifier = self.expect_p("type identifier", |p| match p.peek() {
+                    TokKind::Identifier(identifier) => {
+                        p.advance();
+                        Ok(Some(identifier.value))
+                    }
+                    _ => Ok(None),
+                })?;
+                self.expect_token(TokKind::ColonEq)?;
+                let ty = self.expect_p("type expr", Self::type_expr)?;
+                let source_info = start_source.span(ty.source_info);
+                Ok(Some(Stmt {
+                    kind: StmtKind::TypeDef(Box::new(TypeDef { identifier, ty })),
+                    source_info,
+                }))
+            }
             TokKind::Semicolon => {
                 self.advance();
                 Ok(Some(Stmt {

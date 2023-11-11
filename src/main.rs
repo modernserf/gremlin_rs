@@ -181,4 +181,14 @@ mod test {
             20,
         );
     }
+
+    #[test]
+    fn type_alias() {
+        assert_expr_eq(
+            "
+                type word := int
+                let x: word := 123
+                x
+            ", 123)
+    }
 }

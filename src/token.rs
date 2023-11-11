@@ -17,6 +17,7 @@ pub enum TokKind {
     Or,
     Not,
     As,
+    Type,
     // punctuation
     Semicolon,
     Colon,
@@ -57,6 +58,7 @@ fn keyword_tokens() -> KeywordTokens {
         (TokKind::Or, "or"),
         (TokKind::Not, "not"),
         (TokKind::As, "as"),
+        (TokKind::Type, "type"),
     ];
 
     Rc::new((
