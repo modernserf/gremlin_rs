@@ -15,13 +15,31 @@ pub struct CompileError {
     source_info: SourceInfo,
 }
 
+impl CompileError {
+    fn type_error(expected: &Ty, received: &Ty, source_info: SourceInfo) -> Self {
+        Self {
+            kind: CmpErrKind::TypeError(Box::new(TypeError {
+                expected: expected.clone(),
+                received: received.clone(),
+            })),
+            source_info,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CmpErrKind {
     UnknownIdentifier,
     UnknownTypeIdentifier,
     IntOutOfRange,
     InvalidReference,
-    TypeError { expected: TypeId, received: TypeId },
+    TypeError(Box<TypeError>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeError {
+    pub expected: Ty,
+    pub received: Ty,
 }
 
 // offset from value of stack pointer when function begins
@@ -39,24 +57,48 @@ pub struct Compiler {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ScopeRec {
     frame_offset: FrameOffset,
-    type_id: TypeId,
+    ty: Ty,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct TypeId(usize);
-const INT_TYPE: TypeId = TypeId(1);
-const BOOL_TYPE: TypeId = TypeId(2);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ty {
+    id: usize,
+    kind: TyKind,
+    width: usize,
+    ref_level: usize,
+}
 
-impl TypeId {
-    fn check(&self, expected: TypeId, source_info: SourceInfo) -> Compile<()> {
-        if *self != expected {
-            Err(CompileError {
-                kind: CmpErrKind::TypeError {
-                    expected,
-                    received: *self,
-                },
-                source_info,
-            })
+impl Ty {
+    fn int_type() -> Self {
+        Self {
+            id: 1,
+            kind: TyKind::Primitive,
+            width: 1,
+            ref_level: 0,
+        }
+    }
+    fn bool_type() -> Self {
+        Self {
+            id: 2,
+            kind: TyKind::Primitive,
+            width: 1,
+            ref_level: 0,
+        }
+    }
+    fn add_ref(&self) -> Self {
+        let mut next = self.clone();
+        next.ref_level += 1;
+        next
+    }
+    fn deref(&self) -> Self {
+        debug_assert!(self.ref_level > 0);
+        let mut next = self.clone();
+        next.ref_level -= 1;
+        next
+    }
+    fn check(&self, expected: &Ty, source_info: SourceInfo) -> Compile<()> {
+        if self != expected {
+            Err(CompileError::type_error(expected, self, source_info))
         } else {
             Ok(())
         }
@@ -64,13 +106,19 @@ impl TypeId {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ExprResult {
-    type_id: TypeId,
+pub enum TyKind {
+    Primitive,
+    // Struct(StructType),
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExprResult {
+    ty: Ty,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct LocalResult {
-    type_id: TypeId,
+    ty: Ty,
     stack_offset: Word,
 }
 
@@ -101,11 +149,11 @@ impl Compiler {
                 let res = self.expr(&payload.expr)?;
 
                 if let Some(ty) = &payload.ty {
-                    let type_id = self.get_type_id(ty)?;
-                    type_id.check(res.type_id, payload.expr.source_info)?;
+                    let type_id = self.get_ty(ty)?;
+                    type_id.check(&res.ty, payload.expr.source_info)?;
                 }
 
-                self.init_local(&payload.binding, res.type_id)?;
+                self.init_local(&payload.binding, res.ty)?;
             }
             StmtKind::Assign(payload) => {
                 self.expr(&payload.expr)?;
@@ -136,21 +184,25 @@ impl Compiler {
                     kind: IRKind::Move(IRDest::PushStack, IRSrc::Immediate(payload.value as Word)),
                 });
                 self.inc_frame_offset();
-                Ok(ExprResult { type_id: INT_TYPE })
+                Ok(ExprResult { ty: Ty::int_type() })
             }
             ExprKind::True => {
                 self.program.push(IR {
                     kind: IRKind::Move(IRDest::PushStack, IRSrc::Immediate(1)),
                 });
                 self.inc_frame_offset();
-                Ok(ExprResult { type_id: BOOL_TYPE })
+                Ok(ExprResult {
+                    ty: Ty::bool_type(),
+                })
             }
             ExprKind::False => {
                 self.program.push(IR {
                     kind: IRKind::Move(IRDest::PushStack, IRSrc::Immediate(0)),
                 });
                 self.inc_frame_offset();
-                Ok(ExprResult { type_id: BOOL_TYPE })
+                Ok(ExprResult {
+                    ty: Ty::bool_type(),
+                })
             }
             ExprKind::Ident(payload) => {
                 let local = self.get_local(&payload.value, expr.source_info)?;
@@ -158,15 +210,13 @@ impl Compiler {
                     kind: IRKind::Move(IRDest::PushStack, IRSrc::StackOffset(local.stack_offset)),
                 });
                 self.inc_frame_offset();
-                Ok(ExprResult {
-                    type_id: local.type_id,
-                })
+                Ok(ExprResult { ty: local.ty })
             }
             ExprKind::As(payload) => {
                 // TODO: check for compatible sizes
                 self.expr(&payload.expr)?;
-                let type_id = self.get_type_id(&payload.ty)?;
-                Ok(ExprResult { type_id })
+                let ty = self.get_ty(&payload.ty)?;
+                Ok(ExprResult { ty })
             }
             ExprKind::UnaryOp(payload) => {
                 match &payload.operator {
@@ -179,7 +229,7 @@ impl Compiler {
                             kind: IRKind::Move(IRDest::PushStack, IRSrc::AtR0),
                         });
                         // FIXME
-                        Ok(ExprResult { type_id: INT_TYPE })
+                        Ok(ExprResult { ty: Ty::int_type() })
                     }
                     UnOpKind::Ref => {
                         let src = self.get_ref_src(&payload.expr)?;
@@ -188,15 +238,17 @@ impl Compiler {
                         });
                         self.inc_frame_offset();
                         // FIXME
-                        Ok(ExprResult { type_id: INT_TYPE })
+                        Ok(ExprResult { ty: Ty::int_type() })
                     }
                     UnOpKind::Not => {
                         let res = self.expr(&payload.expr)?;
-                        res.type_id.check(BOOL_TYPE, payload.expr.source_info)?;
+                        res.ty.check(&Ty::bool_type(), payload.expr.source_info)?;
                         self.program.push(IR {
                             kind: IRKind::Not(IRDest::StackOffset(0), IRSrc::StackOffset(0)),
                         });
-                        Ok(ExprResult { type_id: BOOL_TYPE })
+                        Ok(ExprResult {
+                            ty: Ty::bool_type(),
+                        })
                     }
                 }
             }
@@ -205,36 +257,44 @@ impl Compiler {
                 let left = self.expr(&payload.left)?;
                 let res = match &payload.operator {
                     BinOpKind::Add => {
-                        right.type_id.check(INT_TYPE, payload.right.source_info)?;
-                        left.type_id.check(INT_TYPE, payload.left.source_info)?;
+                        right.ty.check(&Ty::int_type(), payload.right.source_info)?;
+                        left.ty.check(&Ty::int_type(), payload.left.source_info)?;
                         self.program.push(IR {
                             kind: IRKind::Add(IRDest::StackOffset(0), IRSrc::PopStack),
                         });
-                        Ok(ExprResult { type_id: INT_TYPE })
+                        Ok(ExprResult { ty: Ty::int_type() })
                     }
                     BinOpKind::Mult => {
-                        right.type_id.check(INT_TYPE, payload.right.source_info)?;
-                        left.type_id.check(INT_TYPE, payload.left.source_info)?;
+                        right.ty.check(&Ty::int_type(), payload.right.source_info)?;
+                        left.ty.check(&Ty::int_type(), payload.left.source_info)?;
                         self.program.push(IR {
                             kind: IRKind::Mult(IRDest::StackOffset(0), IRSrc::PopStack),
                         });
-                        Ok(ExprResult { type_id: INT_TYPE })
+                        Ok(ExprResult { ty: Ty::int_type() })
                     }
                     BinOpKind::And => {
-                        right.type_id.check(BOOL_TYPE, payload.right.source_info)?;
-                        left.type_id.check(BOOL_TYPE, payload.left.source_info)?;
+                        right
+                            .ty
+                            .check(&Ty::bool_type(), payload.right.source_info)?;
+                        left.ty.check(&Ty::bool_type(), payload.left.source_info)?;
                         self.program.push(IR {
                             kind: IRKind::And(IRDest::StackOffset(0), IRSrc::PopStack),
                         });
-                        Ok(ExprResult { type_id: BOOL_TYPE })
+                        Ok(ExprResult {
+                            ty: Ty::bool_type(),
+                        })
                     }
                     BinOpKind::Or => {
-                        right.type_id.check(BOOL_TYPE, payload.right.source_info)?;
-                        left.type_id.check(BOOL_TYPE, payload.left.source_info)?;
+                        right
+                            .ty
+                            .check(&Ty::bool_type(), payload.right.source_info)?;
+                        left.ty.check(&Ty::bool_type(), payload.left.source_info)?;
                         self.program.push(IR {
                             kind: IRKind::Or(IRDest::StackOffset(0), IRSrc::PopStack),
                         });
-                        Ok(ExprResult { type_id: BOOL_TYPE })
+                        Ok(ExprResult {
+                            ty: Ty::bool_type(),
+                        })
                     }
                 };
                 self.dec_frame_offset();
@@ -242,14 +302,14 @@ impl Compiler {
             }
         }
     }
-    fn init_local(&mut self, binding: &Bind, type_id: TypeId) -> Compile<()> {
+    fn init_local(&mut self, binding: &Bind, ty: Ty) -> Compile<()> {
         match &binding.kind {
             BindKind::Ident(ident) => {
                 let _prev = self.scope.insert(
                     ident.value.to_string(),
                     ScopeRec {
                         frame_offset: self.current_frame_offset,
-                        type_id,
+                        ty,
                     },
                 );
             }
@@ -290,19 +350,19 @@ impl Compiler {
                 let stack_offset = self.current_frame_offset - scope_rec.frame_offset;
                 debug_assert!(stack_offset >= 0);
                 Ok(LocalResult {
-                    type_id: scope_rec.type_id,
+                    ty: scope_rec.ty.clone(),
                     stack_offset: stack_offset as Word,
                 })
             }
         }
     }
-    fn get_type_id(&mut self, ty: &TyExpr) -> Compile<TypeId> {
+    fn get_ty(&mut self, ty: &TyExpr) -> Compile<Ty> {
         match &ty.kind {
             TyExprKind::Identifier(payload) => {
                 // TODO: table lookup
                 match payload.value.as_str() {
-                    "bool" => Ok(BOOL_TYPE),
-                    "int" => Ok(INT_TYPE),
+                    "bool" => Ok(Ty::bool_type()),
+                    "int" => Ok(Ty::int_type()),
                     _ => Err(CompileError {
                         kind: CmpErrKind::UnknownTypeIdentifier,
                         source_info: ty.source_info,
@@ -372,58 +432,50 @@ mod test {
     fn type_error() {
         check_err(
             "not 1",
-            CompileError {
-                kind: CmpErrKind::TypeError {
-                    expected: BOOL_TYPE,
-                    received: INT_TYPE,
-                },
-                source_info: SourceInfo {
+            CompileError::type_error(
+                &Ty::bool_type(),
+                &Ty::int_type(),
+                SourceInfo {
                     start: 4,
                     length: 1,
                 },
-            },
+            ),
         );
 
         check_err(
             "true + 2",
-            CompileError {
-                kind: CmpErrKind::TypeError {
-                    expected: INT_TYPE,
-                    received: BOOL_TYPE,
-                },
-                source_info: SourceInfo {
+            CompileError::type_error(
+                &Ty::int_type(),
+                &Ty::bool_type(),
+                SourceInfo {
                     start: 0,
                     length: 4,
                 },
-            },
+            ),
         );
 
         check_err(
             "let x := false; x + 1",
-            CompileError {
-                kind: CmpErrKind::TypeError {
-                    expected: INT_TYPE,
-                    received: BOOL_TYPE,
-                },
-                source_info: SourceInfo {
+            CompileError::type_error(
+                &Ty::int_type(),
+                &Ty::bool_type(),
+                SourceInfo {
                     start: 16,
                     length: 1,
                 },
-            },
+            ),
         );
 
         check_err(
             "let x : bool := 1",
-            CompileError {
-                kind: CmpErrKind::TypeError {
-                    expected: INT_TYPE,
-                    received: BOOL_TYPE,
-                },
-                source_info: SourceInfo {
+            CompileError::type_error(
+                &Ty::int_type(),
+                &Ty::bool_type(),
+                SourceInfo {
                     start: 16,
                     length: 1,
                 },
-            },
+            ),
         );
     }
 
