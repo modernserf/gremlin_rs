@@ -90,11 +90,16 @@ impl Ty {
         next.ref_level += 1;
         next
     }
-    fn deref(&self) -> Self {
-        debug_assert!(self.ref_level > 0);
+    fn deref(&self, source_info: SourceInfo) -> Compile<Self> {
+        if self.ref_level == 0 {
+            return Err(CompileError {
+                kind: CmpErrKind::InvalidReference,
+                source_info,
+            });
+        }
         let mut next = self.clone();
         next.ref_level -= 1;
-        next
+        Ok(next)
     }
     fn check(&self, expected: &Ty, source_info: SourceInfo) -> Compile<()> {
         if self != expected {
@@ -218,40 +223,39 @@ impl Compiler {
                 let ty = self.get_ty(&payload.ty)?;
                 Ok(ExprResult { ty })
             }
-            ExprKind::UnaryOp(payload) => {
-                match &payload.operator {
-                    UnOpKind::Deref => {
-                        self.expr(&payload.expr)?;
-                        self.program.push(IR {
-                            kind: IRKind::Move(IRDest::R0, IRSrc::PopStack),
-                        });
-                        self.program.push(IR {
-                            kind: IRKind::Move(IRDest::PushStack, IRSrc::AtR0),
-                        });
-                        // FIXME
-                        Ok(ExprResult { ty: Ty::int_type() })
-                    }
-                    UnOpKind::Ref => {
-                        let src = self.get_ref_src(&payload.expr)?;
-                        self.program.push(IR {
-                            kind: IRKind::LoadAddress(IRDest::PushStack, src),
-                        });
-                        self.inc_frame_offset();
-                        // FIXME
-                        Ok(ExprResult { ty: Ty::int_type() })
-                    }
-                    UnOpKind::Not => {
-                        let res = self.expr(&payload.expr)?;
-                        res.ty.check(&Ty::bool_type(), payload.expr.source_info)?;
-                        self.program.push(IR {
-                            kind: IRKind::Not(IRDest::StackOffset(0), IRSrc::StackOffset(0)),
-                        });
-                        Ok(ExprResult {
-                            ty: Ty::bool_type(),
-                        })
-                    }
+            ExprKind::UnaryOp(payload) => match &payload.operator {
+                UnOpKind::Deref => {
+                    let res = self.expr(&payload.expr)?;
+                    let ty = res.ty.deref(payload.expr.source_info)?;
+                    self.program.push(IR {
+                        kind: IRKind::Move(IRDest::R0, IRSrc::PopStack),
+                    });
+                    self.program.push(IR {
+                        kind: IRKind::Move(IRDest::PushStack, IRSrc::AtR0),
+                    });
+                    Ok(ExprResult { ty })
                 }
-            }
+                UnOpKind::Ref => {
+                    let (src, local) = self.get_ref_src(&payload.expr)?;
+                    self.program.push(IR {
+                        kind: IRKind::LoadAddress(IRDest::PushStack, src),
+                    });
+                    self.inc_frame_offset();
+                    Ok(ExprResult {
+                        ty: local.ty.add_ref(),
+                    })
+                }
+                UnOpKind::Not => {
+                    let res = self.expr(&payload.expr)?;
+                    res.ty.check(&Ty::bool_type(), payload.expr.source_info)?;
+                    self.program.push(IR {
+                        kind: IRKind::Not(IRDest::StackOffset(0), IRSrc::StackOffset(0)),
+                    });
+                    Ok(ExprResult {
+                        ty: Ty::bool_type(),
+                    })
+                }
+            },
             ExprKind::BinaryOp(payload) => {
                 let right = self.expr(&payload.right)?;
                 let left = self.expr(&payload.left)?;
@@ -328,11 +332,11 @@ impl Compiler {
             }),
         }
     }
-    fn get_ref_src(&mut self, expr: &Expr) -> Compile<IRSrc> {
+    fn get_ref_src(&mut self, expr: &Expr) -> Compile<(IRSrc, LocalResult)> {
         match &expr.kind {
             ExprKind::Ident(payload) => {
                 let local = self.get_local(&payload.value, expr.source_info)?;
-                Ok(IRSrc::StackOffset(local.stack_offset))
+                Ok((IRSrc::StackOffset(local.stack_offset), local))
             }
             _ => Err(CompileError {
                 kind: CmpErrKind::InvalidReference,
@@ -425,7 +429,17 @@ mod test {
                     length: 1,
                 },
             },
-        )
+        );
+        check_err(
+            "let x := 3; @x",
+            CompileError {
+                kind: CmpErrKind::InvalidReference,
+                source_info: SourceInfo {
+                    start: 13,
+                    length: 1,
+                },
+            },
+        );
     }
 
     #[test]

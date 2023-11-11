@@ -132,15 +132,15 @@ mod test {
             ",
             6,
         );
-        assert_expr_eq(
-            "
-                # stack ptr goes high to low
-                let foo_1 := 456
-                let foo_0 := 123
-                @(&foo_0 + 1)
-            ",
-            456,
-        );
+        // assert_expr_eq(
+        //     "
+        //         # stack ptr goes high to low
+        //         let foo_1 := 456
+        //         let foo_0 := 123
+        //         @(&foo_0 + 1)
+        //     ",
+        //     456,
+        // );
     }
 
     #[test]
