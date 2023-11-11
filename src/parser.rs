@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::source_info::SourceInfo;
-use crate::token::{Tok, TokKind};
+use crate::token::{Identifier, Tok, TokKind};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Parser {
@@ -76,12 +76,23 @@ impl Parser {
         }
     }
 
-    fn expect_token(&mut self, tok: TokKind) -> Parse<()> {
+    fn expect_token(&mut self, tok: TokKind) -> Parse<SourceInfo> {
         if self.peek() == tok {
+            let source_info = self.peek_source();
             self.advance();
-            Ok(())
+            Ok(source_info)
         } else {
             Err(ParseError::expected_token(tok, self.peek_source()))
+        }
+    }
+
+    fn expect_identifier(&mut self) -> Parse<Identifier> {
+        match self.peek() {
+            TokKind::Identifier(payload) => {
+                self.advance();
+                Ok(payload)
+            }
+            _ => Err(ParseError::expected("identifier", self.peek_source())),
         }
     }
 
@@ -151,18 +162,15 @@ impl Parser {
             }
             TokKind::Type => {
                 self.advance();
-                let identifier = self.expect_p("type identifier", |p| match p.peek() {
-                    TokKind::Identifier(identifier) => {
-                        p.advance();
-                        Ok(Some(identifier.value))
-                    }
-                    _ => Ok(None),
-                })?;
+                let identifier = self.expect_identifier()?;
                 self.expect_token(TokKind::ColonEq)?;
                 let ty = self.expect_p("type expr", Self::type_expr)?;
                 let source_info = start_source.span(ty.source_info);
                 Ok(Some(Stmt {
-                    kind: StmtKind::TypeDef(Box::new(TypeDef { identifier, ty })),
+                    kind: StmtKind::TypeDef(Box::new(TypeDef {
+                        identifier: identifier.value,
+                        ty,
+                    })),
                     source_info,
                 }))
             }
@@ -206,12 +214,12 @@ impl Parser {
 
     fn as_expr(&mut self) -> ParseOpt<Expr> {
         if let Some(expr) = self.or_expr()? {
-            let start_span = expr.source_info;
+            let start_source = expr.source_info;
             match self.peek() {
                 TokKind::As => {
                     self.advance();
                     let ty = self.expect_p("type expr", Self::type_expr)?;
-                    let source_info = start_span.span(ty.source_info);
+                    let source_info = start_source.span(ty.source_info);
                     Ok(Some(Expr {
                         kind: ExprKind::As(Box::new(AsExpr { expr, ty })),
                         source_info,
@@ -279,7 +287,7 @@ impl Parser {
                 self.advance();
                 UnOpKind::Not
             }
-            _ => return self.base_expr(),
+            _ => return self.postfix_expr(),
         };
         let expr = self.expect_p("expr", Self::un_op_expr)?;
         let source_info = op_source.span(expr.source_info);
@@ -289,7 +297,36 @@ impl Parser {
         }))
     }
 
+    fn postfix_expr(&mut self) -> ParseOpt<Expr> {
+        let mut expr = if let Some(expr) = self.base_expr()? {
+            expr
+        } else {
+            return Ok(None);
+        };
+        loop {
+            match self.peek() {
+                TokKind::Dot => {
+                    self.advance();
+                    let end_source = self.peek_source();
+                    let field = self.expect_identifier()?;
+                    let source_info = expr.source_info.span(end_source);
+                    expr = Expr {
+                        kind: ExprKind::Field(Box::new(FieldExpr {
+                            expr,
+                            field: FieldKind::Identifier(field.value),
+                        })),
+                        source_info,
+                    }
+                }
+                _ => {
+                    return Ok(Some(expr));
+                }
+            }
+        }
+    }
+
     fn base_expr(&mut self) -> ParseOpt<Expr> {
+        let start_source = self.peek_source();
         match self.peek() {
             TokKind::ParLeft => {
                 self.advance();
@@ -298,37 +335,60 @@ impl Parser {
                 Ok(Some(expr))
             }
             TokKind::IntLiteral(payload) => {
-                let source_info = self.peek_source();
                 self.advance();
                 Ok(Some(Expr {
                     kind: ExprKind::Int(payload),
-                    source_info,
+                    source_info: start_source,
                 }))
             }
             TokKind::Identifier(payload) => {
-                let source_info = self.peek_source();
                 self.advance();
-                Ok(Some(Expr {
-                    kind: ExprKind::Ident(IdentExpr {
-                        value: payload.value,
-                    }),
-                    source_info,
-                }))
+
+                if TokKind::CurlyLeft == self.peek() {
+                    self.advance();
+                    let fields = self.repeat(|p| {
+                        let key = p.expect_identifier()?;
+                        p.expect_token(TokKind::ColonEq)?;
+                        let value = p.expect_p("expr", Self::expr)?;
+
+                        if TokKind::Semicolon == p.peek() {
+                            p.advance();
+                        }
+
+                        Ok(Some(StructField {
+                            key: key.value,
+                            value,
+                        }))
+                    })?;
+                    let end_source = self.expect_token(TokKind::CurlyRight)?;
+                    Ok(Some(Expr {
+                        kind: ExprKind::Struct(Box::new(StructExpr {
+                            name: payload.value,
+                            fields,
+                        })),
+                        source_info: start_source.span(end_source),
+                    }))
+                } else {
+                    Ok(Some(Expr {
+                        kind: ExprKind::Ident(IdentExpr {
+                            value: payload.value,
+                        }),
+                        source_info: start_source,
+                    }))
+                }
             }
             TokKind::True => {
-                let source_info = self.peek_source();
                 self.advance();
                 Ok(Some(Expr {
                     kind: ExprKind::True,
-                    source_info,
+                    source_info: start_source,
                 }))
             }
             TokKind::False => {
-                let source_info = self.peek_source();
                 self.advance();
                 Ok(Some(Expr {
                     kind: ExprKind::False,
-                    source_info,
+                    source_info: start_source,
                 }))
             }
             _ => Ok(None),
@@ -336,15 +396,15 @@ impl Parser {
     }
 
     fn binding(&mut self) -> ParseOpt<Bind> {
+        let start_source = self.peek_source();
         match self.peek() {
             TokKind::Identifier(payload) => {
-                let source_info = self.peek_source();
                 self.advance();
                 Ok(Some(Bind {
                     kind: BindKind::Ident(IdentBind {
                         value: payload.value,
                     }),
-                    source_info,
+                    source_info: start_source,
                 }))
             }
             _ => Ok(None),
@@ -352,15 +412,15 @@ impl Parser {
     }
 
     fn type_expr(&mut self) -> ParseOpt<TyExpr> {
+        let start_source = self.peek_source();
         match self.peek() {
             TokKind::Identifier(payload) => {
-                let source_info = self.peek_source();
                 self.advance();
                 Ok(Some(TyExpr {
                     kind: TyExprKind::Identifier(IdentTyExpr {
                         value: payload.value,
                     }),
-                    source_info,
+                    source_info: start_source,
                     ref_level: 0,
                 }))
             }
@@ -368,7 +428,28 @@ impl Parser {
                 self.advance();
                 let mut next = self.expect_p("type expr", Self::type_expr)?;
                 next.ref_level += 1;
+                next.source_info = start_source.span(next.source_info);
                 Ok(Some(next))
+            }
+            TokKind::Struct => {
+                self.advance();
+                let fields = self.repeat(|p| {
+                    let key = p.expect_identifier()?;
+                    p.expect_token(TokKind::Colon)?;
+                    let ty = p.expect_p("type expr", Self::type_expr)?;
+
+                    if TokKind::Semicolon == p.peek() {
+                        p.advance();
+                    }
+
+                    Ok(Some(StructTyField { key: key.value, ty }))
+                })?;
+                let end_source = self.expect_token(TokKind::End)?;
+                Ok(Some(TyExpr {
+                    kind: TyExprKind::Struct(StructTyExpr { fields }),
+                    source_info: start_source.span(end_source),
+                    ref_level: 0,
+                }))
             }
             _ => Ok(None),
         }

@@ -1,35 +1,3 @@
-/* Gremlin grammar
-Stmt =
-    | "let" Binding (":" TyExpr)? ":=" Expr
-    | Expr ":=" Expr
-    | "while" Expr "do" Block "end"
-    | "return" Expr?
-    | "func" identifier "(" (Binding ":" TyExpr) ** "," ")" ("->" TyExpr)? "do" Block "end"
-    | "struct" identifier "do" (identifier ":" TyExpr) ** "," "end"
-    | Expr
-Block = Stmt ** ";"
-Binding = identifier
-TyExpr =
-    | identifier "<" TyExpr ** "," ">"
-    | identifier
-    | "&" TyExpr
-Expr =
-    | "(" Expr ")"
-    | "if" Expr "then" Block ("else" "if" Expr "then" Block)* ("else" Block)? "end"
-    | Expr "(" Expr ** "," ")"
-    | Expr "." identifier
-    | Expr Op Expr
-    | Op Expr
-    | Expr "as" TyExpr
-    | identifier
-    | number
-    | string
-    | "true"
-    | "false"
-Op = "+" | "-" | "*" | "/" | "&" | "@"
-Comment = "#" ... eol
-*/
-
 mod ast;
 mod compiler;
 mod ir;
@@ -38,31 +6,34 @@ mod parser;
 mod runtime;
 mod source_info;
 mod token;
+mod typechecker;
+mod typed_ast;
+
+use typechecker::TypeChecker;
 
 use crate::compiler::Compiler;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::runtime::Runtime;
 
+fn eval(program: &str) -> u32 {
+    let tok = Lexer::lex(&program);
+    let ast = Parser::parse_body(tok).expect("ast");
+    let tc = TypeChecker::check(&ast).expect("typecheck");
+    let ir = Compiler::compile(&tc).expect("ir");
+    Runtime::eval(&ir)
+}
+
 fn main() {
-    let program = "123";
-    Runtime::eval(
-        &Compiler::compile(&Parser::parse_body(Lexer::lex(&program)).expect("expr")).expect("ir"),
-    );
+    eval("123");
 }
 
 #[cfg(test)]
 mod test {
-    use crate::compiler::Compiler;
-    use crate::lexer::Lexer;
-    use crate::parser::Parser;
-    use crate::runtime::Runtime;
+    use super::*;
 
     fn assert_expr_eq(str: &str, expected: u32) {
-        let result = Runtime::eval(
-            &Compiler::compile(&Parser::parse_body(Lexer::lex(str)).expect("expr")).expect("ir"),
-        );
-        assert_eq!(result, expected);
+        assert_eq!(eval(str), expected);
     }
 
     #[test]
@@ -189,6 +160,8 @@ mod test {
                 type word := int
                 let x: word := 123
                 x
-            ", 123)
+            ",
+            123,
+        )
     }
 }

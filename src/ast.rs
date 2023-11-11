@@ -64,6 +64,8 @@ pub enum ExprKind {
     UnaryOp(Box<UnaryOp>),
     BinaryOp(Box<BinaryOp>),
     As(Box<AsExpr>),
+    Struct(Box<StructExpr>),
+    Field(Box<FieldExpr>),
     True,
     False,
 }
@@ -108,6 +110,18 @@ pub struct AsExpr {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructExpr {
+    pub name: String,
+    pub fields: Vec<StructField>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructField {
+    pub key: String,
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TyExpr {
     pub kind: TyExprKind,
     pub source_info: SourceInfo,
@@ -117,9 +131,33 @@ pub struct TyExpr {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TyExprKind {
     Identifier(IdentTyExpr),
+    Struct(StructTyExpr),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IdentTyExpr {
     pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructTyExpr {
+    pub fields: Vec<StructTyField>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructTyField {
+    pub key: String,
+    pub ty: TyExpr,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldExpr {
+    pub expr: Expr,
+    pub field: FieldKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FieldKind {
+    Identifier(String),
+    // Path(Vec<String>)
 }

@@ -64,8 +64,11 @@ impl Lexer {
             '*' => self.adv_next(TokKind::Star),
             '(' => self.adv_next(TokKind::ParLeft),
             ')' => self.adv_next(TokKind::ParRight),
+            '{' => self.adv_next(TokKind::CurlyLeft),
+            '}' => self.adv_next(TokKind::CurlyRight),
             '&' => self.adv_next(TokKind::Ampersand),
             '@' => self.adv_next(TokKind::At),
+            '.' => self.adv_next(TokKind::Dot),
             ';' => self.adv_next(TokKind::Semicolon),
             ':' => {
                 self.advance();
