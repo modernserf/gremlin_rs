@@ -6,7 +6,7 @@ pub struct IR {
 }
 
 impl IR {
-    pub fn move_(dest: IRDest, src: IRSrc) -> Self {
+    pub fn mov(dest: IRDest, src: IRSrc) -> Self {
         IR {
             kind: IRKind::Move(dest, src),
         }
@@ -72,6 +72,7 @@ pub enum IRDest {
 pub enum IRSrc {
     Immediate(Word),
     StackOffset(Word),
+    R0,
     R0Offset(Word),
     PopStack,
 }

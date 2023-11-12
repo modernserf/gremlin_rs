@@ -75,6 +75,7 @@ impl Runtime {
     fn get_src(&mut self, src: IRSrc) -> Word {
         match src {
             IRSrc::Immediate(value) => value,
+            IRSrc::R0 => self.r0,
             IRSrc::R0Offset(offset) => self.memory[(self.r0 + offset) as usize],
             IRSrc::StackOffset(offset) => self.memory[(self.sp + offset) as usize],
             IRSrc::PopStack => {
