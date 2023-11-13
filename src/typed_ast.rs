@@ -15,8 +15,11 @@ impl Stmt {
     pub fn let_stmt(bind_id: BindId, expr: Expr) -> Self {
         Stmt::Let(Box::new(LetStmt { bind_id, expr }))
     }
-    pub fn assign(bind_id: BindId, expr: Expr) -> Self {
-        Stmt::Assign(Box::new(AssignStmt { bind_id, expr }))
+    pub fn assign(place: LValue, expr: Expr) -> Self {
+        Stmt::Assign(Box::new(AssignStmt {
+            lvalue: Box::new(place),
+            expr,
+        }))
     }
     pub fn expr(expr: Expr) -> Self {
         Stmt::Expr(Box::new(expr))
@@ -31,8 +34,35 @@ pub struct LetStmt {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssignStmt {
-    pub bind_id: BindId,
+    pub lvalue: Box<LValue>,
     pub expr: Expr,
+}
+
+// TODO: more lvalues
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LValue {
+    Id(BindId),
+    Field(Box<LValueField>),
+}
+
+impl LValue {
+    pub fn id(id: BindId) -> Self {
+        LValue::Id(id)
+    }
+    pub fn field(lvalue: LValue, offset: usize, size: usize) -> Self {
+        LValue::Field(Box::new(LValueField {
+            offset,
+            size,
+            lvalue,
+        }))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LValueField {
+    pub offset: usize,
+    pub size: usize,
+    pub lvalue: LValue,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,14 +112,22 @@ impl Expr {
             None
         }
     }
-    pub fn add_ref(expr: Expr) -> Option<Self> {
-        match &expr.kind {
-            ExprKind::Ident(id) => Some(Expr {
-                kind: ExprKind::RefIdent(*id),
-                ty: expr.ty.add_ref(),
-            }),
+    pub fn as_lvalue(&self) -> Option<LValue> {
+        match &self.kind {
+            ExprKind::Ident(id) => Some(LValue::id(*id)),
+            ExprKind::StructField(field) => {
+                let lvalue = field.expr.as_lvalue()?;
+
+                Some(LValue::field(lvalue, field.offset, field.size))
+            }
             _ => None,
         }
+    }
+    pub fn add_ref(expr: Expr) -> Option<Self> {
+        expr.as_lvalue().map(|lvalue| Expr {
+            kind: ExprKind::RefIdent(Box::new(lvalue)),
+            ty: expr.ty.add_ref(),
+        })
     }
     pub fn deref(expr: Expr) -> Option<Self> {
         expr.ty.deref().map(|ty| Expr {
@@ -122,7 +160,7 @@ pub enum ExprKind {
     Struct(Vec<StructField>),
     StructField(Box<StructField>),
     Ident(BindId),
-    RefIdent(BindId),
+    RefIdent(Box<LValue>),
     Deref(Box<Expr>),
     Not(Box<Expr>),
     BinaryOp(Box<BinaryOp>),
@@ -131,6 +169,7 @@ pub enum ExprKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructField {
     pub offset: usize,
+    pub size: usize,
     pub expr: Expr,
 }
 

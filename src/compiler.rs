@@ -31,9 +31,7 @@ struct Local {
 }
 impl Local {
     fn at(&self, idx: usize) -> Self {
-        if idx >= self.size {
-            panic!("out of range")
-        }
+        debug_assert!(idx < self.size);
         Self {
             frame_offset: self.frame_offset - idx as FrameOffset,
             size: 1,
@@ -44,6 +42,14 @@ impl Local {
     }
     fn to_src(&self) -> Src {
         Src::Local(*self)
+    }
+    fn subset(&self, offset: usize, size: usize) -> Self {
+        debug_assert!(self.size > offset);
+        debug_assert!(self.size - offset > size);
+        Self {
+            frame_offset: self.frame_offset - offset as FrameOffset,
+            size,
+        }
     }
 }
 
@@ -112,7 +118,7 @@ impl Compiler {
                 Ok(())
             }
             t::Stmt::Assign(x) => {
-                let mem = *self.scope.get(&x.bind_id).expect("assignment");
+                let mem = self.lvalue(&x.lvalue)?;
                 self.expr(&x.expr, mem.to_dest())?;
                 Ok(())
             }
@@ -135,8 +141,8 @@ impl Compiler {
                 let mem = *self.scope.get(&bind_id).expect("local");
                 self.write_multiple(IR::mov, dest, Src::Local(mem), mem.size)
             }
-            t::ExprKind::RefIdent(bind_id) => {
-                let mem = *self.scope.get(&bind_id).expect("local");
+            t::ExprKind::RefIdent(place) => {
+                let mem = self.lvalue(place)?;
                 self.write(IR::load_address, dest, Src::Local(mem))
             }
             t::ExprKind::Deref(x) => {
@@ -188,7 +194,7 @@ impl Compiler {
                 let size = expr.ty.size();
 
                 // fast path for <ident>.foo over <expr>.foo
-                // TODO: fast path for <ident>.<ident>.<ident>...foo
+                // TODO: separate StructField(LValue), StructField(Expr)
                 if let t::ExprKind::Ident(bind_id) = field.expr.kind {
                     let base = *self.scope.get(&bind_id).expect("local");
                     let field_src = Src::Local(Local {
@@ -210,6 +216,19 @@ impl Compiler {
             }
         }
     }
+    fn lvalue(&mut self, lvalue: &t::LValue) -> Compile<Local> {
+        match lvalue {
+            t::LValue::Id(id) => {
+                let mem = *self.scope.get(&id).expect("place");
+                Ok(mem)
+            }
+            t::LValue::Field(x) => {
+                let parent = self.lvalue(&x.lvalue)?;
+                let child = parent.subset(x.offset, x.size);
+                Ok(child)
+            }
+        }
+    }
     fn allocate(&mut self, size: usize, dest: Dest) -> Compile<Local> {
         match dest {
             Dest::Stack => {
@@ -221,9 +240,7 @@ impl Compiler {
                 })
             }
             Dest::Local(local) => {
-                // if local.size != size {
-                //     panic!("invalid local size")
-                // }
+                debug_assert!(local.size == size);
                 Ok(local)
             }
         }

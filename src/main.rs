@@ -230,5 +230,32 @@ mod test {
         ",
             3,
         );
+        assert_expr_eq(
+            "
+            type Pair := struct
+                x: int
+                y: int
+            end
+
+            let p := Pair { x := 1; y := 2 }
+            p.x := 3
+            p.x
+        ",
+            3,
+        );
+        assert_expr_eq(
+            "
+            type Pair := struct
+                x: int
+                y: int
+            end
+            
+            let p := Pair { x := 1; y := 2 }
+            let ptr := &p.x
+            p.x := 5
+            @ptr
+        ",
+            5,
+        )
     }
 }

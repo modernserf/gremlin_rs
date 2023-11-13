@@ -49,9 +49,9 @@ impl TypeError {
             },
         }
     }
-    fn invalid_assignment() -> Self {
+    fn invalid_lvalue() -> Self {
         Self {
-            kind: TypeErrorKind::InvalidAssignment,
+            kind: TypeErrorKind::InvalidLValue,
         }
     }
 }
@@ -65,7 +65,7 @@ pub enum TypeErrorKind {
     InvalidCast,
     InvalidReference,
     InvalidDereference,
-    InvalidAssignment,
+    InvalidLValue,
 }
 
 struct TypeScope {
@@ -202,14 +202,14 @@ impl TypeChecker {
                     let ty = self.type_expr(type_expr)?;
                     Self::check_expr_type(&expr, &ty)?;
                 }
-                let res = self.add_binding(&x.binding, &expr.ty)?;
+                let res = self.binding(&x.binding, &expr.ty)?;
                 Ok(Some(Stmt::let_stmt(res.id, expr)))
             }
             ast::StmtKind::Assign(x) => {
                 let expr = self.expr(&x.expr)?;
-                let res = self.update_binding(&x.target)?;
-                Self::check_expr_type(&expr, &res.ty)?;
-                Ok(Some(Stmt::assign(res.id, expr)))
+                let (res, ty) = self.lvalue(&x.target)?;
+                Self::check_expr_type(&expr, &ty)?;
+                Ok(Some(Stmt::assign(res, expr)))
             }
             ast::StmtKind::Expr(x) => {
                 let expr = self.expr(&x)?;
@@ -301,6 +301,7 @@ impl TypeChecker {
                     Self::check_expr_type(&value, &found.ty)?;
                     out_fields.push(StructField {
                         offset: found.offset,
+                        size: found.ty.size(),
                         expr: value,
                     });
                 }
@@ -322,31 +323,30 @@ impl TypeChecker {
                     .get(key)
                     .ok_or_else(|| {
                         todo!("missing struct field");
-                    })?;
-                let ty = rec.ty.clone();
+                    })?
+                    .clone();
 
                 let out = StructField {
                     offset: rec.offset,
+                    size: rec.ty.size(),
                     expr: target,
                 };
 
-                Ok(Expr::struct_field(out, ty))
+                Ok(Expr::struct_field(out, rec.ty))
             }
         }
     }
-    fn add_binding(&mut self, binding: &ast::Bind, ty: &Ty) -> TypeRes<Update> {
+    fn binding(&mut self, binding: &ast::Bind, ty: &Ty) -> TypeRes<Update> {
         match &binding.kind {
             ast::BindKind::Ident(x) => Ok(self.value_scope.add(x.value.to_string(), ty.clone())),
         }
     }
-    fn update_binding(&mut self, target: &ast::Expr) -> TypeRes<&ScopeRecord> {
-        match &target.kind {
-            ast::ExprKind::Ident(x) => self
-                .value_scope
-                .get(&x.value)
-                .ok_or_else(|| TypeError::unknown_identifier()),
-            _ => Err(TypeError::invalid_assignment()),
-        }
+    fn lvalue(&mut self, expr: &ast::Expr) -> TypeRes<(LValue, Ty)> {
+        let typed_expr = self.expr(expr)?;
+        let lvalue = typed_expr
+            .as_lvalue()
+            .ok_or_else(|| TypeError::invalid_lvalue())?;
+        Ok((lvalue, typed_expr.ty))
     }
     fn type_expr(&mut self, type_expr: &ast::TyExpr) -> TypeRes<Ty> {
         match &type_expr.kind {
@@ -437,6 +437,6 @@ mod test {
 
     #[test]
     fn invalid_assignment() {
-        check_err("123 := 4", TypeError::invalid_assignment())
+        check_err("123 := 4", TypeError::invalid_lvalue())
     }
 }
