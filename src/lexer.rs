@@ -105,7 +105,13 @@ impl Lexer {
             self.advance();
             sum = sum * 10 + (digit as u128)
         }
-        TokKind::IntLiteral(IntLiteral { value: sum })
+        match self.peek() {
+            'l' => {
+                self.advance();
+                TokKind::LongLiteral(IntLiteral { value: sum })
+            }
+            _ => TokKind::IntLiteral(IntLiteral { value: sum }),
+        }
     }
     fn identifier_or_keyword(&mut self) -> TokKind {
         let mut str = String::new();

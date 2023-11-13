@@ -60,6 +60,7 @@ pub struct Expr {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExprKind {
     Int(IntLiteral),
+    Long(IntLiteral),
     Ident(IdentExpr),
     UnaryOp(Box<UnaryOp>),
     BinaryOp(Box<BinaryOp>),

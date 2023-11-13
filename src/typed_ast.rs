@@ -48,6 +48,12 @@ impl Expr {
             ty,
         }
     }
+    pub fn long(hi: Word, lo: Word, ty: Ty) -> Self {
+        Expr {
+            kind: ExprKind::Long(hi, lo),
+            ty,
+        }
+    }
     pub fn ident(id: usize, ty: Ty) -> Self {
         Expr {
             kind: ExprKind::Ident(id),
@@ -100,6 +106,7 @@ impl Expr {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExprKind {
     Constant(Word),
+    Long(Word, Word),
     Ident(BindId),
     RefIdent(BindId),
     Deref(Box<Expr>),
@@ -136,6 +143,14 @@ impl Ty {
             id: 2,
             kind: TyKind::Primitive,
             width: 1,
+            ref_level: 0,
+        }
+    }
+    pub fn long() -> Self {
+        Self {
+            id: 3,
+            kind: TyKind::Primitive,
+            width: 2,
             ref_level: 0,
         }
     }

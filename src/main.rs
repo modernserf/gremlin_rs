@@ -164,4 +164,17 @@ mod test {
             123,
         )
     }
+
+    #[test]
+    fn longs() {
+        assert_expr_eq("123l", 123);
+        assert_expr_eq(
+            "
+            let a := 123l;
+            let b := &a;
+            @b
+        ",
+            123,
+        );
+    }
 }

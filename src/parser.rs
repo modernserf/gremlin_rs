@@ -341,6 +341,13 @@ impl Parser {
                     source_info: start_source,
                 }))
             }
+            TokKind::LongLiteral(payload) => {
+                self.advance();
+                Ok(Some(Expr {
+                    kind: ExprKind::Long(payload),
+                    source_info: start_source,
+                }))
+            }
             TokKind::Identifier(payload) => {
                 self.advance();
 

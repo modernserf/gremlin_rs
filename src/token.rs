@@ -35,6 +35,7 @@ pub enum TokKind {
     At,
     Identifier(Identifier),
     IntLiteral(IntLiteral),
+    LongLiteral(IntLiteral),
     // control
     Ignored,
     EndOfInput,

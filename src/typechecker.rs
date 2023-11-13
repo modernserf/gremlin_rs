@@ -19,6 +19,7 @@ impl TypeScope {
             scope: HashMap::from_iter(vec![
                 ("int".to_string(), Ty::int()),
                 ("bool".to_string(), Ty::bool()),
+                ("long".to_string(), Ty::long()),
             ]),
             next_id: 128,
         }
@@ -146,7 +147,8 @@ impl TypeChecker {
             }
             ast::StmtKind::Assign(x) => {
                 let expr = self.expr(&x.expr)?;
-                let res = self.update_binding(&x.target, &expr.ty)?;
+                let res = self.update_binding(&x.target)?;
+                Self::check_expr_type(&expr, &res.ty)?;
                 Ok(Some(Stmt::assign(res.id, expr)))
             }
             ast::StmtKind::Expr(x) => {
@@ -173,10 +175,18 @@ impl TypeChecker {
             ast::ExprKind::False => Ok(Expr::constant(0, Ty::bool())),
             ast::ExprKind::True => Ok(Expr::constant(1, Ty::bool())),
             ast::ExprKind::Int(x) => {
-                if x.value > (i32::MAX as u128) {
+                if x.value > (u32::MAX as u128) {
                     panic!("todo int size error")
                 }
                 Ok(Expr::constant(x.value as Word, Ty::int()))
+            }
+            ast::ExprKind::Long(x) => {
+                if x.value > (u64::MAX as u128) {
+                    panic!("todo long size error")
+                }
+                let hi = (x.value >> 32) as Word;
+                let lo = x.value as Word;
+                Ok(Expr::long(hi, lo, Ty::long()))
             }
             ast::ExprKind::Ident(x) => {
                 let res = self
@@ -192,7 +202,7 @@ impl TypeChecker {
                         Expr::add_ref(value).ok_or_else(|| panic!("todo ref error"))
                     }
                     ast::UnOpKind::Deref => {
-                        Expr::deref(dbg!(value)).ok_or_else(|| panic!("todo deref error"))
+                        Expr::deref(value).ok_or_else(|| panic!("todo deref error"))
                     }
                     ast::UnOpKind::Not => {
                         Self::check_expr_type(&value, &Ty::bool())?;
@@ -218,7 +228,7 @@ impl TypeChecker {
             ast::BindKind::Ident(x) => Ok(self.value_scope.add(x.value.to_string(), ty.clone())),
         }
     }
-    fn update_binding(&mut self, target: &ast::Expr, ty: &Ty) -> TypeRes<&ScopeRecord> {
+    fn update_binding(&mut self, target: &ast::Expr) -> TypeRes<&ScopeRecord> {
         match &target.kind {
             ast::ExprKind::Ident(x) => self
                 .value_scope
