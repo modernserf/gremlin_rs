@@ -9,12 +9,11 @@ mod token;
 mod typechecker;
 mod typed_ast;
 
-use typechecker::TypeChecker;
-
 use crate::compiler::Compiler;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::runtime::Runtime;
+use crate::typechecker::TypeChecker;
 
 fn eval(program: &str) -> u32 {
     let tok = Lexer::lex(&program);
@@ -175,6 +174,14 @@ mod test {
             @b
         ",
             123,
+        );
+        assert_expr_eq(
+            "
+            let a := 123l;
+            a := 456l;
+            a
+        ",
+            456,
         );
     }
 }

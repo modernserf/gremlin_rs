@@ -6,7 +6,64 @@ use std::collections::HashMap;
 type TypeRes<T> = Result<T, TypeError>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TypeError {}
+pub struct TypeError {
+    pub kind: TypeErrorKind,
+}
+
+impl TypeError {
+    fn invalid_cast() -> Self {
+        Self {
+            kind: TypeErrorKind::InvalidCast,
+        }
+    }
+    fn invalid_number_literal() -> Self {
+        Self {
+            kind: TypeErrorKind::NumberLiteralTooLarge,
+        }
+    }
+    fn unknown_identifier() -> Self {
+        Self {
+            kind: TypeErrorKind::UnknownIdentifier,
+        }
+    }
+    fn unknown_type_identifier() -> Self {
+        Self {
+            kind: TypeErrorKind::UnknownTypeIdentifier,
+        }
+    }
+    fn invalid_reference() -> Self {
+        Self {
+            kind: TypeErrorKind::InvalidReference,
+        }
+    }
+    fn invalid_dereference() -> Self {
+        Self {
+            kind: TypeErrorKind::InvalidDereference,
+        }
+    }
+    fn expected_type() -> Self {
+        Self {
+            kind: TypeErrorKind::ExpectedType,
+        }
+    }
+    fn invalid_assignment() -> Self {
+        Self {
+            kind: TypeErrorKind::InvalidAssignment,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeErrorKind {
+    UnknownIdentifier,
+    UnknownTypeIdentifier,
+    ExpectedType,
+    NumberLiteralTooLarge,
+    InvalidCast,
+    InvalidReference,
+    InvalidDereference,
+    InvalidAssignment,
+}
 
 struct TypeScope {
     scope: HashMap<String, Ty>,
@@ -170,19 +227,19 @@ impl TypeChecker {
                 let cast_to = self.type_expr(&x.ty)?;
                 from_expr
                     .cast(cast_to)
-                    .ok_or_else(|| panic!("todo invalid cast"))
+                    .ok_or_else(|| TypeError::invalid_cast())
             }
             ast::ExprKind::False => Ok(Expr::constant(0, Ty::bool())),
             ast::ExprKind::True => Ok(Expr::constant(1, Ty::bool())),
             ast::ExprKind::Int(x) => {
                 if x.value > (u32::MAX as u128) {
-                    panic!("todo int size error")
+                    return Err(TypeError::invalid_number_literal());
                 }
                 Ok(Expr::constant(x.value as Word, Ty::int()))
             }
             ast::ExprKind::Long(x) => {
                 if x.value > (u64::MAX as u128) {
-                    panic!("todo long size error")
+                    return Err(TypeError::invalid_number_literal());
                 }
                 let hi = (x.value >> 32) as Word;
                 let lo = x.value as Word;
@@ -192,17 +249,17 @@ impl TypeChecker {
                 let res = self
                     .value_scope
                     .get(&x.value)
-                    .ok_or_else(|| panic!("todo unknown key"))?;
+                    .ok_or_else(|| TypeError::unknown_identifier())?;
                 Ok(Expr::ident(res.id, res.ty.clone()))
             }
             ast::ExprKind::UnaryOp(x) => {
                 let value = self.expr(&x.expr)?;
                 match &x.operator {
                     ast::UnOpKind::Ref => {
-                        Expr::add_ref(value).ok_or_else(|| panic!("todo ref error"))
+                        Expr::add_ref(value).ok_or_else(|| TypeError::invalid_reference())
                     }
                     ast::UnOpKind::Deref => {
-                        Expr::deref(value).ok_or_else(|| panic!("todo deref error"))
+                        Expr::deref(value).ok_or_else(|| TypeError::invalid_dereference())
                     }
                     ast::UnOpKind::Not => {
                         Self::check_expr_type(&value, &Ty::bool())?;
@@ -216,7 +273,7 @@ impl TypeChecker {
                 let ty = self
                     .bin_op
                     .check(x.operator, &left.ty, &right.ty)
-                    .ok_or_else(|| panic!("todo type error"))?;
+                    .ok_or_else(|| TypeError::expected_type())?;
                 Ok(Expr::bin_op(x.operator, left, right, ty))
             }
             ast::ExprKind::Struct(_) => unimplemented!(),
@@ -233,8 +290,8 @@ impl TypeChecker {
             ast::ExprKind::Ident(x) => self
                 .value_scope
                 .get(&x.value)
-                .ok_or_else(|| panic!("unknown binding")),
-            _ => panic!("todo invalid lhs"),
+                .ok_or_else(|| TypeError::unknown_identifier()),
+            _ => Err(TypeError::invalid_assignment()),
         }
     }
     fn type_expr(&mut self, type_expr: &ast::TyExpr) -> TypeRes<Ty> {
@@ -243,9 +300,9 @@ impl TypeChecker {
                 .type_scope
                 .get(&x.value)
                 .map(|t| t.with_ref_level(type_expr.ref_level))
-                .ok_or_else(|| panic!("unknown type")),
+                .ok_or_else(|| TypeError::unknown_type_identifier()),
             ast::TyExprKind::Struct(_) => {
-                let id = self.type_scope.new_id();
+                // let id = self.type_scope.new_id();
                 unimplemented!()
             }
         }
@@ -254,9 +311,67 @@ impl TypeChecker {
         if &expr.ty == ty {
             return Ok(());
         };
-        panic!("todo type error")
+        Err(TypeError::expected_type())
     }
 }
 
 #[cfg(test)]
-mod test {}
+mod test {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn check_err(str: &str, expected: TypeError) {
+        let tok = Lexer::lex(&str);
+        let ast = Parser::parse_body(tok).expect("ast");
+        let tc = TypeChecker::check(&ast).expect_err("typecheck");
+
+        assert_eq!(tc, expected);
+    }
+
+    #[test]
+    fn unknown_identifier() {
+        check_err("foo", TypeError::unknown_identifier());
+    }
+
+    #[test]
+    fn unknown_type_identifier() {
+        check_err("let x : foo := 1", TypeError::unknown_type_identifier());
+    }
+
+    #[test]
+    fn expected_type() {
+        check_err("let x : bool := 1", TypeError::expected_type());
+        check_err("5 + true", TypeError::expected_type());
+        check_err("not 3", TypeError::expected_type());
+    }
+
+    #[test]
+    fn invalid_number_literal() {
+        check_err("1234567890123455667", TypeError::invalid_number_literal());
+        check_err(
+            "12345678901234556671234567890123455667l",
+            TypeError::invalid_number_literal(),
+        );
+    }
+
+    #[test]
+    fn invalid_cast() {
+        check_err("123l as int", TypeError::invalid_cast());
+    }
+
+    #[test]
+    fn invalid_reference() {
+        check_err("&123", TypeError::invalid_reference());
+    }
+
+    #[test]
+    fn invalid_dereference() {
+        check_err("@123", TypeError::invalid_dereference());
+    }
+
+    #[test]
+    fn invalid_assignment() {
+        check_err("123 := 4", TypeError::invalid_assignment())
+    }
+}

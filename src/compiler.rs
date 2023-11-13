@@ -203,7 +203,7 @@ impl Compiler {
             t::ExprKind::RefIdent(id) => {
                 let mut src = self.get_scope_src(*id);
                 src.dest_width = 1;
-                let res = self.write(IR::load_address, context.dest, dbg!(src));
+                let res = self.write(IR::load_address, context.dest, src);
                 Ok(res)
             }
             t::ExprKind::Deref(t) => {
