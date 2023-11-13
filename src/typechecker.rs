@@ -1,7 +1,7 @@
 use crate::ast;
 use crate::ir::Word;
 use crate::typed_ast::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 type TypeRes<T> = Result<T, TypeError>;
 
@@ -41,9 +41,12 @@ impl TypeError {
             kind: TypeErrorKind::InvalidDereference,
         }
     }
-    fn expected_type() -> Self {
+    fn expected_type(received: &Ty, expected: &Ty) -> Self {
         Self {
-            kind: TypeErrorKind::ExpectedType,
+            kind: TypeErrorKind::ExpectedType {
+                received: received.clone(),
+                expected: expected.clone(),
+            },
         }
     }
     fn invalid_assignment() -> Self {
@@ -57,7 +60,7 @@ impl TypeError {
 pub enum TypeErrorKind {
     UnknownIdentifier,
     UnknownTypeIdentifier,
-    ExpectedType,
+    ExpectedType { expected: Ty, received: Ty },
     NumberLiteralTooLarge,
     InvalidCast,
     InvalidReference,
@@ -273,11 +276,62 @@ impl TypeChecker {
                 let ty = self
                     .bin_op
                     .check(x.operator, &left.ty, &right.ty)
-                    .ok_or_else(|| TypeError::expected_type())?;
+                    .ok_or_else(|| TypeError::expected_type(&right.ty, &left.ty))?;
                 Ok(Expr::bin_op(x.operator, left, right, ty))
             }
-            ast::ExprKind::Struct(_) => unimplemented!(),
-            ast::ExprKind::Field(_) => unimplemented!(),
+            ast::ExprKind::Struct(x) => {
+                let ty = self
+                    .type_scope
+                    .get(&x.name)
+                    .ok_or_else(|| TypeError::unknown_type_identifier())?
+                    .clone();
+                let expected_fields = ty.fields().ok_or_else(|| panic!("todo expected struct"))?;
+                let mut out_fields = Vec::new();
+                let mut used_fields = HashSet::new();
+                for field in &x.fields {
+                    let found = expected_fields
+                        .get(&field.key)
+                        .ok_or_else(|| todo!("unknown field"))?;
+                    if used_fields.contains(&found.offset) {
+                        todo!("duplicate field")
+                    }
+                    used_fields.insert(found.offset);
+
+                    let value = self.expr(&field.value)?;
+                    Self::check_expr_type(&value, &found.ty)?;
+                    out_fields.push(StructField {
+                        offset: found.offset,
+                        expr: value,
+                    });
+                }
+                if used_fields.len() < expected_fields.len() {
+                    todo!("missing field")
+                }
+
+                Ok(Expr::struc(out_fields, ty))
+            }
+            ast::ExprKind::Field(x) => {
+                let target = self.expr(&x.expr)?;
+                let key = match &x.field {
+                    ast::FieldKind::Identifier(k) => k,
+                };
+                let rec = target
+                    .ty
+                    .fields()
+                    .ok_or_else(|| todo!("expected struct"))?
+                    .get(key)
+                    .ok_or_else(|| {
+                        todo!("missing struct field");
+                    })?;
+                let ty = rec.ty.clone();
+
+                let out = StructField {
+                    offset: rec.offset,
+                    expr: target,
+                };
+
+                Ok(Expr::struct_field(out, ty))
+            }
         }
     }
     fn add_binding(&mut self, binding: &ast::Bind, ty: &Ty) -> TypeRes<Update> {
@@ -301,9 +355,14 @@ impl TypeChecker {
                 .get(&x.value)
                 .map(|t| t.with_ref_level(type_expr.ref_level))
                 .ok_or_else(|| TypeError::unknown_type_identifier()),
-            ast::TyExprKind::Struct(_) => {
-                // let id = self.type_scope.new_id();
-                unimplemented!()
+            ast::TyExprKind::Struct(x) => {
+                let id = self.type_scope.new_id();
+                let mut fields = Vec::new();
+                for field in &x.fields {
+                    let field_ty = self.type_expr(&field.ty)?;
+                    fields.push((field.key.to_string(), field_ty));
+                }
+                Ok(Ty::structure(id, fields))
             }
         }
     }
@@ -311,7 +370,7 @@ impl TypeChecker {
         if &expr.ty == ty {
             return Ok(());
         };
-        Err(TypeError::expected_type())
+        Err(TypeError::expected_type(&expr.ty, &ty))
     }
 }
 
@@ -341,9 +400,15 @@ mod test {
 
     #[test]
     fn expected_type() {
-        check_err("let x : bool := 1", TypeError::expected_type());
-        check_err("5 + true", TypeError::expected_type());
-        check_err("not 3", TypeError::expected_type());
+        check_err(
+            "let x : bool := 1",
+            TypeError::expected_type(&Ty::int(), &Ty::bool()),
+        );
+        check_err(
+            "5 + true",
+            TypeError::expected_type(&Ty::bool(), &Ty::int()),
+        );
+        check_err("not 3", TypeError::expected_type(&Ty::int(), &Ty::bool()));
     }
 
     #[test]

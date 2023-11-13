@@ -1,375 +1,288 @@
 use std::collections::HashMap;
 
+use crate::ast;
+use crate::ir::{IRDest, IRSrc, Word, IR};
 use crate::typed_ast as t;
-use crate::{ast, ir::*};
 
+/*
+FrameOffset
+...
+top ->  127: 3
+        126: 2   // let p = Point { x: 2, y: 3 }
+(SP) -> 125: 100 // let q = 100
+        124:
+...
+p : frame_offset = 2, width = 2, current stack_offset = 1
+q : frame_offset = 3, width = 1, current stack_offset = 0
+
+arguments, return value & return address are at negative frame offsets
+*/
 type FrameOffset = isize;
+type Id = usize;
+type IROp = fn(IRDest, IRSrc) -> IR;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompileError {}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ScopeRecord {
-    width: Word,
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct Local {
     frame_offset: FrameOffset,
+    size: usize,
+}
+impl Local {
+    fn at(&self, idx: usize) -> Self {
+        if idx >= self.size {
+            panic!("out of range")
+        }
+        Self {
+            frame_offset: self.frame_offset - idx as FrameOffset,
+            size: 1,
+        }
+    }
+    fn to_dest(&self) -> Dest {
+        Dest::Local(*self)
+    }
+    fn to_src(&self) -> Src {
+        Src::Local(*self)
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ExprContext {
-    dest: ExprDest,
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Dest {
+    Stack,
+    Local(Local),
 }
-
-impl ExprContext {
-    fn to_stack() -> Self {
-        ExprContext {
-            dest: ExprDest::push_stack(),
+impl Dest {
+    fn at(&self, idx: usize) -> Self {
+        match self {
+            Dest::Local(local) => Dest::Local(local.at(idx)),
+            _ => panic!("invalid dest index"),
         }
     }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-struct ExprDest {
-    kind: ExprDestKind,
-}
-
-impl ExprDest {
-    fn frame_offset(offset: FrameOffset) -> Self {
-        ExprDest {
-            kind: ExprDestKind::FrameOffset(offset),
-        }
-    }
-    fn push_stack() -> Self {
-        ExprDest {
-            kind: ExprDestKind::PushStack,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum ExprDestKind {
-    PushStack,
-    FrameOffset(FrameOffset),
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-struct ExprSrc {
-    kind: ExprSrcKind,
-    dest_width: Word,
-}
-
-impl ExprSrc {
-    fn imm(value: Word) -> Self {
-        ExprSrc {
-            kind: ExprSrcKind::Immediate(value),
-            dest_width: 1,
-        }
-    }
-    fn long(hi: Word, lo: Word) -> Self {
-        ExprSrc {
-            kind: ExprSrcKind::Long(hi, lo),
-            dest_width: 2,
-        }
-    }
-    fn frame_offset(offset: FrameOffset, dest_width: Word) -> Self {
-        ExprSrc {
-            kind: ExprSrcKind::FrameOffset(offset),
-            dest_width: dest_width,
-        }
-    }
-    fn pop_stack(width: Word) -> Self {
-        ExprSrc {
-            kind: ExprSrcKind::PopStack,
-            dest_width: width,
-        }
-    }
-    fn at_r0(width: Word) -> Self {
-        ExprSrc {
-            kind: ExprSrcKind::AtR0,
-            dest_width: width,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum ExprSrcKind {
+enum Src {
+    Local(Local),
     Immediate(Word),
-    Long(Word, Word),
-    FrameOffset(FrameOffset),
-    PopStack,
-    AtR0,
+    R0Offset(Word),
 }
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-struct WriteResult {
-    kind: WriteResultKind,
-    width: Word,
-}
-
-impl WriteResult {
-    fn to_dest(&self) -> ExprDest {
-        match self.kind {
-            WriteResultKind::FrameOffset(frame_offset) => ExprDest::frame_offset(frame_offset),
+impl Src {
+    fn at(&self, idx: usize) -> Self {
+        match self {
+            Src::Local(local) => Src::Local(local.at(idx)),
+            Src::R0Offset(offset) => Src::R0Offset(offset + idx as Word),
+            _ => panic!("invalid src index"),
         }
     }
-    fn to_scope_record(&self) -> ScopeRecord {
-        match self.kind {
-            WriteResultKind::FrameOffset(frame_offset_and_width) => ScopeRecord {
-                frame_offset: frame_offset_and_width,
-                width: self.width,
-            },
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum WriteResultKind {
-    FrameOffset(FrameOffset),
 }
 
 type Compile<T> = Result<T, CompileError>;
+
 pub struct Compiler {
-    output: Vec<IR>,
-    scope: HashMap<usize, ScopeRecord>,
+    scope: HashMap<Id, Local>,
     current_frame_offset: FrameOffset,
+    out: Vec<IR>,
 }
 
 impl Compiler {
     pub fn compile(body: &[t::Stmt]) -> Compile<Vec<IR>> {
         let mut compiler = Self::new();
         compiler.body(body)?;
-        Ok(compiler.output)
+        Ok(compiler.out)
     }
     fn new() -> Self {
-        Self {
-            output: Vec::new(),
+        Compiler {
             scope: HashMap::new(),
             current_frame_offset: 0,
+            out: Vec::new(),
         }
     }
-
     fn body(&mut self, body: &[t::Stmt]) -> Compile<()> {
         for stmt in body {
             self.stmt(stmt)?;
         }
         Ok(())
     }
-
     fn stmt(&mut self, stmt: &t::Stmt) -> Compile<()> {
         match stmt {
-            t::Stmt::Let(t) => {
-                let res = self.expr(&t.expr, ExprContext::to_stack())?;
-                self.scope.insert(t.bind_id, res.to_scope_record());
+            t::Stmt::Let(x) => {
+                let mem = self.expr(&x.expr, Dest::Stack)?;
+                self.scope.insert(x.bind_id, mem);
                 Ok(())
             }
-            t::Stmt::Assign(t) => {
-                let dest = self.get_scope_dest(t.bind_id);
-                self.expr(&t.expr, ExprContext { dest })?;
+            t::Stmt::Assign(x) => {
+                let mem = *self.scope.get(&x.bind_id).expect("assignment");
+                self.expr(&x.expr, mem.to_dest())?;
                 Ok(())
             }
-            t::Stmt::Expr(expr) => {
-                self.expr(expr, ExprContext::to_stack())?;
+            t::Stmt::Expr(x) => {
+                self.expr(&x, Dest::Stack)?;
                 Ok(())
             }
         }
     }
-    fn expr(&mut self, expr: &t::Expr, context: ExprContext) -> Compile<WriteResult> {
+    fn expr(&mut self, expr: &t::Expr, dest: Dest) -> Compile<Local> {
         match &expr.kind {
-            t::ExprKind::Constant(value) => {
-                let res = self.write(IR::mov, context.dest, ExprSrc::imm(*value));
-                Ok(res)
-            }
+            t::ExprKind::Constant(value) => self.write(IR::mov, dest, Src::Immediate(*value)),
             t::ExprKind::Long(hi, lo) => {
-                let res = self.write(IR::mov, context.dest, ExprSrc::long(*hi, *lo));
-                Ok(res)
+                let mem = self.allocate(2, dest)?;
+                self.write(IR::mov, mem.at(0).to_dest(), Src::Immediate(*lo))?;
+                self.write(IR::mov, mem.at(1).to_dest(), Src::Immediate(*hi))?;
+                Ok(mem)
             }
-            t::ExprKind::Ident(id) => {
-                let src = self.get_scope_src(*id);
-                let res = self.write(IR::mov, context.dest, src);
-                Ok(res)
+            t::ExprKind::Ident(bind_id) => {
+                let mem = *self.scope.get(&bind_id).expect("local");
+                self.write_multiple(IR::mov, dest, Src::Local(mem), mem.size)
             }
-            t::ExprKind::RefIdent(id) => {
-                let mut src = self.get_scope_src(*id);
-                src.dest_width = 1;
-                let res = self.write(IR::load_address, context.dest, src);
-                Ok(res)
+            t::ExprKind::RefIdent(bind_id) => {
+                let mem = *self.scope.get(&bind_id).expect("local");
+                self.write(IR::load_address, dest, Src::Local(mem))
             }
-            t::ExprKind::Deref(t) => {
-                self.expr(t, ExprContext::to_stack())?;
-                self.write_ir(IR::mov(IRDest::R0, IRSrc::PopStack));
-                self.current_frame_offset -= 1;
-                let deref_size = t.ty.deref().expect("deref").size();
-                let res = self.write(IR::mov, context.dest, ExprSrc::at_r0(deref_size as Word));
-                Ok(res)
+            t::ExprKind::Deref(x) => {
+                let size = x.ty.deref().expect("deref").size();
+                let mem = self.allocate(size, dest)?;
+                let addr = self.expr(&x, Dest::Stack)?;
+                debug_assert!(addr.size == 1);
+                self.write_ir(IR::mov(
+                    IRDest::R0,
+                    IRSrc::StackOffset(self.stack_offset(addr)),
+                ));
+                let out = self.write_multiple(IR::mov, mem.to_dest(), Src::R0Offset(0), size)?;
+                self.deallocate(addr)?;
+                Ok(out)
             }
-            t::ExprKind::Not(t) => {
-                let res = self.expr(t, context)?;
-                let res = self.write(IR::xor, res.to_dest(), ExprSrc::imm(1));
-                Ok(res)
+            t::ExprKind::Not(x) => {
+                let mem = self.expr(&x, dest)?;
+                self.write(IR::xor, mem.to_dest(), Src::Immediate(1))
             }
-            t::ExprKind::BinaryOp(t) => {
-                let left_res = self.expr(&t.left, context)?;
-                self.expr(&t.right, ExprContext::to_stack())?;
-                // TODO: ops on larger than word-sized values
-                let op = match t.operator {
+            t::ExprKind::BinaryOp(x) => {
+                let op = match x.operator {
                     ast::BinOpKind::Add => IR::add,
                     ast::BinOpKind::Mult => IR::mult,
                     ast::BinOpKind::And => IR::and,
                     ast::BinOpKind::Or => IR::or,
                 };
-                let res = self.write(op, left_res.to_dest(), ExprSrc::pop_stack(1));
+                let left = self.expr(&x.left, dest)?;
+                let right = self.expr(&x.right, Dest::Stack)?;
+                let res = self.write(op, left.to_dest(), right.to_src())?;
+                self.deallocate(right)?;
                 Ok(res)
+            }
+            t::ExprKind::Struct(fields) => {
+                let size = expr.ty.size();
+                let mem = self.allocate(size, dest)?;
+                for field in fields {
+                    let offset = field.offset;
+                    let size = field.expr.ty.size();
+                    let field_dest = Local {
+                        frame_offset: mem.frame_offset - offset as FrameOffset,
+                        size,
+                    }
+                    .to_dest();
+                    self.expr(&field.expr, field_dest)?;
+                }
+                Ok(mem)
+            }
+            t::ExprKind::StructField(field) => {
+                let size = expr.ty.size();
+
+                // fast path for <ident>.foo over <expr>.foo
+                // TODO: fast path for <ident>.<ident>.<ident>...foo
+                if let t::ExprKind::Ident(bind_id) = field.expr.kind {
+                    let base = *self.scope.get(&bind_id).expect("local");
+                    let field_src = Src::Local(Local {
+                        frame_offset: base.frame_offset - field.offset as FrameOffset,
+                        size,
+                    });
+                    return self.write_multiple(IR::mov, dest, field_src, size);
+                }
+
+                let mem = self.allocate(size, dest)?;
+                let target = self.expr(&field.expr, dest)?;
+                let src = Src::Local(Local {
+                    frame_offset: target.frame_offset - field.offset as FrameOffset,
+                    size,
+                });
+                let out = self.write_multiple(IR::mov, mem.to_dest(), src, size)?;
+                self.deallocate(target)?;
+                Ok(out)
             }
         }
     }
-    fn get_scope_dest(&self, id: usize) -> ExprDest {
-        let rec = self.scope.get(&id).expect("scope record");
-        ExprDest::frame_offset(rec.frame_offset)
+    fn allocate(&mut self, size: usize, dest: Dest) -> Compile<Local> {
+        match dest {
+            Dest::Stack => {
+                self.current_frame_offset += size as isize;
+                self.write_ir(IR::sub(IRDest::SP, IRSrc::Immediate(size as Word)));
+                Ok(Local {
+                    frame_offset: self.current_frame_offset,
+                    size,
+                })
+            }
+            Dest::Local(local) => {
+                // if local.size != size {
+                //     panic!("invalid local size")
+                // }
+                Ok(local)
+            }
+        }
     }
-    fn get_scope_src(&self, id: usize) -> ExprSrc {
-        let rec = self.scope.get(&id).expect("scope record");
-        ExprSrc::frame_offset(rec.frame_offset, rec.width)
+    fn deallocate(&mut self, local: Local) -> Compile<()> {
+        let stack_offset = self.stack_offset(local);
+        if stack_offset > 0 {
+            panic!("must deallocate last element of stack");
+        }
+        self.write_ir(IR::add(IRDest::SP, IRSrc::Immediate(local.size as Word)));
+        self.current_frame_offset -= local.size as FrameOffset;
+        Ok(())
+    }
+    fn write_multiple(&mut self, op: IROp, dest: Dest, src: Src, size: usize) -> Compile<Local> {
+        if size == 1 {
+            return self.write(op, dest, src);
+        }
+        match dest {
+            Dest::Stack => {
+                let mem = self.allocate(size, dest)?;
+                self.write_multiple(op, mem.to_dest(), src, size)
+            }
+            Dest::Local(local) => {
+                for i in 0..size {
+                    self.write(op, dest.at(i), src.at(i))?;
+                }
+                Ok(local)
+            }
+        }
+    }
+    fn write(&mut self, op: IROp, dest: Dest, src: Src) -> Compile<Local> {
+        let ir_src = match src {
+            Src::Immediate(value) => IRSrc::Immediate(value),
+            Src::Local(local) => IRSrc::StackOffset(self.stack_offset(local)),
+            Src::R0Offset(offset) => IRSrc::R0Offset(offset),
+        };
+
+        let (ir_dest, res) = match dest {
+            Dest::Stack => {
+                self.current_frame_offset += 1;
+                (
+                    IRDest::PushStack,
+                    Local {
+                        frame_offset: self.current_frame_offset,
+                        size: 1,
+                    },
+                )
+            }
+            Dest::Local(local) => (IRDest::StackOffset(self.stack_offset(local)), local),
+        };
+        self.write_ir(op(ir_dest, ir_src));
+        Ok(res)
     }
     fn write_ir(&mut self, ir: IR) {
-        self.output.push(ir);
+        self.out.push(ir);
     }
-    fn frame_to_stack_offset(&self, frame_offset: FrameOffset) -> Word {
-        (self.current_frame_offset - frame_offset) as Word
-    }
-    fn write(&mut self, op: fn(IRDest, IRSrc) -> IR, dest: ExprDest, src: ExprSrc) -> WriteResult {
-        use ExprDestKind as D;
-        use ExprSrcKind as S;
-        let init_frame_offset = self.current_frame_offset;
-
-        // if pushing more than 1 word onto stack, allocate space first (instead of writing data in reverse)
-        if src.dest_width > 1 && dest.kind == D::PushStack {
-            self.write_ir(IR::sub(IRDest::SP, IRSrc::Immediate(src.dest_width)));
-            self.current_frame_offset += src.dest_width as isize;
-            return self.write(
-                op,
-                ExprDest::frame_offset(init_frame_offset + src.dest_width as isize),
-                src,
-            );
-        }
-        // debug_assert!(dest.width == src.dest_width);
-
-        // TODO: inline a memcpy loop here for "large" data
-
-        for i in 0..src.dest_width {
-            let ir_src = match src.kind {
-                S::Immediate(value) => IRSrc::Immediate(value),
-                S::Long(hi, lo) => IRSrc::Immediate([lo, hi][i as usize]),
-                S::FrameOffset(src_offset) => {
-                    IRSrc::StackOffset(self.frame_to_stack_offset(src_offset) + i)
-                }
-                S::PopStack => {
-                    self.current_frame_offset -= 1;
-                    IRSrc::PopStack
-                }
-                S::AtR0 => IRSrc::R0Offset(i as Word),
-            };
-
-            let ir_dest = match dest.kind {
-                D::PushStack => {
-                    self.current_frame_offset += 1;
-                    IRDest::PushStack
-                }
-                D::FrameOffset(dest_offset) => {
-                    let stack_offset = self.frame_to_stack_offset(dest_offset) + i;
-                    IRDest::StackOffset(stack_offset)
-                }
-            };
-
-            self.write_ir(op(ir_dest, ir_src));
-        }
-        match dest.kind {
-            D::FrameOffset(offset) => WriteResult {
-                kind: WriteResultKind::FrameOffset(offset),
-                width: src.dest_width,
-            },
-            D::PushStack => WriteResult {
-                kind: WriteResultKind::FrameOffset(init_frame_offset + src.dest_width as isize),
-                width: src.dest_width,
-            },
-        }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use crate::ir::{IRDest, IRSrc, IR};
-
-    #[test]
-    fn frame_offset_push() {
-        let mut compiler = Compiler::new();
-        let left_res = compiler.write(IR::mov, ExprDest::push_stack(), ExprSrc::imm(1));
-        compiler.write(IR::mov, ExprDest::push_stack(), ExprSrc::imm(2));
-        assert_eq!(compiler.current_frame_offset, 2);
-        compiler.write(IR::add, left_res.to_dest(), ExprSrc::pop_stack(1));
-        assert_eq!(compiler.current_frame_offset, 1);
-        assert_eq!(
-            compiler.output,
-            vec![
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(1)),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(2)),
-                IR::add(IRDest::StackOffset(0), IRSrc::PopStack),
-            ],
-        );
-    }
-
-    #[test]
-    fn identifiers() {
-        let mut compiler = Compiler::new();
-        // let x = 123
-        compiler.write(IR::mov, ExprDest::push_stack(), ExprSrc::imm(123));
-        // let y = 456
-        compiler.write(IR::mov, ExprDest::push_stack(), ExprSrc::imm(456));
-        // x
-        compiler.write(IR::mov, ExprDest::push_stack(), ExprSrc::frame_offset(1, 1));
-        assert_eq!(compiler.current_frame_offset, 3);
-        assert_eq!(
-            compiler.output,
-            vec![
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(123)),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(456)),
-                IR::mov(IRDest::PushStack, IRSrc::StackOffset(1)),
-            ]
-        );
-    }
-
-    #[test]
-    fn assignment() {
-        let mut compiler = Compiler::new();
-        // let x = 123
-        compiler.write(IR::mov, ExprDest::push_stack(), ExprSrc::imm(123));
-        // let y = 456
-        compiler.write(IR::mov, ExprDest::push_stack(), ExprSrc::imm(456));
-        // x  = 789
-        compiler.write(IR::mov, ExprDest::frame_offset(1), ExprSrc::imm(789));
-
-        assert_eq!(compiler.current_frame_offset, 2);
-        assert_eq!(
-            compiler.output,
-            vec![
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(123)),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(456)),
-                IR::mov(IRDest::StackOffset(1), IRSrc::Immediate(789)),
-            ]
-        );
-    }
-
-    #[test]
-    fn longs() {
-        let mut compiler = Compiler::new();
-        compiler.write(IR::mov, ExprDest::push_stack(), ExprSrc::long(123, 456));
-        assert_eq!(compiler.current_frame_offset, 2);
-        assert_eq!(
-            compiler.output,
-            vec![
-                IR::sub(IRDest::SP, IRSrc::Immediate(2)),
-                IR::mov(IRDest::StackOffset(0), IRSrc::Immediate(456)),
-                IR::mov(IRDest::StackOffset(1), IRSrc::Immediate(123)),
-            ]
-        );
+    fn stack_offset(&self, local: Local) -> Word {
+        let offset = self.current_frame_offset - local.frame_offset;
+        debug_assert!(offset >= 0);
+        offset as Word
     }
 }

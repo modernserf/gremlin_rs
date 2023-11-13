@@ -65,6 +65,8 @@ fn keyword_tokens() -> KeywordTokens {
         (TokKind::Not, "not"),
         (TokKind::As, "as"),
         (TokKind::Type, "type"),
+        (TokKind::Struct, "struct"),
+        (TokKind::End, "end"),
     ];
 
     Rc::new((

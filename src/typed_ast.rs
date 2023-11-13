@@ -60,6 +60,18 @@ impl Expr {
             ty,
         }
     }
+    pub fn struc(fields: Vec<StructField>, ty: Ty) -> Self {
+        Expr {
+            kind: ExprKind::Struct(fields),
+            ty,
+        }
+    }
+    pub fn struct_field(field: StructField, ty: Ty) -> Self {
+        Expr {
+            ty,
+            kind: ExprKind::StructField(Box::new(field)),
+        }
+    }
     pub fn cast(&self, ty: Ty) -> Option<Self> {
         if self.ty.width == ty.width {
             Some(Expr {
@@ -107,11 +119,19 @@ impl Expr {
 pub enum ExprKind {
     Constant(Word),
     Long(Word, Word),
+    Struct(Vec<StructField>),
+    StructField(Box<StructField>),
     Ident(BindId),
     RefIdent(BindId),
     Deref(Box<Expr>),
     Not(Box<Expr>),
     BinaryOp(Box<BinaryOp>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructField {
+    pub offset: usize,
+    pub expr: Expr,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,6 +174,27 @@ impl Ty {
             ref_level: 0,
         }
     }
+    pub fn structure(id: usize, fields: Vec<(String, Ty)>) -> Self {
+        let mut fields_map = HashMap::new();
+        let mut current_width = 0;
+        for (key, ty) in fields {
+            let offset = current_width;
+            current_width += ty.size();
+            fields_map.insert(key, StructTyField { offset, ty });
+        }
+        Self {
+            id,
+            kind: TyKind::Struct(Struct { fields: fields_map }),
+            width: current_width,
+            ref_level: 0,
+        }
+    }
+    pub fn fields(&self) -> Option<&HashMap<String, StructTyField>> {
+        match &self.kind {
+            TyKind::Primitive => None,
+            TyKind::Struct(s) => Some(&s.fields),
+        }
+    }
     pub fn size(&self) -> usize {
         if self.ref_level > 0 {
             1
@@ -193,7 +234,7 @@ struct Struct {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct StructTyField {
-    offset: usize,
-    ty: Ty,
+pub struct StructTyField {
+    pub offset: usize,
+    pub ty: Ty,
 }

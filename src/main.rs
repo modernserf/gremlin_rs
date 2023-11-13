@@ -184,4 +184,51 @@ mod test {
             456,
         );
     }
+
+    #[test]
+    fn structs() {
+        assert_expr_eq(
+            "
+            type Pair := struct
+                x: int
+                y: int
+            end
+
+            Pair { x := 1; y := 2 }.x;
+        ",
+            1,
+        );
+        assert_expr_eq(
+            "
+            type Pair := struct
+                x: int
+                y: int
+            end
+            let p := Pair { x := 1; y := 2 };
+            p.x
+        ",
+            1,
+        );
+        assert_expr_eq(
+            "
+            type Pair := struct
+                x: int
+                y: int
+            end
+            type Rect := struct
+                top_left: Pair
+                bottom_right: Pair
+            end
+
+            let r := Rect {
+                top_left := Pair { x := 1; y := 2 }
+                bottom_right := Pair { x := 3; y := 4 }
+            }
+            let bottom_right := r.bottom_right;
+
+            bottom_right.x
+        ",
+            3,
+        );
+    }
 }

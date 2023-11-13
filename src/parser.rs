@@ -122,19 +122,17 @@ impl Parser {
         Ok(None)
     }
 
-    fn repeat<T>(&mut self, parse_item: fn(&mut Self) -> ParseOpt<T>) -> Parse<Vec<T>> {
-        let mut output: Vec<T> = vec![];
+    fn body(&mut self) -> Parse<Vec<Stmt>> {
+        let mut out = Vec::new();
         loop {
-            if let Some(item) = parse_item(self)? {
-                output.push(item);
-            } else {
-                return Ok(output);
+            match self.stmt()? {
+                Some(stmt) => {
+                    out.push(stmt);
+                }
+                None => break,
             }
         }
-    }
-
-    fn body(&mut self) -> Parse<Vec<Stmt>> {
-        self.repeat(Self::stmt)
+        Ok(out)
     }
 
     fn stmt(&mut self) -> ParseOpt<Stmt> {
@@ -353,21 +351,22 @@ impl Parser {
 
                 if TokKind::CurlyLeft == self.peek() {
                     self.advance();
-                    let fields = self.repeat(|p| {
-                        let key = p.expect_identifier()?;
-                        p.expect_token(TokKind::ColonEq)?;
-                        let value = p.expect_p("expr", Self::expr)?;
-
-                        if TokKind::Semicolon == p.peek() {
-                            p.advance();
+                    let end_source;
+                    let mut fields = Vec::new();
+                    loop {
+                        if let Some(es) = self.match_token(TokKind::CurlyRight)? {
+                            end_source = es;
+                            break;
                         }
-
-                        Ok(Some(StructField {
+                        let key = self.expect_identifier()?;
+                        self.expect_token(TokKind::ColonEq)?;
+                        let value = self.expect_p("expr", Self::expr)?;
+                        self.match_token(TokKind::Semicolon)?;
+                        fields.push(StructField {
                             key: key.value,
                             value,
-                        }))
-                    })?;
-                    let end_source = self.expect_token(TokKind::CurlyRight)?;
+                        });
+                    }
                     Ok(Some(Expr {
                         kind: ExprKind::Struct(Box::new(StructExpr {
                             name: payload.value,
@@ -440,18 +439,19 @@ impl Parser {
             }
             TokKind::Struct => {
                 self.advance();
-                let fields = self.repeat(|p| {
-                    let key = p.expect_identifier()?;
-                    p.expect_token(TokKind::Colon)?;
-                    let ty = p.expect_p("type expr", Self::type_expr)?;
-
-                    if TokKind::Semicolon == p.peek() {
-                        p.advance();
+                let mut fields = Vec::new();
+                let end_source;
+                loop {
+                    if let Some(es) = self.match_token(TokKind::End)? {
+                        end_source = es;
+                        break;
                     }
-
-                    Ok(Some(StructTyField { key: key.value, ty }))
-                })?;
-                let end_source = self.expect_token(TokKind::End)?;
+                    let key = self.expect_identifier()?;
+                    self.expect_token(TokKind::Colon)?;
+                    let ty = self.expect_p("type expr", Self::type_expr)?;
+                    self.match_token(TokKind::Semicolon)?;
+                    fields.push(StructTyField { key: key.value, ty });
+                }
                 Ok(Some(TyExpr {
                     kind: TyExprKind::Struct(StructTyExpr { fields }),
                     source_info: start_source.span(end_source),
@@ -459,6 +459,15 @@ impl Parser {
                 }))
             }
             _ => Ok(None),
+        }
+    }
+    fn match_token(&mut self, tok: TokKind) -> ParseOpt<SourceInfo> {
+        if tok == self.peek() {
+            let out = self.peek_source();
+            self.advance();
+            Ok(Some(out))
+        } else {
+            Ok(None)
         }
     }
 }
