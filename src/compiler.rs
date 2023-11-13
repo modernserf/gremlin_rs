@@ -10,8 +10,8 @@ pub struct CompileError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ScopeRecord {
-    frame_offset: FrameOffset,
     width: Word,
+    frame_offset: FrameOffset,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,20 +30,17 @@ impl ExprContext {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct ExprDest {
     kind: ExprDestKind,
-    width: Word,
 }
 
 impl ExprDest {
-    fn frame_offset(offset: FrameOffset, width: Word) -> Self {
+    fn frame_offset(offset: FrameOffset) -> Self {
         ExprDest {
             kind: ExprDestKind::FrameOffset(offset),
-            width,
         }
     }
     fn push_stack() -> Self {
         ExprDest {
             kind: ExprDestKind::PushStack,
-            width: 1,
         }
     }
 }
@@ -57,9 +54,6 @@ enum ExprDestKind {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct ExprSrc {
     kind: ExprSrcKind,
-    // separate src width & dest width
-    // for converting reference<->value
-    src_width: Word,
     dest_width: Word,
 }
 
@@ -67,35 +61,30 @@ impl ExprSrc {
     fn imm(value: Word) -> Self {
         ExprSrc {
             kind: ExprSrcKind::Immediate(value),
-            src_width: 1,
             dest_width: 1,
         }
     }
     fn long(hi: Word, lo: Word) -> Self {
         ExprSrc {
             kind: ExprSrcKind::Long(hi, lo),
-            src_width: 2,
             dest_width: 2,
         }
     }
-    fn frame_offset(offset: FrameOffset, width: Word) -> Self {
+    fn frame_offset(offset: FrameOffset, dest_width: Word) -> Self {
         ExprSrc {
             kind: ExprSrcKind::FrameOffset(offset),
-            src_width: width,
-            dest_width: width,
+            dest_width: dest_width,
         }
     }
     fn pop_stack(width: Word) -> Self {
         ExprSrc {
             kind: ExprSrcKind::PopStack,
-            src_width: width,
             dest_width: width,
         }
     }
     fn at_r0(width: Word) -> Self {
         ExprSrc {
             kind: ExprSrcKind::AtR0,
-            src_width: width,
             dest_width: width,
         }
     }
@@ -119,15 +108,13 @@ struct WriteResult {
 impl WriteResult {
     fn to_dest(&self) -> ExprDest {
         match self.kind {
-            WriteResultKind::FrameOffset(frame_offset) => {
-                ExprDest::frame_offset(frame_offset, self.width)
-            }
+            WriteResultKind::FrameOffset(frame_offset) => ExprDest::frame_offset(frame_offset),
         }
     }
     fn to_scope_record(&self) -> ScopeRecord {
         match self.kind {
-            WriteResultKind::FrameOffset(frame_offset) => ScopeRecord {
-                frame_offset,
+            WriteResultKind::FrameOffset(frame_offset_and_width) => ScopeRecord {
+                frame_offset: frame_offset_and_width,
                 width: self.width,
             },
         }
@@ -236,7 +223,7 @@ impl Compiler {
     }
     fn get_scope_dest(&self, id: usize) -> ExprDest {
         let rec = self.scope.get(&id).expect("scope record");
-        ExprDest::frame_offset(rec.frame_offset, rec.width)
+        ExprDest::frame_offset(rec.frame_offset)
     }
     fn get_scope_src(&self, id: usize) -> ExprSrc {
         let rec = self.scope.get(&id).expect("scope record");
@@ -245,9 +232,8 @@ impl Compiler {
     fn write_ir(&mut self, ir: IR) {
         self.output.push(ir);
     }
-    fn frame_to_stack_offset(&self, frame_offset: FrameOffset, width: Word, index: Word) -> Word {
-        let base_offset = self.current_frame_offset - frame_offset;
-        base_offset as Word + index - width
+    fn frame_to_stack_offset(&self, frame_offset: FrameOffset) -> Word {
+        (self.current_frame_offset - frame_offset) as Word
     }
     fn write(&mut self, op: fn(IRDest, IRSrc) -> IR, dest: ExprDest, src: ExprSrc) -> WriteResult {
         use ExprDestKind as D;
@@ -260,11 +246,11 @@ impl Compiler {
             self.current_frame_offset += src.dest_width as isize;
             return self.write(
                 op,
-                ExprDest::frame_offset(init_frame_offset, src.dest_width),
+                ExprDest::frame_offset(init_frame_offset + src.dest_width as isize),
                 src,
             );
         }
-        debug_assert!(dest.width == src.dest_width);
+        // debug_assert!(dest.width == src.dest_width);
 
         // TODO: inline a memcpy loop here for "large" data
 
@@ -273,7 +259,7 @@ impl Compiler {
                 S::Immediate(value) => IRSrc::Immediate(value),
                 S::Long(hi, lo) => IRSrc::Immediate([lo, hi][i as usize]),
                 S::FrameOffset(src_offset) => {
-                    IRSrc::StackOffset(self.frame_to_stack_offset(src_offset, src.src_width, i))
+                    IRSrc::StackOffset(self.frame_to_stack_offset(src_offset) + i)
                 }
                 S::PopStack => {
                     self.current_frame_offset -= 1;
@@ -288,7 +274,7 @@ impl Compiler {
                     IRDest::PushStack
                 }
                 D::FrameOffset(dest_offset) => {
-                    let stack_offset = self.frame_to_stack_offset(dest_offset, dest.width, i);
+                    let stack_offset = self.frame_to_stack_offset(dest_offset) + i;
                     IRDest::StackOffset(stack_offset)
                 }
             };
@@ -298,11 +284,11 @@ impl Compiler {
         match dest.kind {
             D::FrameOffset(offset) => WriteResult {
                 kind: WriteResultKind::FrameOffset(offset),
-                width: dest.width,
+                width: src.dest_width,
             },
             D::PushStack => WriteResult {
-                kind: WriteResultKind::FrameOffset(init_frame_offset),
-                width: dest.width,
+                kind: WriteResultKind::FrameOffset(init_frame_offset + src.dest_width as isize),
+                width: src.dest_width,
             },
         }
     }
@@ -339,7 +325,7 @@ mod test {
         // let y = 456
         compiler.write(IR::mov, ExprDest::push_stack(), ExprSrc::imm(456));
         // x
-        compiler.write(IR::mov, ExprDest::push_stack(), ExprSrc::frame_offset(0, 1));
+        compiler.write(IR::mov, ExprDest::push_stack(), ExprSrc::frame_offset(1, 1));
         assert_eq!(compiler.current_frame_offset, 3);
         assert_eq!(
             compiler.output,
@@ -359,7 +345,7 @@ mod test {
         // let y = 456
         compiler.write(IR::mov, ExprDest::push_stack(), ExprSrc::imm(456));
         // x  = 789
-        compiler.write(IR::mov, ExprDest::frame_offset(0, 1), ExprSrc::imm(789));
+        compiler.write(IR::mov, ExprDest::frame_offset(1), ExprSrc::imm(789));
 
         assert_eq!(compiler.current_frame_offset, 2);
         assert_eq!(
