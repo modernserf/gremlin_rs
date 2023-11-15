@@ -72,6 +72,7 @@ enum Src {
     Local(Local),
     Immediate(Word),
     R0Offset(Word),
+    R0,
 }
 impl Src {
     fn at(&self, idx: usize) -> Self {
@@ -213,6 +214,27 @@ impl Compiler {
                 self.deallocate(target)?;
                 Ok(out)
             }
+            t::ExprKind::OneOfField(field) => {
+                if let Some(lvalue) = field.expr.as_lvalue() {
+                    let target = self.lvalue(&lvalue)?.to_dest();
+                    self.write(
+                        IR::bit_test,
+                        target,
+                        Src::Immediate(field.bit_index as Word),
+                    )?;
+                    return self.write(IR::mov, dest, Src::R0);
+                }
+                let mem = self.allocate(1, dest)?;
+                let target = self.expr(&field.expr, Dest::Stack)?;
+                self.write(
+                    IR::bit_test,
+                    target.to_dest(),
+                    Src::Immediate(field.bit_index as Word),
+                )?;
+                let out = self.write(IR::mov, mem.to_dest(), Src::R0)?;
+                self.deallocate(target)?;
+                Ok(out)
+            }
         }
     }
     fn lvalue(&mut self, lvalue: &t::LValue) -> Compile<Local> {
@@ -275,6 +297,7 @@ impl Compiler {
             Src::Immediate(value) => IRSrc::Immediate(value),
             Src::Local(local) => IRSrc::StackOffset(self.stack_offset(local)),
             Src::R0Offset(offset) => IRSrc::R0Offset(offset),
+            Src::R0 => IRSrc::R0,
         };
 
         let (ir_dest, res) = match dest {

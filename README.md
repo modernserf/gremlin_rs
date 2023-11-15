@@ -20,14 +20,23 @@ refactors:
 oneof type declaration
 
 ```
-type TrafficLight := oneof Red, Yellow, Green end
+type TrafficLight := oneof Red; Yellow; Green end
 ```
 
 oneof expression (a bitset)
 
 ```
-let should_go := oneof{Yellow,Green}
+let should_go := TrafficLight{Yellow;Green}
 if contains(should_go, color) then ... end
+```
+
+set union, intersection, difference, complement with and, or, xor, not
+check and set bits with fields
+
+```
+should_go.Yellow # true
+should_go.Red := false
+should_go[value]
 ```
 
 tagged variants are part of structs, and a struct can have both shared and variant fields
@@ -53,7 +62,7 @@ struct has a special `case` field whose type is a oneof & can be used in bitset
 ```
 Expr.True{ ...} # a struct
 Expr.True # a oneof value
-oneof{Expr.True, Expr.False} # a set of case tags
+Expr.case{True, False} # a set of case tags
 ```
 
 ## 'routines

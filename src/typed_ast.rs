@@ -102,6 +102,12 @@ impl Expr {
             kind: ExprKind::StructField(Box::new(field)),
         }
     }
+    pub fn oneof_field(field: OneOfField, ty: Ty) -> Self {
+        Expr {
+            ty,
+            kind: ExprKind::OneOfField(Box::new(field)),
+        }
+    }
     pub fn cast(&self, ty: Ty) -> Option<Self> {
         if self.ty.width == ty.width {
             Some(Expr {
@@ -159,6 +165,7 @@ pub enum ExprKind {
     Long(Word, Word),
     Struct(Vec<StructField>),
     StructField(Box<StructField>),
+    OneOfField(Box<OneOfField>),
     Ident(BindId),
     RefIdent(Box<LValue>),
     Deref(Box<Expr>),
@@ -174,6 +181,12 @@ pub struct StructField {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OneOfField {
+    pub bit_index: usize,
+    pub expr: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BinaryOp {
     pub operator: ast::BinOpKind,
     pub left: Expr,
@@ -182,8 +195,7 @@ pub struct BinaryOp {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ty {
-    id: usize,
-    kind: TyKind,
+    pub kind: TyKind,
     width: usize,
     ref_level: usize,
 }
@@ -191,24 +203,21 @@ pub struct Ty {
 impl Ty {
     pub fn int() -> Self {
         Self {
-            id: 1,
-            kind: TyKind::Primitive,
+            kind: TyKind::Int,
             width: 1,
             ref_level: 0,
         }
     }
     pub fn bool() -> Self {
         Self {
-            id: 2,
-            kind: TyKind::Primitive,
+            kind: TyKind::Bool,
             width: 1,
             ref_level: 0,
         }
     }
     pub fn long() -> Self {
         Self {
-            id: 3,
-            kind: TyKind::Primitive,
+            kind: TyKind::Long,
             width: 2,
             ref_level: 0,
         }
@@ -222,16 +231,25 @@ impl Ty {
             fields_map.insert(key, StructTyField { offset, ty });
         }
         Self {
-            id,
-            kind: TyKind::Struct(Struct { fields: fields_map }),
+            kind: TyKind::Struct(Struct {
+                id,
+                fields: fields_map,
+            }),
             width: current_width,
             ref_level: 0,
         }
     }
     pub fn oneof(id: usize, fields: HashMap<String, OneOfCase>) -> Self {
         Self {
-            id,
-            kind: TyKind::OneOf(OneOf { fields }),
+            kind: TyKind::OneOf(OneOf { id, fields }),
+            width: 1,
+            ref_level: 0,
+        }
+    }
+    pub fn oneof_set(value: &OneOf) -> Self {
+        // TODO: handle bitsets > 32 bits
+        Self {
+            kind: TyKind::OneOfSet(value.clone()),
             width: 1,
             ref_level: 0,
         }
@@ -239,12 +257,6 @@ impl Ty {
     pub fn get_field(&self, key: &str) -> Option<&StructTyField> {
         match &self.kind {
             TyKind::Struct(s) => s.fields.get(key),
-            _ => None,
-        }
-    }
-    pub fn fields_count(&self) -> Option<usize> {
-        match &self.kind {
-            TyKind::Struct(s) => Some(s.fields.len()),
             _ => None,
         }
     }
@@ -282,15 +294,19 @@ impl Ty {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum TyKind {
-    Primitive,
+pub enum TyKind {
+    Int,
+    Bool,
+    Long,
     Struct(Struct),
     OneOf(OneOf),
+    OneOfSet(OneOf),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Struct {
-    fields: HashMap<String, StructTyField>,
+pub struct Struct {
+    id: usize,
+    pub fields: HashMap<String, StructTyField>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -300,7 +316,8 @@ pub struct StructTyField {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct OneOf {
+pub struct OneOf {
+    id: usize,
     pub fields: HashMap<String, OneOfCase>,
 }
 

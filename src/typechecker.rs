@@ -81,7 +81,7 @@ impl TypeScope {
                 ("bool".to_string(), Ty::bool()),
                 ("long".to_string(), Ty::long()),
             ]),
-            next_id: 128,
+            next_id: 1,
         }
     }
     pub fn new_id(&mut self) -> usize {
@@ -285,41 +285,71 @@ impl TypeChecker {
                     .get(&x.name)
                     .ok_or_else(|| TypeError::unknown_type_identifier())?
                     .clone();
-                let mut out_fields = Vec::new();
-                let mut used_fields = HashSet::new();
-                for stmt in &x.body {
-                    let field = match &stmt.kind {
-                        ast::StmtKind::Assign(field) => field,
-                        ast::StmtKind::Noop => continue,
-                        _ => todo!("invalid struct field"),
-                    };
-                    let key = match &field.target.kind {
-                        ast::ExprKind::Ident(ident) => &ident.value,
-                        _ => todo!("invalid struct field"),
-                    };
+                match &ty.kind {
+                    TyKind::Struct(s) => {
+                        let mut out_fields = Vec::new();
+                        let mut used_fields = HashSet::new();
+                        for stmt in &x.body {
+                            let field = match &stmt.kind {
+                                ast::StmtKind::Assign(field) => field,
+                                ast::StmtKind::Noop => continue,
+                                _ => todo!("invalid struct field"),
+                            };
+                            let key = match &field.target.kind {
+                                ast::ExprKind::Ident(ident) => &ident.value,
+                                _ => todo!("invalid struct field"),
+                            };
 
-                    let found = ty.get_field(key).ok_or_else(|| todo!("unknown field"))?;
-                    if used_fields.contains(&found.offset) {
-                        todo!("duplicate field")
+                            let found = s.fields.get(key).ok_or_else(|| todo!("unknown field"))?;
+                            if used_fields.contains(&found.offset) {
+                                todo!("duplicate field")
+                            }
+                            used_fields.insert(found.offset);
+
+                            let value = self.expr(&field.expr)?;
+                            Self::check_expr_type(&value, &found.ty)?;
+                            out_fields.push(StructField {
+                                offset: found.offset,
+                                size: found.ty.size(),
+                                expr: value,
+                            });
+                        }
+                        if used_fields.len() < s.fields.len() {
+                            todo!("missing field")
+                        }
+
+                        Ok(Expr::struc(out_fields, ty))
                     }
-                    used_fields.insert(found.offset);
-
-                    let value = self.expr(&field.expr)?;
-                    Self::check_expr_type(&value, &found.ty)?;
-                    out_fields.push(StructField {
-                        offset: found.offset,
-                        size: found.ty.size(),
-                        expr: value,
-                    });
+                    TyKind::OneOf(o) => {
+                        // TODO: handle bitsets > 32 bits
+                        let mut bitset = 0;
+                        for stmt in &x.body {
+                            let key = match &stmt.kind {
+                                ast::StmtKind::Expr(e) => match &e.kind {
+                                    ast::ExprKind::Ident(ident) => &ident.value,
+                                    _ => todo!("invalid oneof item"),
+                                },
+                                ast::StmtKind::Noop => continue,
+                                _ => todo!("invalid oneof item"),
+                            };
+                            let case = o
+                                .fields
+                                .get(key)
+                                .ok_or_else(|| todo!("invalid oneof item"))?;
+                            let bit = 1 << case.value;
+                            if (bitset & bit) > 0 {
+                                todo!("duplicate oneof set element");
+                            }
+                            bitset += 1 << case.value;
+                        }
+                        Ok(Expr::constant(bitset, Ty::oneof_set(o)))
+                    }
+                    _ => todo!("invalid struct literal"),
                 }
-                if used_fields.len() < ty.fields_count().unwrap() {
-                    todo!("missing field")
-                }
-
-                Ok(Expr::struc(out_fields, ty))
             }
             ast::ExprKind::Field(x) => {
                 // oneof cases
+                // TODO: put types in same scope as values
                 if let ast::ExprKind::Ident(key) = &x.expr.kind {
                     if let Some(ty) = self.type_scope.get(&key.value) {
                         let case = ty
@@ -330,21 +360,40 @@ impl TypeChecker {
                 }
 
                 let target = self.expr(&x.expr)?;
-                let rec = target
-                    .ty
-                    .get_field(&x.field)
-                    .ok_or_else(|| {
-                        todo!("missing struct field");
-                    })?
-                    .clone();
+                match &target.ty.kind {
+                    TyKind::Struct(s) => {
+                        let rec = s
+                            .fields
+                            .get(&x.field)
+                            .ok_or_else(|| {
+                                todo!("missing struct field");
+                            })?
+                            .clone();
 
-                let out = StructField {
-                    offset: rec.offset,
-                    size: rec.ty.size(),
-                    expr: target,
-                };
+                        let out = StructField {
+                            offset: rec.offset,
+                            size: rec.ty.size(),
+                            expr: target,
+                        };
 
-                Ok(Expr::struct_field(out, rec.ty))
+                        Ok(Expr::struct_field(out, rec.ty))
+                    }
+                    TyKind::OneOfSet(o) => {
+                        let rec: OneOfCase = o
+                            .fields
+                            .get(&x.field)
+                            .ok_or_else(|| todo!("missing oneof case"))?
+                            .clone();
+                        Ok(Expr::oneof_field(
+                            OneOfField {
+                                bit_index: rec.value,
+                                expr: target,
+                            },
+                            Ty::bool(),
+                        ))
+                    }
+                    _ => todo!("invalid field target"),
+                }
             }
         }
     }

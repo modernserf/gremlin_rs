@@ -46,6 +46,11 @@ impl IR {
             kind: IRKind::Xor(dest, src),
         }
     }
+    pub fn bit_test(dest: IRDest, src: IRSrc) -> Self {
+        IR {
+            kind: IRKind::BitTest(dest, src),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +63,7 @@ pub enum IRKind {
     And(IRDest, IRSrc),
     Or(IRDest, IRSrc),
     Xor(IRDest, IRSrc),
+    BitTest(IRDest, IRSrc),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

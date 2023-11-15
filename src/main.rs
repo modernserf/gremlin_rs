@@ -268,5 +268,23 @@ mod test {
         ",
             1,
         );
+        assert_expr_eq(
+            "
+                type TrafficLight := oneof Green Yellow Red end
+                TrafficLight{Green;Red}
+            ",
+            0b101,
+        );
+        assert_expr_eq(
+            "
+                type TrafficLight := oneof Green Yellow Red end
+                let lights := TrafficLight{Yellow}
+                lights.Yellow # true
+            ",
+            1,
+        );
+        // TODO: lights.Yellow := true
+        // TODO: set (bitwise) operations
+        // TODO: what is type syntax for oneof set?
     }
 }

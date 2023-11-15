@@ -70,6 +70,12 @@ impl Runtime {
                 let dest_ptr = self.get_dest(*dest);
                 *dest_ptr |= value;
             }
+            // TODO: use a status register instead of r0
+            IRKind::BitTest(dest, src) => {
+                let bit = self.get_src(*src);
+                let dest = *self.get_dest(*dest);
+                self.r0 = if (dest & (1 << bit)) > 0 { 1 } else { 0 }
+            }
         }
     }
     fn get_src(&mut self, src: IRSrc) -> Word {
