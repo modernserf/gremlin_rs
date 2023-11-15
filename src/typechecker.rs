@@ -288,16 +288,26 @@ impl TypeChecker {
                 let expected_fields = ty.fields().ok_or_else(|| panic!("todo expected struct"))?;
                 let mut out_fields = Vec::new();
                 let mut used_fields = HashSet::new();
-                for field in &x.fields {
+                for stmt in &x.body {
+                    let field = match &stmt.kind {
+                        ast::StmtKind::Assign(field) => field,
+                        ast::StmtKind::Noop => continue,
+                        _ => todo!("invalid struct field"),
+                    };
+                    let key = match &field.target.kind {
+                        ast::ExprKind::Ident(ident) => &ident.value,
+                        _ => todo!("invalid struct field"),
+                    };
+
                     let found = expected_fields
-                        .get(&field.key)
+                        .get(key)
                         .ok_or_else(|| todo!("unknown field"))?;
                     if used_fields.contains(&found.offset) {
                         todo!("duplicate field")
                     }
                     used_fields.insert(found.offset);
 
-                    let value = self.expr(&field.value)?;
+                    let value = self.expr(&field.expr)?;
                     Self::check_expr_type(&value, &found.ty)?;
                     out_fields.push(StructField {
                         offset: found.offset,

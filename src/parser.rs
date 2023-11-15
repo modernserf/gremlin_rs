@@ -351,26 +351,12 @@ impl Parser {
 
                 if TokKind::CurlyLeft == self.peek() {
                     self.advance();
-                    let end_source;
-                    let mut fields = Vec::new();
-                    loop {
-                        if let Some(es) = self.match_token(TokKind::CurlyRight)? {
-                            end_source = es;
-                            break;
-                        }
-                        let key = self.expect_identifier()?;
-                        self.expect_token(TokKind::ColonEq)?;
-                        let value = self.expect_p("expr", Self::expr)?;
-                        self.match_token(TokKind::Semicolon)?;
-                        fields.push(StructField {
-                            key: key.value,
-                            value,
-                        });
-                    }
+                    let body = self.body()?;
+                    let end_source = self.expect_token(TokKind::CurlyRight)?;
                     Ok(Some(Expr {
                         kind: ExprKind::Struct(Box::new(StructExpr {
                             name: payload.value,
-                            fields,
+                            body,
                         })),
                         source_info: start_source.span(end_source),
                     }))

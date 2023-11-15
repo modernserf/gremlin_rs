@@ -113,13 +113,7 @@ pub struct AsExpr {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructExpr {
     pub name: String,
-    pub fields: Vec<StructField>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StructField {
-    pub key: String,
-    pub value: Expr,
+    pub body: Vec<Stmt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
