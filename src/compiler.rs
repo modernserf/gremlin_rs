@@ -240,7 +240,7 @@ impl Compiler {
                 })
             }
             Dest::Local(local) => {
-                debug_assert!(local.size == size);
+                assert_eq!(local.size, size);
                 Ok(local)
             }
         }
