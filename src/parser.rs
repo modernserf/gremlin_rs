@@ -311,7 +311,7 @@ impl Parser {
                     expr = Expr {
                         kind: ExprKind::Field(Box::new(FieldExpr {
                             expr,
-                            field: FieldKind::Identifier(field.value),
+                            field: field.value,
                         })),
                         source_info,
                     }

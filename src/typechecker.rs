@@ -323,14 +323,11 @@ impl TypeChecker {
             }
             ast::ExprKind::Field(x) => {
                 let target = self.expr(&x.expr)?;
-                let key = match &x.field {
-                    ast::FieldKind::Identifier(k) => k,
-                };
                 let rec = target
                     .ty
                     .fields()
                     .ok_or_else(|| todo!("expected struct"))?
-                    .get(key)
+                    .get(&x.field)
                     .ok_or_else(|| {
                         todo!("missing struct field");
                     })?

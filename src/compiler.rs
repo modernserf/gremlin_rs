@@ -194,9 +194,8 @@ impl Compiler {
                 let size = expr.ty.size();
 
                 // fast path for <ident>.foo over <expr>.foo
-                // TODO: separate StructField(LValue), StructField(Expr)
-                if let t::ExprKind::Ident(bind_id) = field.expr.kind {
-                    let base = *self.scope.get(&bind_id).expect("local");
+                if let Some(lvalue) = field.expr.as_lvalue() {
+                    let base = self.lvalue(&lvalue)?;
                     let field_src = Src::Local(Local {
                         frame_offset: base.frame_offset - field.offset as FrameOffset,
                         size,

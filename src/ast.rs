@@ -148,11 +148,5 @@ pub struct StructTyField {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldExpr {
     pub expr: Expr,
-    pub field: FieldKind,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FieldKind {
-    Identifier(String),
-    // Path(Vec<String>)
+    pub field: String,
 }
