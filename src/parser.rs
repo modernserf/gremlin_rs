@@ -444,6 +444,24 @@ impl Parser {
                     ref_level: 0,
                 }))
             }
+            TokKind::OneOf => {
+                self.advance();
+                let mut items = Vec::new();
+                let end_source;
+                loop {
+                    if let Some(es) = self.match_token(TokKind::End)? {
+                        end_source = es;
+                        break;
+                    }
+                    let key = self.expect_identifier()?;
+                    items.push(OneOfTyItem { key: key.value });
+                }
+                Ok(Some(TyExpr {
+                    kind: TyExprKind::OneOf(OneOfTyExpr { items }),
+                    source_info: start_source.span(end_source),
+                    ref_level: 0,
+                }))
+            }
             _ => Ok(None),
         }
     }

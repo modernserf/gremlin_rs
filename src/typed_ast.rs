@@ -228,10 +228,30 @@ impl Ty {
             ref_level: 0,
         }
     }
-    pub fn fields(&self) -> Option<&HashMap<String, StructTyField>> {
+    pub fn oneof(id: usize, fields: HashMap<String, OneOfCase>) -> Self {
+        Self {
+            id,
+            kind: TyKind::OneOf(OneOf { fields }),
+            width: 1,
+            ref_level: 0,
+        }
+    }
+    pub fn get_field(&self, key: &str) -> Option<&StructTyField> {
         match &self.kind {
-            TyKind::Primitive => None,
-            TyKind::Struct(s) => Some(&s.fields),
+            TyKind::Struct(s) => s.fields.get(key),
+            _ => None,
+        }
+    }
+    pub fn fields_count(&self) -> Option<usize> {
+        match &self.kind {
+            TyKind::Struct(s) => Some(s.fields.len()),
+            _ => None,
+        }
+    }
+    pub fn get_oneof_case(&self, key: &str) -> Option<&OneOfCase> {
+        match &self.kind {
+            TyKind::OneOf(o) => o.fields.get(key),
+            _ => None,
         }
     }
     pub fn size(&self) -> usize {
@@ -265,6 +285,7 @@ impl Ty {
 enum TyKind {
     Primitive,
     Struct(Struct),
+    OneOf(OneOf),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -276,4 +297,14 @@ struct Struct {
 pub struct StructTyField {
     pub offset: usize,
     pub ty: Ty,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OneOf {
+    pub fields: HashMap<String, OneOfCase>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OneOfCase {
+    pub value: usize,
 }

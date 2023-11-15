@@ -285,7 +285,6 @@ impl TypeChecker {
                     .get(&x.name)
                     .ok_or_else(|| TypeError::unknown_type_identifier())?
                     .clone();
-                let expected_fields = ty.fields().ok_or_else(|| panic!("todo expected struct"))?;
                 let mut out_fields = Vec::new();
                 let mut used_fields = HashSet::new();
                 for stmt in &x.body {
@@ -299,9 +298,7 @@ impl TypeChecker {
                         _ => todo!("invalid struct field"),
                     };
 
-                    let found = expected_fields
-                        .get(key)
-                        .ok_or_else(|| todo!("unknown field"))?;
+                    let found = ty.get_field(key).ok_or_else(|| todo!("unknown field"))?;
                     if used_fields.contains(&found.offset) {
                         todo!("duplicate field")
                     }
@@ -315,19 +312,27 @@ impl TypeChecker {
                         expr: value,
                     });
                 }
-                if used_fields.len() < expected_fields.len() {
+                if used_fields.len() < ty.fields_count().unwrap() {
                     todo!("missing field")
                 }
 
                 Ok(Expr::struc(out_fields, ty))
             }
             ast::ExprKind::Field(x) => {
+                // oneof cases
+                if let ast::ExprKind::Ident(key) = &x.expr.kind {
+                    if let Some(ty) = self.type_scope.get(&key.value) {
+                        let case = ty
+                            .get_oneof_case(&x.field)
+                            .ok_or_else(|| todo!("missing oneof case"))?;
+                        return Ok(Expr::constant(case.value as Word, ty.clone()));
+                    }
+                }
+
                 let target = self.expr(&x.expr)?;
                 let rec = target
                     .ty
-                    .fields()
-                    .ok_or_else(|| todo!("expected struct"))?
-                    .get(&x.field)
+                    .get_field(&x.field)
                     .ok_or_else(|| {
                         todo!("missing struct field");
                     })?
@@ -370,6 +375,14 @@ impl TypeChecker {
                     fields.push((field.key.to_string(), field_ty));
                 }
                 Ok(Ty::structure(id, fields))
+            }
+            ast::TyExprKind::OneOf(x) => {
+                let id = self.type_scope.new_id();
+                let mut fields = HashMap::new();
+                for (i, item) in x.items.iter().enumerate() {
+                    fields.insert(item.key.to_string(), OneOfCase { value: i });
+                }
+                Ok(Ty::oneof(id, fields))
             }
         }
     }

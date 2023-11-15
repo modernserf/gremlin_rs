@@ -258,4 +258,15 @@ mod test {
             5,
         )
     }
+
+    #[test]
+    fn oneof() {
+        assert_expr_eq(
+            "
+            type TrafficLight := oneof Green Yellow Red end
+            TrafficLight.Yellow
+        ",
+            1,
+        );
+    }
 }

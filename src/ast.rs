@@ -1,6 +1,8 @@
 use crate::source_info::SourceInfo;
 use crate::token::IntLiteral;
 
+// statements
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stmt {
     pub kind: StmtKind,
@@ -30,6 +32,14 @@ pub struct AssignStmt {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeDef {
+    pub identifier: String,
+    pub ty: TyExpr,
+}
+
+// bindings
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bind {
     pub kind: BindKind,
     pub source_info: SourceInfo,
@@ -45,11 +55,7 @@ pub struct IdentBind {
     pub value: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TypeDef {
-    pub identifier: String,
-    pub ty: TyExpr,
-}
+// expressions
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Expr {
@@ -117,6 +123,14 @@ pub struct StructExpr {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldExpr {
+    pub expr: Expr,
+    pub field: String,
+}
+
+// types
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TyExpr {
     pub kind: TyExprKind,
     pub source_info: SourceInfo,
@@ -127,6 +141,7 @@ pub struct TyExpr {
 pub enum TyExprKind {
     Identifier(IdentTyExpr),
     Struct(StructTyExpr),
+    OneOf(OneOfTyExpr),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,7 +161,11 @@ pub struct StructTyField {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FieldExpr {
-    pub expr: Expr,
-    pub field: String,
+pub struct OneOfTyExpr {
+    pub items: Vec<OneOfTyItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OneOfTyItem {
+    pub key: String,
 }

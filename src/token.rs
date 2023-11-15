@@ -20,6 +20,7 @@ pub enum TokKind {
     Type,
     Struct,
     End,
+    OneOf,
     // punctuation
     Semicolon,
     Colon,
@@ -67,6 +68,7 @@ fn keyword_tokens() -> KeywordTokens {
         (TokKind::Type, "type"),
         (TokKind::Struct, "struct"),
         (TokKind::End, "end"),
+        (TokKind::OneOf, "oneof"),
     ];
 
     Rc::new((
