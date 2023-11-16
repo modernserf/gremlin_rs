@@ -15,6 +15,8 @@ refactors:
 
 # homermobile zone
 
+need to figure out what exactly the deal with syntax is, choose level of affectedness that is odd to look at but easy to type
+
 ## enums & tagged variants
 
 oneof type declaration
@@ -127,3 +129,83 @@ impls are looked up in lexical scope, so you need to import them
 subroutines that use impl args can continue to propagate them as impls or use them as regular values
 
 this is maybe also useful for "context" args
+
+inheritance
+needs to be built into the type, but theoretically possible
+
+```
+type Foo := struct
+  bar: sub (int, impl Foo): int
+end
+
+# ...
+
+impl Foo := Foo{
+  bar: sub (value: int, _: impl Foo): int do
+    # ...
+  end
+}
+
+# ...
+
+impl Foo := Foo{
+  bar: sub (value: int, parent: impl Foo): int do
+    logger(value);
+    parent.sub(value, parennt)
+  end
+}
+
+# ...
+
+let result := (impl Foo).bar(3,_)
+
+```
+
+# modules
+
+two levels of organization: a namespace & a package
+a namespace is just a collection of related types, subroutines, values etc
+each file is a namespace, and can contain nested namespaces
+no enforced privacy between namespaces within the same package
+no transitive imports
+
+a collection of namespaces can be collected into a "package"
+a package has a header file that defines the public interface of a package
+the public interface can use namespaces or a single flat namespace
+the structure of the public interface does not need to match the private structure
+a package is a single compilation unit & can be loaded in & out of memory in a running program dynamically
+
+imports look like
+
+```
+use foo.bar.baz
+use foo.quux{plugh, impl Xyzzy[Foo]}
+from "package" use {gleh}
+```
+
+---
+
+Gremlin
+
+I'm writing another programming language. The one I worked on last year was "Goblin", an homage to 90s scripting languages. This one is called "Gremlin", and its a low-level systems language for home computers of the late 1980s.
+
+To this end, it features a relatively simple static type system & manual memory management. The language can be compiled in a single pass, and individual modules can be compiled separately. There are parameterized types, but function parameters with generic types must be word-sized (ie primitives or pointers). OOP is largely avoided in favor of explicit dictionary-passing.
+
+# Literals
+
+```
+123 # a 32-bit signed integer
+1_234_567_890_123l # a 64-bit signed long integer
+true # a boolean
+"hello, world" # a string constant
+```
+
+# Assignment
+
+```
+let x := 123
+let y : bool := false
+x := 456
+```
+
+#

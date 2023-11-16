@@ -2,6 +2,7 @@ mod ast;
 mod compiler;
 mod ir;
 mod lexer;
+mod one_pass;
 mod parser;
 mod runtime;
 mod source_info;

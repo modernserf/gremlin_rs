@@ -254,12 +254,6 @@ impl Ty {
             ref_level: 0,
         }
     }
-    pub fn get_field(&self, key: &str) -> Option<&StructTyField> {
-        match &self.kind {
-            TyKind::Struct(s) => s.fields.get(key),
-            _ => None,
-        }
-    }
     pub fn get_oneof_case(&self, key: &str) -> Option<&OneOfCase> {
         match &self.kind {
             TyKind::OneOf(o) => o.fields.get(key),
