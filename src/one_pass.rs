@@ -11,6 +11,7 @@ pub enum CompileError {
     UnknownTypeIdentifier(String),
     Expected(&'static str),
     InvalidDeref,
+    // InvalidCast,
 }
 
 type Compile<T> = Result<T, CompileError>;
@@ -24,6 +25,7 @@ pub enum Token {
     True,
     False,
     Let,
+    As,
     Colon,
     Semicolon,
     ColonEq,
@@ -69,6 +71,7 @@ mod lexer {
                 'l' => self.keyword("let", Token::Let),
                 't' => self.keyword("true", Token::True),
                 'f' => self.keyword("false", Token::False),
+                'a' => self.keyword("as", Token::As),
                 ';' => self.operator(Token::Semicolon),
                 '+' => self.operator(Token::Plus),
                 '-' => self.operator(Token::Minus),
@@ -183,11 +186,11 @@ impl Ty {
             ref_level: self.ref_level + 1,
         }
     }
-    fn deref(&self) -> Option<Self> {
+    fn deref(&self) -> Compile<Self> {
         if self.ref_level == 0 {
-            None
+            Err(CompileError::InvalidDeref)
         } else {
-            Some(Self {
+            Ok(Self {
                 kind: self.kind.clone(),
                 ref_level: self.ref_level - 1,
             })
@@ -199,6 +202,10 @@ impl Ty {
         } else {
             Err(CompileError::ExpectedType(self.clone(), other))
         }
+    }
+    fn cast(&self, other: Self) -> Compile<Self> {
+        // TODO: handle size mismatches
+        Ok(other)
     }
 }
 
@@ -572,7 +579,18 @@ fn op_expr(state: &mut State, left: ScopeRecord) -> CompileOpt<ScopeRecord> {
                     .ok_or(CompileError::Expected("expr"))?;
                 op_parser.push_rhs(res);
             }
-            None => return op_parser.unwind(state).map(Some),
+            None => {
+                let mut rec = match op_parser.unwind(state).map(Some)? {
+                    Some(rec) => rec,
+                    None => return Ok(None),
+                };
+                if token(state, Token::As)?.is_none() {
+                    return Ok(Some(rec));
+                }
+                let ty = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
+                rec.ty = rec.ty.cast(ty)?;
+                return Ok(Some(rec));
+            }
         }
     }
 }
@@ -647,7 +665,7 @@ fn unary_op_expr(state: &mut State, ctx: ExprContext) -> CompileOpt<ScopeRecord>
             let dest = state.allocate(&ctx);
             let res = unary_op_expr(state, ExprContext::stack())?
                 .ok_or(CompileError::Expected("expr"))?;
-            let dest_ty = ctx.check_ty(res.ty.deref().ok_or(CompileError::InvalidDeref)?)?;
+            let dest_ty = ctx.check_ty(res.ty.deref()?)?;
             state.write(IR::mov, Dest::R0, Src::PopStack, res.ty);
             let out = state.write(IR::mov, dest, Src::R0Offset(0), dest_ty);
             Ok(Some(out))
@@ -914,6 +932,18 @@ mod test {
                 IR::mov(IRDest::PushStack, IRSrc::StackOffset(1)),
                 IR::mov(IRDest::R0, IRSrc::PopStack),
                 IR::mov(IRDest::StackOffset(0), IRSrc::R0Offset(0)),
+            ],
+        )
+    }
+
+    #[test]
+    fn type_casting() {
+        expect_ir(
+            "(true as int) + 2",
+            vec![
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(1)),
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(2)),
+                IR::add(IRDest::StackOffset(0), IRSrc::PopStack),
             ],
         )
     }
