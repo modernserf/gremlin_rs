@@ -80,6 +80,5 @@ pub enum IRSrc {
     StackOffset(Word),
     R0,
     R0Offset(Word),
-    #[allow(dead_code)]
     PopStack,
 }

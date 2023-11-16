@@ -26,6 +26,11 @@ pub enum Token {
     Colon,
     Semicolon,
     ColonEq,
+    Plus,
+    Minus,
+    Star,
+    ParLeft,
+    ParRight,
 }
 
 mod lexer {
@@ -62,6 +67,11 @@ mod lexer {
                 't' => self.keyword("true", Token::True),
                 'f' => self.keyword("false", Token::False),
                 ';' => self.operator(Token::Semicolon),
+                '+' => self.operator(Token::Plus),
+                '-' => self.operator(Token::Minus),
+                '*' => self.operator(Token::Star),
+                '(' => self.operator(Token::ParLeft),
+                ')' => self.operator(Token::ParRight),
                 ':' => {
                     self.adv_char();
                     match self.peek_char() {
@@ -155,11 +165,11 @@ impl Ty {
     fn bool() -> Self {
         Ty { kind: TyKind::Bool }
     }
-    fn check(&self, other: &Ty) -> Compile<()> {
-        if self == other {
-            Ok(())
+    fn check(&self, other: Ty) -> Compile<Ty> {
+        if self == &other {
+            Ok(other)
         } else {
-            Err(CompileError::ExpectedType(self.clone(), other.clone()))
+            Err(CompileError::ExpectedType(self.clone(), other))
         }
     }
 }
@@ -178,6 +188,12 @@ struct ScopeRecord {
 impl ScopeRecord {
     fn new(frame_offset: Word, ty: Ty) -> Self {
         Self { frame_offset, ty }
+    }
+    fn to_dest(&self) -> Dest {
+        Dest::FrameOffset(self.frame_offset)
+    }
+    fn to_src(&self) -> Src {
+        Src::FrameOffset(self.frame_offset)
     }
 }
 
@@ -202,16 +218,17 @@ impl Scope {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Dest {
     Stack,
     FrameOffset(Word),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Src {
     Immediate(Word),
     FrameOffset(Word),
+    PopStack,
 }
 
 type IROp = fn(IRDest, IRSrc) -> IR;
@@ -232,25 +249,36 @@ impl State {
             current_frame_size: 0,
         }
     }
-    fn write(&mut self, op: IROp, dest: Dest, src: Src) {
+    fn write(&mut self, op: IROp, dest: Dest, src: Src, dest_ty: Ty) -> ScopeRecord {
         let ir_src = match src {
             Src::Immediate(value) => IRSrc::Immediate(value),
             Src::FrameOffset(offset) => {
                 let stack_offset = self.current_frame_size - offset;
                 IRSrc::StackOffset(stack_offset)
             }
+            Src::PopStack => {
+                self.current_frame_size -= 1;
+                IRSrc::PopStack
+            }
         };
-        let ir_dest = match dest {
+        let (ir_dest, result) = match dest {
             Dest::Stack => {
                 self.current_frame_size += 1;
-                IRDest::PushStack
+                (
+                    IRDest::PushStack,
+                    ScopeRecord::new(self.current_frame_size, dest_ty),
+                )
             }
             Dest::FrameOffset(offset) => {
                 let stack_offset = self.current_frame_size - offset;
-                IRDest::StackOffset(stack_offset)
+                (
+                    IRDest::StackOffset(stack_offset),
+                    ScopeRecord::new(offset, dest_ty),
+                )
             }
         };
         self.output.push(op(ir_dest, ir_src));
+        result
     }
 }
 
@@ -308,20 +336,19 @@ fn stmt(state: &mut State) -> CompileOpt<()> {
                 bind_ty = Some(ty)
             }
             expect_token(state, Token::ColonEq)?;
-            let expr_ty = expr(state, ExprContext::let_binding(bind_ty))?
+            let rec = expr(state, ExprContext::let_binding(bind_ty))?
                 .ok_or(CompileError::Expected("expr"))?;
-            state
-                .scope
-                .assign(binding, ScopeRecord::new(state.current_frame_size, expr_ty));
+            state.scope.assign(binding, rec);
             Ok(Some(()))
         }
-        Token::Identifier(ident) => match lvalue(state, ExprContext::stack())? {
+        Token::Identifier(ident) => match lvalue(state)? {
             Some(rec) => {
                 if token(state, Token::ColonEq)?.is_some() {
                     expr(state, ExprContext::assign(rec))?.ok_or(CompileError::Expected("expr"))?;
                     Ok(Some(()))
                 } else {
-                    identifier(state, ExprContext::stack(), &ident)?;
+                    let left = identifier(state, ExprContext::stack(), &ident)?;
+                    op_expr(state, left)?;
                     Ok(Some(()))
                 }
             }
@@ -351,13 +378,7 @@ fn type_expr(state: &mut State) -> CompileOpt<Ty> {
     }
 }
 
-// #[derive(Clone, Debug, PartialEq, Eq)]
-// enum LValue {
-//     LValue(ScopeRecord),
-//     Expr(Ty),
-// }
-
-fn lvalue(state: &mut State, ctx: ExprContext) -> Compile<Option<ScopeRecord>> {
+fn lvalue(state: &mut State) -> CompileOpt<ScopeRecord> {
     match state.lexer.peek()? {
         Token::Identifier(ident) => {
             state.lexer.advance();
@@ -395,17 +416,158 @@ impl ExprContext {
     }
     fn check_ty(&self, other: Ty) -> Compile<Ty> {
         match &self.ty {
-            Some(ty) => {
-                ty.check(&other)?;
-                Ok(other)
-            }
+            Some(ty) => ty.check(other),
             None => Ok(other),
         }
     }
 }
 
-fn expr(state: &mut State, ctx: ExprContext) -> CompileOpt<Ty> {
+fn expr(state: &mut State, ctx: ExprContext) -> CompileOpt<ScopeRecord> {
+    let left: ScopeRecord = match base_expr(state, ctx)? {
+        Some(ty) => ty,
+        None => return Ok(None),
+    };
+    op_expr(state, left)
+}
+
+struct OpParser {
+    op_stack: Vec<Op>,
+    operands: Vec<ScopeRecord>,
+}
+
+// a * b + c
+// a: [a] []
+// *: [a] [*]
+// b: [a, b] [*]
+// +: [a * b] [+]
+// c: [a * b, c] [+]
+// .. [(a * b) + c] []
+
+// a + b * c
+// a: [a] []
+// +: [a] [+]
+// b: [a, b] [+]
+// *: [a, b] [+, *]
+// c: [a, b, c] [+, *]
+// .. [a, b * c] [+]
+// .. [a + (b * c)] []
+
+impl OpParser {
+    fn new(left: ScopeRecord) -> Self {
+        Self {
+            op_stack: Vec::new(),
+            operands: vec![left],
+        }
+    }
+    fn apply(&mut self, state: &mut State, op: Op) -> Compile<()> {
+        let right = self.operands.pop().expect("rhs");
+        let left = self.operands.pop().expect("lhs");
+        let dest = left.to_dest();
+        let dest_ty = op.check_ty(left.ty, right.ty)?;
+        let res = state.write(op.ir(), dest, Src::PopStack, dest_ty);
+        self.operands.push(res);
+        Ok(())
+    }
+    fn unwind(&mut self, state: &mut State) -> Compile<ScopeRecord> {
+        while let Some(op) = self.op_stack.pop() {
+            self.apply(state, op)?;
+        }
+        Ok(self.operands.pop().expect("op result"))
+    }
+    fn next(&mut self, state: &mut State, op: Op) -> Compile<()> {
+        match self.op_stack.pop() {
+            Some(last_op) => {
+                if last_op.precedence() > op.precedence() {
+                    self.op_stack.push(last_op);
+                    self.op_stack.push(op);
+                } else {
+                    self.apply(state, last_op)?;
+                    self.op_stack.push(op);
+                }
+            }
+            None => {
+                self.op_stack.push(op);
+            }
+        };
+        Ok(())
+    }
+    fn push_rhs(&mut self, rhs: ScopeRecord) {
+        self.operands.push(rhs);
+    }
+}
+
+fn op_expr(state: &mut State, left: ScopeRecord) -> CompileOpt<ScopeRecord> {
+    let mut op_parser = OpParser::new(left);
+
+    loop {
+        match operator(state)? {
+            Some(op) => {
+                op_parser.next(state, op)?;
+                let res = base_expr(state, ExprContext::stack())?
+                    .ok_or(CompileError::Expected("expr"))?;
+                op_parser.push_rhs(res);
+            }
+            None => return op_parser.unwind(state).map(Some),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Op {
+    Add,
+    Sub,
+    Mul,
+}
+
+impl Op {
+    fn precedence(&self) -> usize {
+        match self {
+            Op::Add => 1,
+            Op::Sub => 1,
+            Op::Mul => 0,
+        }
+    }
+    fn check_ty(&self, left: Ty, right: Ty) -> Compile<Ty> {
+        match self {
+            Op::Add => self.arithmetic(left, right),
+            Op::Sub => self.arithmetic(left, right),
+            Op::Mul => self.arithmetic(left, right),
+        }
+    }
+    fn arithmetic(&self, left: Ty, right: Ty) -> Compile<Ty> {
+        Ty::int().check(left)?;
+        Ty::int().check(right)?;
+        Ok(Ty::int())
+    }
+
+    fn ir(&self) -> IROp {
+        match self {
+            Op::Add => IR::add,
+            Op::Sub => IR::sub,
+            Op::Mul => IR::mult,
+        }
+    }
+}
+
+fn operator(state: &mut State) -> CompileOpt<Op> {
+    let op = match state.lexer.peek()? {
+        Token::Plus => Op::Add,
+        Token::Minus => Op::Sub,
+        Token::Star => Op::Mul,
+        _ => return Ok(None),
+    };
+    state.lexer.advance();
+    Ok(Some(op))
+}
+
+fn base_expr(state: &mut State, ctx: ExprContext) -> CompileOpt<ScopeRecord> {
     match state.lexer.peek()? {
+        Token::ParLeft => {
+            state.lexer.advance();
+            let res = expr(state, ctx)?;
+            expect_token(state, Token::ParRight)?;
+            return Ok(res);
+        }
         Token::Integer(int) => {
             state.lexer.advance();
             number(state, ctx, int)
@@ -427,24 +589,22 @@ fn expr(state: &mut State, ctx: ExprContext) -> CompileOpt<Ty> {
     .map(Some)
 }
 
-fn number(state: &mut State, ctx: ExprContext, value: Word) -> Compile<Ty> {
+fn number(state: &mut State, ctx: ExprContext, value: Word) -> Compile<ScopeRecord> {
     let ty = ctx.check_ty(Ty::int())?;
-    state.write(IR::mov, ctx.dest, Src::Immediate(value));
-    Ok(ty)
+    Ok(state.write(IR::mov, ctx.dest, Src::Immediate(value), ty))
 }
 
-fn boolean(state: &mut State, ctx: ExprContext, value: bool) -> Compile<Ty> {
+fn boolean(state: &mut State, ctx: ExprContext, value: bool) -> Compile<ScopeRecord> {
     let ty = ctx.check_ty(Ty::bool())?;
     let src = Src::Immediate(if value { 1 } else { 0 });
-    state.write(IR::mov, ctx.dest, src);
-    Ok(ty)
+    Ok(state.write(IR::mov, ctx.dest, src, ty))
 }
 
-fn identifier(state: &mut State, ctx: ExprContext, name: &str) -> Compile<Ty> {
+fn identifier(state: &mut State, ctx: ExprContext, name: &str) -> Compile<ScopeRecord> {
     let record = state.scope.get(name)?;
+    let src = record.to_src();
     let ty = ctx.check_ty(record.ty)?;
-    state.write(IR::mov, ctx.dest, Src::FrameOffset(record.frame_offset));
-    Ok(ty)
+    Ok(state.write(IR::mov, ctx.dest, src, ty))
 }
 
 #[cfg(test)]
@@ -567,6 +727,54 @@ mod test {
                 IR::mov(IRDest::PushStack, IRSrc::Immediate(3)),
                 IR::mov(IRDest::StackOffset(1), IRSrc::StackOffset(0)),
                 IR::mov(IRDest::PushStack, IRSrc::StackOffset(1)),
+            ],
+        )
+    }
+
+    #[test]
+    fn addition() {
+        expect_ir(
+            "
+            let x := 1;
+            let y := 2;
+            x + 3 + y 
+        ",
+            vec![
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(1)), //     [x: 1]
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(2)), //     [y: 2, x: 1]
+                IR::mov(IRDest::PushStack, IRSrc::StackOffset(1)), //   [1, y: 2, x: 1]
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(3)), //     [3, 1, y: 2, x: 1]
+                IR::add(IRDest::StackOffset(0), IRSrc::PopStack), //    [4, y: 2, x: 1]
+                IR::mov(IRDest::PushStack, IRSrc::StackOffset(1)), //   [2, 4, y: 2, x: 1]
+                IR::add(IRDest::StackOffset(0), IRSrc::PopStack), //    [6, y: 2, x: 1]
+            ],
+        )
+    }
+
+    #[test]
+    fn parens() {
+        expect_ir(
+            "3 * (4 + 5)",
+            vec![
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(3)),
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(4)),
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(5)),
+                IR::add(IRDest::StackOffset(0), IRSrc::PopStack),
+                IR::mult(IRDest::StackOffset(0), IRSrc::PopStack),
+            ],
+        )
+    }
+
+    #[test]
+    fn precedence() {
+        expect_ir(
+            "4 + 5 * 3",
+            vec![
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(4)),
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(5)),
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(3)),
+                IR::mult(IRDest::StackOffset(0), IRSrc::PopStack),
+                IR::add(IRDest::StackOffset(0), IRSrc::PopStack),
             ],
         )
     }
