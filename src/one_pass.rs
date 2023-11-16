@@ -26,6 +26,8 @@ pub enum Token {
     False,
     Let,
     As,
+    Type,
+    Struct,
     Colon,
     Semicolon,
     ColonEq,
@@ -36,6 +38,8 @@ pub enum Token {
     Ampersand,
     ParLeft,
     ParRight,
+    CurlyLeft,
+    CurlyRight,
 }
 
 mod lexer {
@@ -69,9 +73,16 @@ mod lexer {
                 '\0' => Ok(Token::EndOfInput),
                 '0'..='9' => self.number(),
                 'l' => self.keyword("let", Token::Let),
-                't' => self.keyword("true", Token::True),
+                't' => {
+                    self.adv_char();
+                    match self.peek_char() {
+                        'r' => self.keyword_idx("true", 1, Token::True),
+                        _ => self.keyword_idx("type", 1, Token::Type),
+                    }
+                }
                 'f' => self.keyword("false", Token::False),
                 'a' => self.keyword("as", Token::As),
+                's' => self.keyword("struct", Token::Struct),
                 ';' => self.operator(Token::Semicolon),
                 '+' => self.operator(Token::Plus),
                 '-' => self.operator(Token::Minus),
@@ -80,6 +91,8 @@ mod lexer {
                 '&' => self.operator(Token::Ampersand),
                 '(' => self.operator(Token::ParLeft),
                 ')' => self.operator(Token::ParRight),
+                '{' => self.operator(Token::CurlyLeft),
+                '}' => self.operator(Token::CurlyRight),
                 ':' => {
                     self.adv_char();
                     match self.peek_char() {
@@ -87,7 +100,7 @@ mod lexer {
                         _ => Ok(Token::Colon),
                     }
                 }
-                'a'..='z' => self.identifier(""),
+                'a'..='z' | 'A'..='Z' => self.identifier(""),
                 _ => Err(CompileError::UnexpectedChar),
             }
         }
@@ -119,9 +132,17 @@ mod lexer {
             Ok(Token::Integer(sum))
         }
         fn keyword(&mut self, keyword: &str, token: Token) -> Compile<Token> {
-            for (i, ch) in keyword.chars().enumerate() {
+            self.keyword_idx(keyword, 0, token)
+        }
+        fn keyword_idx(
+            &mut self,
+            keyword: &str,
+            start_index: usize,
+            token: Token,
+        ) -> Compile<Token> {
+            for (i, ch) in keyword.chars().skip(start_index).enumerate() {
                 if self.peek_char() != ch {
-                    return self.identifier(&keyword[0..i]);
+                    return self.identifier(&keyword[0..(i + start_index)]);
                 }
                 self.adv_char()
             }
@@ -274,6 +295,31 @@ impl Scope {
     }
 }
 
+struct TyScope {
+    data: HashMap<String, Ty>,
+}
+
+impl TyScope {
+    fn new() -> Self {
+        Self {
+            data: HashMap::from_iter(
+                vec![("int", Ty::int()), ("bool", Ty::bool())]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v)),
+            ),
+        }
+    }
+    fn get(&self, key: &str) -> Compile<Ty> {
+        self.data
+            .get(key)
+            .map(|t| t.clone())
+            .ok_or_else(|| CompileError::UnknownTypeIdentifier(key.to_string()))
+    }
+    fn assign(&mut self, key: String, record: Ty) {
+        self.data.insert(key, record);
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Dest {
     Stack,
@@ -295,6 +341,7 @@ struct State {
     lexer: Lexer,
     output: Vec<IR>,
     scope: Scope,
+    ty_scope: TyScope,
     current_frame_size: Word,
 }
 
@@ -304,6 +351,7 @@ impl State {
             lexer: Lexer::new(str),
             output: Vec::new(),
             scope: Scope::new(),
+            ty_scope: TyScope::new(),
             current_frame_size: 0,
         }
     }
@@ -384,6 +432,16 @@ fn binding(state: &mut State) -> CompileOpt<String> {
     }
 }
 
+fn type_binding(state: &mut State) -> CompileOpt<String> {
+    match state.lexer.peek()? {
+        Token::Identifier(str) => {
+            state.lexer.advance();
+            Ok(Some(str))
+        }
+        _ => Ok(None),
+    }
+}
+
 type Syntax<T> = fn(state: &mut State) -> CompileOpt<T>;
 fn alternating<T, U>(state: &mut State, item: Syntax<T>, separator: Syntax<U>) -> Compile<()> {
     loop {
@@ -400,7 +458,7 @@ fn stmt(state: &mut State) -> CompileOpt<()> {
     match state.lexer.peek()? {
         Token::Let => {
             state.lexer.advance();
-            let binding = binding(state)?.ok_or(CompileError::Expected("binding"))?;
+            let b = binding(state)?.ok_or(CompileError::Expected("binding"))?;
             let mut bind_ty = None;
 
             if token(state, Token::Colon)?.is_some() {
@@ -410,7 +468,7 @@ fn stmt(state: &mut State) -> CompileOpt<()> {
             expect_token(state, Token::ColonEq)?;
             let rec = expr(state, ExprContext::let_binding(bind_ty))?
                 .ok_or(CompileError::Expected("expr"))?;
-            state.scope.assign(binding, rec);
+            state.scope.assign(b, rec);
             Ok(Some(()))
         }
         Token::Identifier(ident) => match lvalue(state)? {
@@ -426,6 +484,14 @@ fn stmt(state: &mut State) -> CompileOpt<()> {
             }
             None => unreachable!(),
         },
+        Token::Type => {
+            state.lexer.advance();
+            let tb = type_binding(state)?.ok_or(CompileError::Expected("type binding"))?;
+            expect_token(state, Token::ColonEq)?;
+            let te = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
+            state.ty_scope.assign(tb, te);
+            Ok(Some(()))
+        }
         _ => {
             expr(state, ExprContext::stack())?;
             Ok(Some(()))
@@ -435,17 +501,10 @@ fn stmt(state: &mut State) -> CompileOpt<()> {
 
 fn type_expr(state: &mut State) -> CompileOpt<Ty> {
     match state.lexer.peek()? {
-        Token::Identifier(ident) => match ident.as_str() {
-            "int" => {
-                state.lexer.advance();
-                Ok(Some(Ty::int()))
-            }
-            "bool" => {
-                state.lexer.advance();
-                Ok(Some(Ty::bool()))
-            }
-            _ => Err(CompileError::UnknownTypeIdentifier(ident)),
-        },
+        Token::Identifier(ident) => {
+            state.lexer.advance();
+            state.ty_scope.get(&ident).map(Some)
+        }
         _ => Ok(None),
     }
 }
@@ -945,6 +1004,17 @@ mod test {
                 IR::mov(IRDest::PushStack, IRSrc::Immediate(2)),
                 IR::add(IRDest::StackOffset(0), IRSrc::PopStack),
             ],
+        )
+    }
+
+    #[test]
+    fn type_alias() {
+        expect_ir(
+            "
+                type Word := int;
+                let a : Word := 3    
+            ",
+            vec![IR::mov(IRDest::PushStack, IRSrc::Immediate(3))],
         )
     }
 }
