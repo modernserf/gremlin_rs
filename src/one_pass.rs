@@ -10,6 +10,7 @@ pub enum CompileError {
     ExpectedType(Ty, Ty),
     UnknownTypeIdentifier(String),
     Expected(&'static str),
+    InvalidDeref,
 }
 
 type Compile<T> = Result<T, CompileError>;
@@ -29,6 +30,8 @@ pub enum Token {
     Plus,
     Minus,
     Star,
+    At,
+    Ampersand,
     ParLeft,
     ParRight,
 }
@@ -70,6 +73,8 @@ mod lexer {
                 '+' => self.operator(Token::Plus),
                 '-' => self.operator(Token::Minus),
                 '*' => self.operator(Token::Star),
+                '@' => self.operator(Token::At),
+                '&' => self.operator(Token::Ampersand),
                 '(' => self.operator(Token::ParLeft),
                 ')' => self.operator(Token::ParRight),
                 ':' => {
@@ -156,16 +161,39 @@ use lexer::Lexer;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ty {
     kind: TyKind,
+    ref_level: usize,
 }
 
 impl Ty {
     fn int() -> Self {
-        Ty { kind: TyKind::Int }
+        Self {
+            kind: TyKind::Int,
+            ref_level: 0,
+        }
     }
     fn bool() -> Self {
-        Ty { kind: TyKind::Bool }
+        Self {
+            kind: TyKind::Bool,
+            ref_level: 0,
+        }
     }
-    fn check(&self, other: Ty) -> Compile<Ty> {
+    fn add_ref(&self) -> Self {
+        Self {
+            kind: self.kind.clone(),
+            ref_level: self.ref_level + 1,
+        }
+    }
+    fn deref(&self) -> Option<Self> {
+        if self.ref_level == 0 {
+            None
+        } else {
+            Some(Self {
+                kind: self.kind.clone(),
+                ref_level: self.ref_level - 1,
+            })
+        }
+    }
+    fn check(&self, other: Self) -> Compile<Self> {
         if self == &other {
             Ok(other)
         } else {
@@ -182,19 +210,40 @@ enum TyKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ScopeRecord {
-    frame_offset: Word,
+    kind: ScopeRecordKind,
     ty: Ty,
 }
 impl ScopeRecord {
-    fn new(frame_offset: Word, ty: Ty) -> Self {
-        Self { frame_offset, ty }
+    fn local(frame_offset: Word, ty: Ty) -> Self {
+        Self {
+            kind: ScopeRecordKind::FrameOffset(frame_offset),
+            ty,
+        }
+    }
+    fn r0(ty: Ty) -> Self {
+        Self {
+            kind: ScopeRecordKind::R0,
+            ty,
+        }
     }
     fn to_dest(&self) -> Dest {
-        Dest::FrameOffset(self.frame_offset)
+        match self.kind {
+            ScopeRecordKind::FrameOffset(offset) => Dest::FrameOffset(offset),
+            ScopeRecordKind::R0 => Dest::R0,
+        }
     }
     fn to_src(&self) -> Src {
-        Src::FrameOffset(self.frame_offset)
+        match self.kind {
+            ScopeRecordKind::FrameOffset(offset) => Src::FrameOffset(offset),
+            ScopeRecordKind::R0 => unimplemented!(),
+        }
     }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ScopeRecordKind {
+    FrameOffset(Word),
+    R0,
 }
 
 struct Scope {
@@ -222,6 +271,7 @@ impl Scope {
 enum Dest {
     Stack,
     FrameOffset(Word),
+    R0,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -229,6 +279,7 @@ enum Src {
     Immediate(Word),
     FrameOffset(Word),
     PopStack,
+    R0Offset(Word),
 }
 
 type IROp = fn(IRDest, IRSrc) -> IR;
@@ -260,25 +311,39 @@ impl State {
                 self.current_frame_size -= 1;
                 IRSrc::PopStack
             }
+            Src::R0Offset(offset) => IRSrc::R0Offset(offset),
         };
         let (ir_dest, result) = match dest {
             Dest::Stack => {
                 self.current_frame_size += 1;
                 (
                     IRDest::PushStack,
-                    ScopeRecord::new(self.current_frame_size, dest_ty),
+                    ScopeRecord::local(self.current_frame_size, dest_ty),
                 )
             }
             Dest::FrameOffset(offset) => {
                 let stack_offset = self.current_frame_size - offset;
                 (
                     IRDest::StackOffset(stack_offset),
-                    ScopeRecord::new(offset, dest_ty),
+                    ScopeRecord::local(offset, dest_ty),
                 )
             }
+            Dest::R0 => (IRDest::R0, ScopeRecord::r0(dest_ty)),
         };
         self.output.push(op(ir_dest, ir_src));
         result
+    }
+    fn allocate(&mut self, ctx: &ExprContext) -> Dest {
+        match &ctx.dest {
+            Dest::Stack => {
+                let size = 1;
+                self.current_frame_size += size;
+                self.output
+                    .push(IR::sub(IRDest::SP, IRSrc::Immediate(size)));
+                Dest::FrameOffset(self.current_frame_size)
+            }
+            dest => *dest,
+        }
     }
 }
 
@@ -410,8 +475,8 @@ impl ExprContext {
     }
     fn assign(rec: ScopeRecord) -> Self {
         Self {
+            dest: rec.to_dest(),
             ty: Some(rec.ty),
-            dest: Dest::FrameOffset(rec.frame_offset),
         }
     }
     fn check_ty(&self, other: Ty) -> Compile<Ty> {
@@ -423,7 +488,7 @@ impl ExprContext {
 }
 
 fn expr(state: &mut State, ctx: ExprContext) -> CompileOpt<ScopeRecord> {
-    let left: ScopeRecord = match base_expr(state, ctx)? {
+    let left: ScopeRecord = match unary_op_expr(state, ctx)? {
         Some(ty) => ty,
         None => return Ok(None),
     };
@@ -503,7 +568,7 @@ fn op_expr(state: &mut State, left: ScopeRecord) -> CompileOpt<ScopeRecord> {
         match operator(state)? {
             Some(op) => {
                 op_parser.next(state, op)?;
-                let res = base_expr(state, ExprContext::stack())?
+                let res = unary_op_expr(state, ExprContext::stack())?
                     .ok_or(CompileError::Expected("expr"))?;
                 op_parser.push_rhs(res);
             }
@@ -558,6 +623,37 @@ fn operator(state: &mut State) -> CompileOpt<Op> {
     };
     state.lexer.advance();
     Ok(Some(op))
+}
+
+fn unary_op_expr(state: &mut State, ctx: ExprContext) -> CompileOpt<ScopeRecord> {
+    match state.lexer.peek()? {
+        Token::Minus => {
+            state.lexer.advance();
+            let tgt = state.write(IR::mov, ctx.dest, Src::Immediate(0), Ty::int());
+            unary_op_expr(state, ExprContext::stack())?.ok_or(CompileError::Expected("expr"))?;
+            let out = state.write(IR::sub, tgt.to_dest(), Src::PopStack, tgt.ty);
+
+            Ok(Some(out))
+        }
+        Token::Ampersand => {
+            state.lexer.advance();
+            let res = lvalue(state)?.ok_or(CompileError::Expected("lvalue"))?;
+            let dest_ty = ctx.check_ty(res.ty.add_ref())?;
+            let out = state.write(IR::load_address, ctx.dest, res.to_src(), dest_ty);
+            Ok(Some(out))
+        }
+        Token::At => {
+            state.lexer.advance();
+            let dest = state.allocate(&ctx);
+            let res = unary_op_expr(state, ExprContext::stack())?
+                .ok_or(CompileError::Expected("expr"))?;
+            let dest_ty = ctx.check_ty(res.ty.deref().ok_or(CompileError::InvalidDeref)?)?;
+            state.write(IR::mov, Dest::R0, Src::PopStack, res.ty);
+            let out = state.write(IR::mov, dest, Src::R0Offset(0), dest_ty);
+            Ok(Some(out))
+        }
+        _ => base_expr(state, ctx),
+    }
 }
 
 fn base_expr(state: &mut State, ctx: ExprContext) -> CompileOpt<ScopeRecord> {
@@ -752,6 +848,18 @@ mod test {
     }
 
     #[test]
+    fn typechecked_arithmetic() {
+        expect_err(
+            "1 + true",
+            CompileError::ExpectedType(Ty::int(), Ty::bool()),
+        );
+        expect_err(
+            "true + 1",
+            CompileError::ExpectedType(Ty::int(), Ty::bool()),
+        );
+    }
+
+    #[test]
     fn parens() {
         expect_ir(
             "3 * (4 + 5)",
@@ -775,6 +883,37 @@ mod test {
                 IR::mov(IRDest::PushStack, IRSrc::Immediate(3)),
                 IR::mult(IRDest::StackOffset(0), IRSrc::PopStack),
                 IR::add(IRDest::StackOffset(0), IRSrc::PopStack),
+            ],
+        )
+    }
+
+    #[test]
+    fn negation() {
+        expect_ir(
+            "-3",
+            vec![
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(0)),
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(3)),
+                IR::sub(IRDest::StackOffset(0), IRSrc::PopStack),
+            ],
+        );
+    }
+
+    #[test]
+    fn ref_deref() {
+        expect_ir(
+            "
+            let x := 1;
+            let ptr := &x;
+            @ptr
+        ",
+            vec![
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(1)),
+                IR::load_address(IRDest::PushStack, IRSrc::StackOffset(0)),
+                IR::sub(IRDest::SP, IRSrc::Immediate(1)),
+                IR::mov(IRDest::PushStack, IRSrc::StackOffset(1)),
+                IR::mov(IRDest::R0, IRSrc::PopStack),
+                IR::mov(IRDest::StackOffset(0), IRSrc::R0Offset(0)),
             ],
         )
     }

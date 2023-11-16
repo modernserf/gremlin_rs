@@ -1,4 +1,4 @@
-pub type Word = u32;
+pub type Word = i32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IR {

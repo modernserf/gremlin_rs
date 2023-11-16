@@ -16,7 +16,7 @@ use crate::parser::Parser;
 use crate::runtime::Runtime;
 use crate::typechecker::TypeChecker;
 
-fn eval(program: &str) -> u32 {
+fn eval(program: &str) -> i32 {
     let tok = Lexer::lex(&program);
     let ast = Parser::parse_body(tok).expect("ast");
     let tc = TypeChecker::check(&ast).expect("typecheck");
@@ -32,7 +32,7 @@ fn main() {
 mod test {
     use super::*;
 
-    fn assert_expr_eq(str: &str, expected: u32) {
+    fn assert_expr_eq(str: &str, expected: i32) {
         assert_eq!(eval(str), expected);
     }
 
