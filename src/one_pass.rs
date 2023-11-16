@@ -202,6 +202,20 @@ impl Scope {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Dest {
+    Stack,
+    FrameOffset(Word),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Src {
+    Immediate(Word),
+    FrameOffset(Word),
+}
+
+type IROp = fn(IRDest, IRSrc) -> IR;
+
 struct State {
     lexer: Lexer,
     output: Vec<IR>,
@@ -218,18 +232,25 @@ impl State {
             current_frame_size: 0,
         }
     }
-    // output
-    fn write(&mut self, ir: IR) {
-        self.output.push(ir);
-    }
-    fn push_constant(&mut self, value: Word) {
-        self.write(IR::mov(IRDest::PushStack, IRSrc::Immediate(value)));
-        self.current_frame_size += 1;
-    }
-    fn push_local(&mut self, record: &ScopeRecord) {
-        let stack_offset = self.current_frame_size - record.frame_offset;
-        self.write(IR::mov(IRDest::PushStack, IRSrc::StackOffset(stack_offset)));
-        self.current_frame_size += 1;
+    fn write(&mut self, op: IROp, dest: Dest, src: Src) {
+        let ir_src = match src {
+            Src::Immediate(value) => IRSrc::Immediate(value),
+            Src::FrameOffset(offset) => {
+                let stack_offset = self.current_frame_size - offset;
+                IRSrc::StackOffset(stack_offset)
+            }
+        };
+        let ir_dest = match dest {
+            Dest::Stack => {
+                self.current_frame_size += 1;
+                IRDest::PushStack
+            }
+            Dest::FrameOffset(offset) => {
+                let stack_offset = self.current_frame_size - offset;
+                IRDest::StackOffset(stack_offset)
+            }
+        };
+        self.output.push(op(ir_dest, ir_src));
     }
 }
 
@@ -237,12 +258,9 @@ impl State {
 fn program(input: &str) -> Compile<Vec<IR>> {
     let mut state = State::new(input);
     alternating(&mut state, stmt, |s| token(s, Token::Semicolon))?;
-    token(&mut state, Token::EndOfInput)?
-        .ok_or_else(|| CompileError::ExpectedToken(Token::EndOfInput))?;
+    token(&mut state, Token::EndOfInput)?.ok_or(CompileError::ExpectedToken(Token::EndOfInput))?;
     Ok(state.output)
 }
-
-type Syntax<T> = fn(state: &mut State) -> CompileOpt<T>;
 
 fn token(state: &mut State, token: Token) -> CompileOpt<()> {
     if state.lexer.peek()? == token {
@@ -266,6 +284,7 @@ fn binding(state: &mut State) -> CompileOpt<String> {
     }
 }
 
+type Syntax<T> = fn(state: &mut State) -> CompileOpt<T>;
 fn alternating<T, U>(state: &mut State, item: Syntax<T>, separator: Syntax<U>) -> Compile<()> {
     loop {
         if item(state)?.is_none() {
@@ -281,25 +300,35 @@ fn stmt(state: &mut State) -> CompileOpt<()> {
     match state.lexer.peek()? {
         Token::Let => {
             state.lexer.advance();
-            let binding = binding(state)?.ok_or_else(|| CompileError::Expected("binding"))?;
+            let binding = binding(state)?.ok_or(CompileError::Expected("binding"))?;
             let mut bind_ty = None;
 
             if token(state, Token::Colon)?.is_some() {
-                let ty = type_expr(state)?.ok_or_else(|| CompileError::Expected("type expr"))?;
+                let ty = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
                 bind_ty = Some(ty)
             }
             expect_token(state, Token::ColonEq)?;
-            let expr_ty = expr(state)?.ok_or(CompileError::Expected("expr"))?;
-            if let Some(ty) = bind_ty {
-                ty.check(&expr_ty)?;
-            }
+            let expr_ty = expr(state, ExprContext::let_binding(bind_ty))?
+                .ok_or(CompileError::Expected("expr"))?;
             state
                 .scope
                 .assign(binding, ScopeRecord::new(state.current_frame_size, expr_ty));
             Ok(Some(()))
         }
+        Token::Identifier(ident) => match lvalue(state, ExprContext::stack())? {
+            Some(rec) => {
+                if token(state, Token::ColonEq)?.is_some() {
+                    expr(state, ExprContext::assign(rec))?.ok_or(CompileError::Expected("expr"))?;
+                    Ok(Some(()))
+                } else {
+                    identifier(state, ExprContext::stack(), &ident)?;
+                    Ok(Some(()))
+                }
+            }
+            None => unreachable!(),
+        },
         _ => {
-            expr(state)?;
+            expr(state, ExprContext::stack())?;
             Ok(Some(()))
         }
     }
@@ -322,46 +351,100 @@ fn type_expr(state: &mut State) -> CompileOpt<Ty> {
     }
 }
 
-fn expr(state: &mut State) -> CompileOpt<Ty> {
+// #[derive(Clone, Debug, PartialEq, Eq)]
+// enum LValue {
+//     LValue(ScopeRecord),
+//     Expr(Ty),
+// }
+
+fn lvalue(state: &mut State, ctx: ExprContext) -> Compile<Option<ScopeRecord>> {
     match state.lexer.peek()? {
-        Token::Integer(int) => {
+        Token::Identifier(ident) => {
             state.lexer.advance();
-            number(state, int)?;
-            Ok(Some(Ty::int()))
+            let record = state.scope.get(&ident)?;
+            Ok(Some(record))
         }
-        Token::True => {
-            state.lexer.advance();
-            boolean(state, true)?;
-            Ok(Some(Ty::bool()))
-        }
-        Token::False => {
-            state.lexer.advance();
-            boolean(state, false)?;
-            Ok(Some(Ty::bool()))
-        }
-        Token::Identifier(name) => {
-            state.lexer.advance();
-            let ty = identifier(state, &name)?;
-            Ok(Some(ty))
-        }
-        _ => return Ok(None),
+        _ => Ok(None),
     }
 }
 
-fn number(state: &mut State, value: Word) -> Compile<()> {
-    state.push_constant(value);
-    Ok(())
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExprContext {
+    ty: Option<Ty>,
+    dest: Dest,
 }
 
-fn boolean(state: &mut State, value: bool) -> Compile<()> {
-    state.push_constant(if value { 1 } else { 0 });
-    Ok(())
+impl ExprContext {
+    fn stack() -> Self {
+        Self {
+            ty: None,
+            dest: Dest::Stack,
+        }
+    }
+    fn let_binding(ty: Option<Ty>) -> Self {
+        Self {
+            ty,
+            dest: Dest::Stack,
+        }
+    }
+    fn assign(rec: ScopeRecord) -> Self {
+        Self {
+            ty: Some(rec.ty),
+            dest: Dest::FrameOffset(rec.frame_offset),
+        }
+    }
+    fn check_ty(&self, other: Ty) -> Compile<Ty> {
+        match &self.ty {
+            Some(ty) => {
+                ty.check(&other)?;
+                Ok(other)
+            }
+            None => Ok(other),
+        }
+    }
 }
 
-fn identifier(state: &mut State, name: &str) -> Compile<Ty> {
+fn expr(state: &mut State, ctx: ExprContext) -> CompileOpt<Ty> {
+    match state.lexer.peek()? {
+        Token::Integer(int) => {
+            state.lexer.advance();
+            number(state, ctx, int)
+        }
+        Token::True => {
+            state.lexer.advance();
+            boolean(state, ctx, true)
+        }
+        Token::False => {
+            state.lexer.advance();
+            boolean(state, ctx, false)
+        }
+        Token::Identifier(name) => {
+            state.lexer.advance();
+            identifier(state, ctx, &name)
+        }
+        _ => return Ok(None),
+    }
+    .map(Some)
+}
+
+fn number(state: &mut State, ctx: ExprContext, value: Word) -> Compile<Ty> {
+    let ty = ctx.check_ty(Ty::int())?;
+    state.write(IR::mov, ctx.dest, Src::Immediate(value));
+    Ok(ty)
+}
+
+fn boolean(state: &mut State, ctx: ExprContext, value: bool) -> Compile<Ty> {
+    let ty = ctx.check_ty(Ty::bool())?;
+    let src = Src::Immediate(if value { 1 } else { 0 });
+    state.write(IR::mov, ctx.dest, src);
+    Ok(ty)
+}
+
+fn identifier(state: &mut State, ctx: ExprContext, name: &str) -> Compile<Ty> {
     let record = state.scope.get(name)?;
-    state.push_local(&record);
-    Ok(record.ty)
+    let ty = ctx.check_ty(record.ty)?;
+    state.write(IR::mov, ctx.dest, Src::FrameOffset(record.frame_offset));
+    Ok(ty)
 }
 
 #[cfg(test)]
@@ -467,6 +550,24 @@ mod test {
             let x : bool := 1;
         ",
             CompileError::ExpectedType(Ty::bool(), Ty::int()),
+        )
+    }
+
+    #[test]
+    fn assignment() {
+        expect_ir(
+            "
+            let x := 1;
+            let y := 3;
+            x := y;
+            x
+        ",
+            vec![
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(1)),
+                IR::mov(IRDest::PushStack, IRSrc::Immediate(3)),
+                IR::mov(IRDest::StackOffset(1), IRSrc::StackOffset(0)),
+                IR::mov(IRDest::PushStack, IRSrc::StackOffset(1)),
+            ],
         )
     }
 }
