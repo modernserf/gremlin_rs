@@ -169,6 +169,7 @@ type CompileOpt<T> = Result<Option<T>, CompileError>;
 pub enum Token {
     Integer(Word),
     Identifier(String),
+    TypeIdentifier(String),
     EndOfInput,
     True,
     False,
@@ -252,7 +253,8 @@ mod lexer {
                         _ => Ok(Token::Colon),
                     }
                 }
-                'a'..='z' | 'A'..='Z' => self.identifier(""),
+                'a'..='z' => self.identifier("").map(Token::Identifier),
+                'A'..='Z' => self.identifier("").map(Token::TypeIdentifier),
                 _ => Err(CompileError::UnexpectedChar),
             }
         }
@@ -294,14 +296,16 @@ mod lexer {
         ) -> Compile<Token> {
             for (i, ch) in keyword.chars().skip(start_index).enumerate() {
                 if self.peek_char() != ch {
-                    return self.identifier(&keyword[0..(i + start_index)]);
+                    return self
+                        .identifier(&keyword[0..(i + start_index)])
+                        .map(Token::Identifier);
                 }
                 self.adv_char()
             }
 
             Ok(token)
         }
-        fn identifier(&mut self, prefix: &str) -> Compile<Token> {
+        fn identifier(&mut self, prefix: &str) -> Compile<String> {
             let mut out = String::from(prefix);
             loop {
                 let ch = self.peek_char();
@@ -309,7 +313,7 @@ mod lexer {
                     self.adv_char();
                     out.push(ch);
                 } else {
-                    return Ok(Token::Identifier(out));
+                    return Ok(out);
                 }
             }
         }
@@ -528,7 +532,7 @@ impl TyScope {
     fn new() -> Self {
         Self {
             data: HashMap::from_iter(
-                vec![("int", Ty::int()), ("bool", Ty::bool())]
+                vec![("Int", Ty::int()), ("Bool", Ty::bool())]
                     .into_iter()
                     .map(|(k, v)| (k.to_string(), v)),
             ),
@@ -686,7 +690,7 @@ fn binding(state: &mut State) -> CompileOpt<String> {
 
 fn type_binding(state: &mut State) -> CompileOpt<String> {
     match state.lexer.peek()? {
-        Token::Identifier(str) => {
+        Token::TypeIdentifier(str) => {
             state.lexer.advance();
             Ok(Some(str))
         }
@@ -747,7 +751,7 @@ fn stmt(state: &mut State) -> CompileOpt<()> {
 
 fn type_expr(state: &mut State) -> CompileOpt<Ty> {
     match state.lexer.peek()? {
-        Token::Identifier(ident) => {
+        Token::TypeIdentifier(ident) => {
             state.lexer.advance();
             state.ty_scope.get(&ident).map(Some)
         }
@@ -1018,43 +1022,31 @@ fn base_expr(state: &mut State) -> CompileOpt<MemLocation> {
             expect_token(state, Token::ParRight)?;
             return Ok(res);
         }
+        Token::TypeIdentifier(name) => {
+            state.lexer.advance();
+            struct_expr(state, &name)
+        }
         Token::Integer(int) => {
             state.lexer.advance();
-            number(state, int)
+            Ok(state.write(IR::Mov, Dest::Stack, Src::Immediate(int), Ty::int()))
         }
         Token::True => {
             state.lexer.advance();
-            boolean(state, true)
+            Ok(state.write(IR::Mov, Dest::Stack, Src::Immediate(1), Ty::bool()))
         }
         Token::False => {
             state.lexer.advance();
-            boolean(state, false)
+            Ok(state.write(IR::Mov, Dest::Stack, Src::Immediate(0), Ty::bool()))
         }
         Token::Identifier(name) => {
             state.lexer.advance();
-            match state.lexer.peek()? {
-                Token::CurlyLeft => struct_expr(state, &name),
-                _ => identifier(state, &name),
-            }
+            let record = state.scope.get(&name)?;
+            let src = record.to_src();
+            Ok(state.write(IR::Mov, Dest::Stack, src, record.ty))
         }
         _ => return Ok(None),
     }
     .map(Some)
-}
-
-fn number(state: &mut State, value: Word) -> Compile<MemLocation> {
-    Ok(state.write(IR::Mov, Dest::Stack, Src::Immediate(value), Ty::int()))
-}
-
-fn boolean(state: &mut State, value: bool) -> Compile<MemLocation> {
-    let src = Src::Immediate(if value { 1 } else { 0 });
-    Ok(state.write(IR::Mov, Dest::Stack, src, Ty::bool()))
-}
-
-fn identifier(state: &mut State, name: &str) -> Compile<MemLocation> {
-    let record = state.scope.get(name)?;
-    let src = record.to_src();
-    Ok(state.write(IR::Mov, Dest::Stack, src, record.ty))
 }
 
 fn struct_expr(state: &mut State, name: &str) -> Compile<MemLocation> {
@@ -1197,13 +1189,13 @@ mod test {
     fn type_exprs() {
         expect_ir(
             "
-                let x : int := 1;
+                let x : Int := 1;
             ",
             vec![IR::Mov(IRDest::PushStack, IRSrc::Immediate(1))],
         );
         expect_err(
             "
-            let x : bool := 1;
+            let x : Bool := 1;
         ",
             CompileError::ExpectedType(Ty::bool(), Ty::int()),
         )
@@ -1339,7 +1331,7 @@ mod test {
     #[test]
     fn type_casting() {
         expect_ir(
-            "(true as int) + 2",
+            "(true as Int) + 2",
             vec![
                 IR::Mov(IRDest::PushStack, IRSrc::Immediate(1)),
                 IR::Mov(IRDest::PushStack, IRSrc::Immediate(2)),
@@ -1352,7 +1344,7 @@ mod test {
     fn type_alias() {
         expect_ir(
             "
-                type Word := int;
+                type Word := Int;
                 let a : Word := 3    
             ",
             vec![IR::Mov(IRDest::PushStack, IRSrc::Immediate(3))],
@@ -1363,7 +1355,7 @@ mod test {
     fn struct_() {
         expect_ir(
             "
-            type Point := struct { x: int, y: int };
+            type Point := struct { x: Int, y: Int };
             let p := Point { x: 1, y: 2 };
             (p).x
         ",
@@ -1389,7 +1381,7 @@ mod test {
     fn struct_lvalue() {
         expect_ir(
             "
-            type Point := struct { x: int, y: int };
+            type Point := struct { x: Int, y: Int };
             let p := Point { x: 1, y: 2 };
             p.y := 3;
             p.x
@@ -1415,7 +1407,7 @@ mod test {
     fn struct_pointer() {
         expect_ir(
             "
-            type Point := struct { x: int, y: int };
+            type Point := struct { x: Int, y: Int };
             let p := Point { x: 1, y: 2 };
             let ptr := &p.x;
             p.x := 5;
@@ -1445,7 +1437,7 @@ mod test {
     fn struct_pointer_lvalue() {
         expect_ir(
             "
-            type Point := struct { x: int, y: int };
+            type Point := struct { x: Int, y: Int };
             let p := Point { x: 1, y: 2 };
             let ptr := &p.x;
             @ptr
@@ -1473,7 +1465,7 @@ mod test {
     fn struct_assign_ambiguity() {
         expect_ir(
             "
-            type Point := struct { x: int, y: int };
+            type Point := struct { x: Int, y: Int };
             # tries to parse as identifier instead of struct type
             Point { x: 1, y: 2 };
         ",
