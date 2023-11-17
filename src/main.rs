@@ -651,168 +651,6 @@ impl State {
     }
 }
 
-#[allow(dead_code)]
-fn program(input: &str) -> Compile<Vec<IR>> {
-    let mut state = State::new(input);
-    loop {
-        if stmt(&mut state)?.is_none() {
-            break;
-        }
-        if token(&mut state, Token::Semicolon)?.is_none() {
-            break;
-        }
-    }
-    expect_token(&mut state, Token::EndOfInput)?;
-    Ok(state.output)
-}
-
-fn token(state: &mut State, token: Token) -> CompileOpt<()> {
-    if state.lexer.peek()? == token {
-        state.lexer.advance();
-        return Ok(Some(()));
-    }
-    return Ok(None);
-}
-
-fn expect_token(state: &mut State, tok: Token) -> Compile<()> {
-    token(state, tok.clone())?.ok_or(CompileError::ExpectedToken(tok))
-}
-
-fn binding(state: &mut State) -> CompileOpt<String> {
-    match state.lexer.peek()? {
-        Token::Identifier(str) => {
-            state.lexer.advance();
-            Ok(Some(str))
-        }
-        _ => Ok(None),
-    }
-}
-
-fn type_binding(state: &mut State) -> CompileOpt<String> {
-    match state.lexer.peek()? {
-        Token::TypeIdentifier(str) => {
-            state.lexer.advance();
-            Ok(Some(str))
-        }
-        _ => Ok(None),
-    }
-}
-
-fn stmt(state: &mut State) -> CompileOpt<()> {
-    match state.lexer.peek()? {
-        Token::Let => {
-            state.lexer.advance();
-            let b = binding(state)?.ok_or(CompileError::Expected("binding"))?;
-            let bind_ty = if token(state, Token::Colon)?.is_some() {
-                let ty = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
-                Some(ty)
-            } else {
-                None
-            };
-            expect_token(state, Token::ColonEq)?;
-            let rec = expr(state)?.ok_or(CompileError::Expected("expr"))?;
-            match bind_ty {
-                Some(b) => b.check(&rec.ty)?,
-                None => {}
-            };
-            state.scope.assign(b, rec);
-            Ok(Some(()))
-        }
-        Token::Identifier(_) => match lvalue(state)? {
-            Some(rec) => {
-                if token(state, Token::ColonEq)?.is_some() {
-                    // assingment (x.y := z)
-                    expr(state)?.ok_or(CompileError::Expected("expr"))?;
-                    state.write(IR::Mov, rec.to_dest(), Src::PopStack, rec.ty);
-                    Ok(Some(()))
-                } else {
-                    // expression (x.y + 10)
-                    let lhs = state.write(IR::Mov, Dest::Stack, rec.to_src(), rec.ty);
-                    op_expr(state, lhs)?;
-                    Ok(Some(()))
-                }
-            }
-            None => unreachable!(),
-        },
-        Token::Type => {
-            state.lexer.advance();
-            let tb = type_binding(state)?.ok_or(CompileError::Expected("type binding"))?;
-            expect_token(state, Token::ColonEq)?;
-            let te = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
-            state.ty_scope.assign(tb, te);
-            Ok(Some(()))
-        }
-        _ => {
-            expr(state)?;
-            Ok(Some(()))
-        }
-    }
-}
-
-fn type_expr(state: &mut State) -> CompileOpt<Ty> {
-    match state.lexer.peek()? {
-        Token::TypeIdentifier(ident) => {
-            state.lexer.advance();
-            state.ty_scope.get(&ident).map(Some)
-        }
-        Token::Struct => {
-            state.lexer.advance();
-            struct_ty(state).map(Some)
-        }
-        _ => Ok(None),
-    }
-}
-
-fn struct_ty(state: &mut State) -> Compile<Ty> {
-    let mut fields = TyStruct::new(state.new_type_id());
-
-    expect_token(state, Token::CurlyLeft)?;
-    loop {
-        let key = match ident_token(state)? {
-            Some(s) => s,
-            None => break,
-        };
-        expect_token(state, Token::Colon)?;
-        let ty = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
-        fields.insert(key, ty)?;
-
-        if token(state, Token::Comma)?.is_none() {
-            break;
-        }
-    }
-    expect_token(state, Token::CurlyRight)?;
-
-    Ok(Ty::struct_(fields))
-}
-
-fn lvalue(state: &mut State) -> CompileOpt<MemLocation> {
-    let mut left = match ident_token(state)? {
-        Some(ident) => state.scope.get(&ident)?,
-        None => return Ok(None),
-    };
-
-    loop {
-        if token(state, Token::Dot)?.is_none() {
-            return Ok(Some(left));
-        }
-        let fields = match &left.ty.kind {
-            TyKind::Struct(fields) => fields,
-            _ => return Err(CompileError::Expected("struct")),
-        };
-        let field_name = ident_token(state)?.ok_or(CompileError::Expected("field"))?;
-        let field = fields.get(&field_name)?;
-        left = field.from_location(&left);
-    }
-}
-
-fn expr(state: &mut State) -> CompileOpt<MemLocation> {
-    let left: MemLocation = match unary_op_expr(state)? {
-        Some(ty) => ty,
-        None => return Ok(None),
-    };
-    op_expr(state, left)
-}
-
 struct OpParser {
     op_stack: Vec<Op>,
     operands: Vec<MemLocation>,
@@ -879,32 +717,6 @@ impl OpParser {
     }
 }
 
-fn op_expr(state: &mut State, left: MemLocation) -> CompileOpt<MemLocation> {
-    let mut op_parser = OpParser::new(left);
-
-    loop {
-        match operator(state)? {
-            Some(op) => {
-                op_parser.next(state, op)?;
-                let res = unary_op_expr(state)?.ok_or(CompileError::Expected("expr"))?;
-                op_parser.push_rhs(res);
-            }
-            None => {
-                let mut rec = match op_parser.unwind(state).map(Some)? {
-                    Some(rec) => rec,
-                    None => return Ok(None),
-                };
-                if token(state, Token::As)?.is_none() {
-                    return Ok(Some(rec));
-                }
-                let ty = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
-                rec.ty = rec.ty.cast(ty)?;
-                return Ok(Some(rec));
-            }
-        }
-    }
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Op {
     Add,
@@ -942,6 +754,20 @@ impl Op {
     }
 }
 
+// ### Particles
+
+fn token(state: &mut State, token: Token) -> CompileOpt<()> {
+    if state.lexer.peek()? == token {
+        state.lexer.advance();
+        return Ok(Some(()));
+    }
+    return Ok(None);
+}
+
+fn expect_token(state: &mut State, tok: Token) -> Compile<()> {
+    token(state, tok.clone())?.ok_or(CompileError::ExpectedToken(tok))
+}
+
 fn operator(state: &mut State) -> CompileOpt<Op> {
     let op = match state.lexer.peek()? {
         Token::Plus => Op::Add,
@@ -953,65 +779,49 @@ fn operator(state: &mut State) -> CompileOpt<Op> {
     Ok(Some(op))
 }
 
-fn unary_op_expr(state: &mut State) -> CompileOpt<MemLocation> {
+fn ident_token(state: &mut State) -> CompileOpt<String> {
     match state.lexer.peek()? {
-        Token::Minus => {
+        Token::Identifier(s) => {
             state.lexer.advance();
-            let tgt = state.write(IR::Mov, Dest::Stack, Src::Immediate(0), Ty::int());
-            unary_op_expr(state)?.ok_or(CompileError::Expected("expr"))?;
-            let out = state.write(IR::Sub, tgt.to_dest(), Src::PopStack, tgt.ty);
-
-            Ok(Some(out))
+            Ok(Some(s))
         }
-        Token::Ampersand => {
-            state.lexer.advance();
-            let res = lvalue(state)?.ok_or(CompileError::Expected("lvalue"))?;
-            let dest_ty = res.ty.add_ref();
-            let out = state.write(IR::LoadAddress, Dest::Stack, res.to_src(), dest_ty);
-            Ok(Some(out))
-        }
-        Token::At => {
-            state.lexer.advance();
-            if let Some(res) = lvalue(state)? {
-                let dest_ty = res.ty.deref()?;
-                state.write(IR::Mov, Dest::R0, res.to_src(), res.ty);
-                let out = state.write(IR::Mov, Dest::Stack, Src::R0Offset(0), dest_ty);
-                Ok(Some(out))
-            } else {
-                let res = unary_op_expr(state)?.ok_or(CompileError::Expected("expr"))?;
-                let dest_ty = res.ty.deref()?;
-                state.write(IR::Mov, Dest::R0, Src::PopStack, res.ty);
-                let out = state.write(IR::Mov, Dest::Stack, Src::R0Offset(0), dest_ty);
-                Ok(Some(out))
-            }
-        }
-        _ => postfix_expr(state),
+        _ => Ok(None),
     }
 }
 
-fn postfix_expr(state: &mut State) -> CompileOpt<MemLocation> {
-    let mut left = match base_expr(state)? {
-        Some(e) => e,
-        None => return Ok(None),
+// ### Exprs
+
+fn struct_expr(state: &mut State, name: &str) -> Compile<MemLocation> {
+    let ty = state.ty_scope.get(name)?;
+    let fields = match &ty.kind {
+        TyKind::Struct(fields) => fields,
+        _ => return Err(CompileError::Expected("struct")),
     };
+    let base_res: MemLocation = state.allocate(&ty);
+    expect_token(state, Token::CurlyLeft)?;
     loop {
-        if token(state, Token::Dot)?.is_none() {
-            return Ok(Some(left));
-        }
-        let fields = match &left.ty.kind {
-            TyKind::Struct(fields) => fields,
-            _ => return Err(CompileError::Expected("struct")),
+        let field_name = match ident_token(state)? {
+            Some(s) => s,
+            None => break,
         };
-        let field_name = ident_token(state)?.ok_or(CompileError::Expected("field"))?;
+        expect_token(state, Token::Colon)?;
         let field = fields.get(&field_name)?;
-        left = state.write(
+        let field_loc = field.from_location(&base_res);
+        let value = expr(state)?.ok_or(CompileError::Expected("expr"))?;
+        field.ty.check(&value.ty)?;
+        state.write(
             IR::Mov,
-            Dest::Stack,
-            field.from_location(&left).to_src(),
+            field_loc.to_dest(),
+            Src::PopStack,
             field.ty.clone(),
         );
-        dbg!(&left);
+
+        if token(state, Token::Comma)?.is_none() {
+            break;
+        }
     }
+    expect_token(state, Token::CurlyRight)?;
+    Ok(base_res)
 }
 
 fn base_expr(state: &mut State) -> CompileOpt<MemLocation> {
@@ -1049,47 +859,251 @@ fn base_expr(state: &mut State) -> CompileOpt<MemLocation> {
     .map(Some)
 }
 
-fn struct_expr(state: &mut State, name: &str) -> Compile<MemLocation> {
-    let ty = state.ty_scope.get(name)?;
-    let fields = match &ty.kind {
-        TyKind::Struct(fields) => fields,
-        _ => return Err(CompileError::Expected("struct")),
+fn postfix_expr(state: &mut State) -> CompileOpt<MemLocation> {
+    let mut left = match base_expr(state)? {
+        Some(e) => e,
+        None => return Ok(None),
     };
-    let base_res: MemLocation = state.allocate(&ty);
+    loop {
+        if token(state, Token::Dot)?.is_none() {
+            return Ok(Some(left));
+        }
+        let fields = match &left.ty.kind {
+            TyKind::Struct(fields) => fields,
+            _ => return Err(CompileError::Expected("struct")),
+        };
+        let field_name = ident_token(state)?.ok_or(CompileError::Expected("field"))?;
+        let field = fields.get(&field_name)?;
+        left = state.write(
+            IR::Mov,
+            Dest::Stack,
+            field.from_location(&left).to_src(),
+            field.ty.clone(),
+        );
+        dbg!(&left);
+    }
+}
+
+fn unary_op_expr(state: &mut State) -> CompileOpt<MemLocation> {
+    match state.lexer.peek()? {
+        Token::Minus => {
+            state.lexer.advance();
+            let tgt = state.write(IR::Mov, Dest::Stack, Src::Immediate(0), Ty::int());
+            unary_op_expr(state)?.ok_or(CompileError::Expected("expr"))?;
+            let out = state.write(IR::Sub, tgt.to_dest(), Src::PopStack, tgt.ty);
+
+            Ok(Some(out))
+        }
+        Token::Ampersand => {
+            state.lexer.advance();
+            let res = lvalue(state)?.ok_or(CompileError::Expected("lvalue"))?;
+            let dest_ty = res.ty.add_ref();
+            let out = state.write(IR::LoadAddress, Dest::Stack, res.to_src(), dest_ty);
+            Ok(Some(out))
+        }
+        Token::At => {
+            state.lexer.advance();
+            let res = if let Some(res) = lvalue(state)? {
+                state.write(IR::Mov, Dest::R0, res.to_src(), res.ty)
+            } else {
+                let res = unary_op_expr(state)?.ok_or(CompileError::Expected("expr"))?;
+                state.write(IR::Mov, Dest::R0, Src::PopStack, res.ty)
+            };
+            let dest_ty = res.ty.deref()?;
+            let out = state.write(IR::Mov, Dest::Stack, Src::R0Offset(0), dest_ty);
+            Ok(Some(out))
+        }
+        _ => postfix_expr(state),
+    }
+}
+
+fn op_expr(state: &mut State, left: MemLocation) -> CompileOpt<MemLocation> {
+    let mut op_parser = OpParser::new(left);
+
+    loop {
+        match operator(state)? {
+            Some(op) => {
+                op_parser.next(state, op)?;
+                let res = unary_op_expr(state)?.ok_or(CompileError::Expected("expr"))?;
+                op_parser.push_rhs(res);
+            }
+            None => {
+                let mut rec = match op_parser.unwind(state).map(Some)? {
+                    Some(rec) => rec,
+                    None => return Ok(None),
+                };
+                if token(state, Token::As)?.is_none() {
+                    return Ok(Some(rec));
+                }
+                let ty = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
+                rec.ty = rec.ty.cast(ty)?;
+                return Ok(Some(rec));
+            }
+        }
+    }
+}
+
+fn expr(state: &mut State) -> CompileOpt<MemLocation> {
+    let left: MemLocation = match unary_op_expr(state)? {
+        Some(ty) => ty,
+        None => return Ok(None),
+    };
+    op_expr(state, left)
+}
+
+// ### Bindings, TypeExprs, etc.
+
+fn binding(state: &mut State) -> CompileOpt<String> {
+    match state.lexer.peek()? {
+        Token::Identifier(str) => {
+            state.lexer.advance();
+            Ok(Some(str))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn lvalue(state: &mut State) -> CompileOpt<MemLocation> {
+    let mut left = match ident_token(state)? {
+        Some(ident) => state.scope.get(&ident)?,
+        None => return Ok(None),
+    };
+
+    loop {
+        if token(state, Token::Dot)?.is_none() {
+            return Ok(Some(left));
+        }
+        let fields = match &left.ty.kind {
+            TyKind::Struct(fields) => fields,
+            _ => return Err(CompileError::Expected("struct")),
+        };
+        let field_name = ident_token(state)?.ok_or(CompileError::Expected("field"))?;
+        let field = fields.get(&field_name)?;
+        left = field.from_location(&left);
+    }
+}
+
+fn type_binding(state: &mut State) -> CompileOpt<String> {
+    match state.lexer.peek()? {
+        Token::TypeIdentifier(str) => {
+            state.lexer.advance();
+            Ok(Some(str))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn type_expr(state: &mut State) -> CompileOpt<Ty> {
+    match state.lexer.peek()? {
+        Token::TypeIdentifier(ident) => {
+            state.lexer.advance();
+            state.ty_scope.get(&ident).map(Some)
+        }
+        Token::Struct => {
+            state.lexer.advance();
+            struct_ty(state).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn struct_ty(state: &mut State) -> Compile<Ty> {
+    let mut fields = TyStruct::new(state.new_type_id());
+
     expect_token(state, Token::CurlyLeft)?;
     loop {
-        let field_name = match ident_token(state)? {
+        let key = match ident_token(state)? {
             Some(s) => s,
             None => break,
         };
         expect_token(state, Token::Colon)?;
-        let field = fields.get(&field_name)?;
-        let field_loc = field.from_location(&base_res);
-        let value = expr(state)?.ok_or(CompileError::Expected("expr"))?;
-        field.ty.check(&value.ty)?;
-        state.write(
-            IR::Mov,
-            field_loc.to_dest(),
-            Src::PopStack,
-            field.ty.clone(),
-        );
+        let ty = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
+        fields.insert(key, ty)?;
 
         if token(state, Token::Comma)?.is_none() {
             break;
         }
     }
     expect_token(state, Token::CurlyRight)?;
-    Ok(base_res)
+
+    Ok(Ty::struct_(fields))
 }
 
-fn ident_token(state: &mut State) -> CompileOpt<String> {
+// ### Statements
+
+fn type_def_stmt(state: &mut State) -> Compile<()> {
+    let tb = type_binding(state)?.ok_or(CompileError::Expected("type binding"))?;
+    expect_token(state, Token::ColonEq)?;
+    let te = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
+    state.ty_scope.assign(tb, te);
+    Ok(())
+}
+
+fn assign_stmt(state: &mut State, rec: MemLocation) -> Compile<()> {
+    expr(state)?.ok_or(CompileError::Expected("expr"))?;
+    state.write(IR::Mov, rec.to_dest(), Src::PopStack, rec.ty);
+    Ok(())
+}
+
+fn let_stmt(state: &mut State) -> Compile<()> {
+    let b = binding(state)?.ok_or(CompileError::Expected("binding"))?;
+    let bind_ty = if token(state, Token::Colon)?.is_some() {
+        let ty = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
+        Some(ty)
+    } else {
+        None
+    };
+    expect_token(state, Token::ColonEq)?;
+    let rec = expr(state)?.ok_or(CompileError::Expected("expr"))?;
+    match bind_ty {
+        Some(b) => b.check(&rec.ty)?,
+        None => {}
+    };
+    state.scope.assign(b, rec);
+    Ok(())
+}
+
+fn stmt(state: &mut State) -> CompileOpt<()> {
     match state.lexer.peek()? {
-        Token::Identifier(s) => {
+        Token::Let => {
             state.lexer.advance();
-            Ok(Some(s))
+            let_stmt(state)?;
         }
-        _ => Ok(None),
+        Token::Type => {
+            state.lexer.advance();
+            type_def_stmt(state)?;
+        }
+        Token::Identifier(_) => {
+            let rec = lvalue(state)?.unwrap();
+            if token(state, Token::ColonEq)?.is_some() {
+                // x := y
+                assign_stmt(state, rec)?;
+            } else {
+                // x + y
+                let lhs = state.write(IR::Mov, Dest::Stack, rec.to_src(), rec.ty);
+                op_expr(state, lhs)?;
+            };
+        }
+        _ => {
+            expr(state)?;
+        }
+    };
+    Ok(Some(()))
+}
+
+#[allow(dead_code)]
+fn program(input: &str) -> Compile<Vec<IR>> {
+    let mut state = State::new(input);
+    loop {
+        if stmt(&mut state)?.is_none() {
+            break;
+        }
+        if token(&mut state, Token::Semicolon)?.is_none() {
+            break;
+        }
     }
+    expect_token(&mut state, Token::EndOfInput)?;
+    Ok(state.output)
 }
 
 fn main() {
@@ -1459,17 +1473,4 @@ mod test {
     }
 
     // TODO oneof / bitsets
-
-    #[ignore]
-    #[test]
-    fn struct_assign_ambiguity() {
-        expect_ir(
-            "
-            type Point := struct { x: Int, y: Int };
-            # tries to parse as identifier instead of struct type
-            Point { x: 1, y: 2 };
-        ",
-            vec![],
-        );
-    }
 }
