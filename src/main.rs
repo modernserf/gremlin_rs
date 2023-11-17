@@ -13,6 +13,7 @@ pub enum IRDest {
     PushStack,
     R0,
     SP,
+    R0Offset(Word),
     StackOffset(Word),
 }
 
@@ -138,6 +139,7 @@ impl Runtime {
     fn get_dest<'a>(&'a mut self, dest: IRDest) -> &'a mut Word {
         match dest {
             IRDest::R0 => &mut self.r0,
+            IRDest::R0Offset(offset) => &mut self.memory[(self.r0 + offset) as usize],
             IRDest::SP => &mut self.sp,
             IRDest::StackOffset(offset) => &mut self.memory[(self.sp + offset) as usize],
             IRDest::PushStack => {
@@ -421,6 +423,7 @@ impl Ty {
             TyKind::OneOf(_) => 1,
             // TODO: large bitsets
             TyKind::BitSet(_) => 1,
+            TyKind::Array(a) => a.ty.size() * a.capacity,
         }
     }
 }
@@ -432,6 +435,7 @@ enum TyKind {
     Struct(Box<TyStruct>),
     OneOf(Box<TyOneOf>),
     BitSet(Box<TyOneOf>),
+    Array(Box<TyArray>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -516,6 +520,12 @@ impl TyOneOf {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct TyArray {
+    ty: Ty,
+    capacity: Word,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct MemLocation {
     kind: MemLocationKind,
     ty: Ty,
@@ -540,7 +550,7 @@ impl MemLocation {
     fn to_src(&self) -> Src {
         match self.kind {
             MemLocationKind::FrameOffset(offset) => Src::FrameOffset(offset),
-            MemLocationKind::R0 => unimplemented!(),
+            _ => unimplemented!(),
         }
     }
     fn pop(self, state: &State) -> Compile<Src> {
@@ -567,6 +577,7 @@ impl MemLocation {
 enum MemLocationKind {
     FrameOffset(Word),
     R0,
+    R0Offset(Word),
 }
 
 struct Scope {
@@ -707,6 +718,7 @@ impl State {
                         IRDest::StackOffset(stack_offset)
                     }
                     MemLocationKind::R0 => IRDest::R0,
+                    MemLocationKind::R0Offset(offset) => IRDest::R0Offset(offset),
                 };
                 (
                     ir_dest,
@@ -760,12 +772,12 @@ impl OpParser {
     fn apply(&mut self, state: &mut State, op: Op) -> Compile<()> {
         // TODO: constant folding
         let right_expr = self.operands.pop().expect("rhs");
-        let mut left = self.operands.pop().expect("lhs").to_stack(state);
-        let right = right_expr.to_stack(state);
+        let mut left = self.operands.pop().expect("lhs").resolve(state);
+        let right = right_expr.resolve(state);
         let dest_ty = op.check_ty(left.ty.clone(), right.ty)?;
         left.ty = dest_ty;
         let res = state.write(op.ir(), left, Src::PopStack);
-        self.operands.push(Expr::Eval(res));
+        self.operands.push(Expr::Resolved(res));
         Ok(())
     }
     fn unwind(&mut self, state: &mut State) -> Compile<Expr> {
@@ -883,30 +895,111 @@ fn type_ident_token(state: &mut State) -> CompileOpt<String> {
 #[derive(Debug)]
 enum Expr {
     Constant(Word, Ty),
-    LValue(MemLocation),
-    Eval(MemLocation),
+    LValue(MemLocation, usize),
+    Resolved(MemLocation),
 }
 
 impl Expr {
-    fn to_stack(self, state: &mut State) -> MemLocation {
+    fn resolve(self, state: &mut State) -> MemLocation {
         match self {
             Expr::Constant(value, ty) => state.push(Src::Immediate(value), ty),
-            Expr::LValue(loc) => state.push(loc.to_src(), loc.ty),
-            Expr::Eval(loc) => loc,
+            Expr::LValue(loc, deref_count) => {
+                if deref_count > 0 {
+                    debug_assert!(deref_count == 1);
+                    state.write(IR::Mov, MemLocation::r0(loc.ty.clone()), loc.to_src());
+                    state.push(Src::R0Offset(0), loc.ty)
+                } else {
+                    state.push(loc.to_src(), loc.ty)
+                }
+            }
+            Expr::Resolved(loc) => loc,
         }
     }
     fn ty(&self) -> &Ty {
         match self {
             Expr::Constant(_, ty) => ty,
-            Expr::LValue(m) => &m.ty,
-            Expr::Eval(m) => &m.ty,
+            Expr::LValue(m, deref_count) => {
+                debug_assert!(*deref_count == 0);
+                &m.ty
+            }
+            Expr::Resolved(m) => &m.ty,
         }
     }
     fn struct_field(self, field: &StructField) -> Expr {
         match self {
             Expr::Constant(_, _) => unreachable!(),
-            Expr::LValue(m) => Expr::LValue(field.from_location(&m)),
-            Expr::Eval(m) => Expr::LValue(field.from_location(&m)),
+            Expr::LValue(m, deref_count) => {
+                debug_assert!(deref_count == 0);
+                Expr::LValue(field.from_location(&m), deref_count)
+            }
+            Expr::Resolved(m) => Expr::LValue(field.from_location(&m), 0),
+        }
+    }
+    fn ref_(self, state: &mut State) -> Compile<Expr> {
+        match self {
+            Expr::LValue(mem, deref_count) => {
+                debug_assert!(deref_count == 0);
+                let dest_ty = mem.ty.add_ref();
+                let out = state.write_1(IR::LoadAddress, Dest::Stack, mem.to_src(), dest_ty, 0);
+                Ok(Expr::Resolved(out))
+            }
+            _ => Err(CompileError::Expected("lvalue")),
+        }
+    }
+    fn deref(self, state: &mut State) -> Compile<Expr> {
+        match self {
+            Expr::Constant(_, _) => unimplemented!(),
+            Expr::LValue(mut mem, deref_count) => {
+                mem.ty = mem.ty.deref()?;
+                Ok(Expr::LValue(mem, deref_count + 1))
+            }
+            Expr::Resolved(mem) => {
+                let res = state.write(IR::Mov, MemLocation::r0(mem.ty.clone()), mem.pop(state)?);
+                Ok(Expr::Resolved(
+                    state.push(Src::R0Offset(0), res.ty.deref()?),
+                ))
+            }
+        }
+    }
+    fn cast_ty(self, cast_ty: Ty) -> Compile<Expr> {
+        Ok(match self {
+            Expr::Constant(x, ty) => Expr::Constant(x, ty.cast(cast_ty)?),
+            Expr::LValue(mem, deref_count) => {
+                // TODO
+                debug_assert!(deref_count == 0);
+                Expr::LValue(mem.cast(cast_ty)?, deref_count)
+            }
+            Expr::Resolved(mem) => Expr::Resolved(mem.cast(cast_ty)?),
+        })
+    }
+    fn assign(self, state: &mut State, value: Expr) -> Compile<Expr> {
+        match self {
+            Expr::LValue(target, deref_count) => {
+                let src = value.resolve(state);
+                match deref_count {
+                    0 => {
+                        let out = state.write(IR::Mov, target, src.pop(state)?);
+                        Ok(Expr::Resolved(out))
+                    }
+                    1 => {
+                        state.write(
+                            IR::Mov,
+                            MemLocation::r0(target.ty.add_ref()),
+                            target.to_src(),
+                        );
+                        Ok(Expr::Resolved(state.write(
+                            IR::Mov,
+                            MemLocation {
+                                ty: target.ty,
+                                kind: MemLocationKind::R0Offset(0),
+                            },
+                            src.pop(state)?,
+                        )))
+                    }
+                    _ => unimplemented!(),
+                }
+            }
+            _ => return Err(CompileError::Expected("lvalue")),
         }
     }
 }
@@ -952,7 +1045,7 @@ fn struct_expr(state: &mut State, fields: &TyStruct) -> Compile<Expr> {
         }
     }
     expect_token(state, Token::CurlyRight)?;
-    Ok(Expr::Eval(base_res))
+    Ok(Expr::Resolved(base_res))
 }
 
 fn oneof_member_expr(state: &mut State, name: &str) -> Compile<Expr> {
@@ -976,7 +1069,7 @@ fn base_expr(state: &mut State) -> CompileOpt<Expr> {
             state.lexer.advance();
             let res = expr(state)?.ok_or(CompileError::Expected("expr"))?;
             expect_token(state, Token::ParRight)?;
-            Expr::Eval(res)
+            Expr::Resolved(res)
         }
         Token::TypeIdentifier(name) => {
             state.lexer.advance();
@@ -1007,7 +1100,7 @@ fn base_expr(state: &mut State) -> CompileOpt<Expr> {
         Token::Identifier(name) => {
             state.lexer.advance();
             let record = state.scope.get(&name)?;
-            Expr::LValue(record)
+            Expr::LValue(record, 0)
         }
         _ => return Ok(None),
     };
@@ -1024,16 +1117,7 @@ fn postfix_expr(state: &mut State) -> CompileOpt<Expr> {
             Token::SqLeft => {
                 state.lexer.advance();
                 expect_token(state, Token::SqRight)?;
-                let res = match left {
-                    Expr::Constant(_, _) => unimplemented!(),
-                    Expr::LValue(mem) => {
-                        state.write(IR::Mov, MemLocation::r0(mem.ty.clone()), mem.to_src())
-                    }
-                    Expr::Eval(mem) => {
-                        state.write(IR::Mov, MemLocation::r0(mem.ty.clone()), mem.pop(state)?)
-                    }
-                };
-                left = Expr::Eval(state.push(Src::R0Offset(0), res.ty.deref()?))
+                left = left.deref(state)?
             }
             Token::Dot => {
                 state.lexer.advance();
@@ -1055,9 +1139,9 @@ fn postfix_expr(state: &mut State) -> CompileOpt<Expr> {
                             _ => return Err(CompileError::Expected("bitset")),
                         };
                         let field = fields.get(&field_name)?;
-                        let left_res = left.to_stack(state);
+                        let left_res = left.resolve(state);
                         state.write(IR::BitTest, left_res, Src::Immediate(field.index));
-                        left = Expr::Eval(state.push(Src::R0, Ty::bool()));
+                        left = Expr::Resolved(state.push(Src::R0, Ty::bool()));
                     }
                     _ => return Err(CompileError::Expected("field")),
                 }
@@ -1075,21 +1159,14 @@ fn unary_op_expr(state: &mut State) -> CompileOpt<Expr> {
             let tgt = state.push(Src::Immediate(0), Ty::int());
             let operand = unary_op_expr(state)?
                 .ok_or(CompileError::Expected("expr"))?
-                .to_stack(state);
+                .resolve(state);
             let out = state.write(IR::Sub, tgt, operand.pop(state)?);
-            Expr::Eval(out)
+            Expr::Resolved(out)
         }
         Token::Ampersand => {
             state.lexer.advance();
             let operand = unary_op_expr(state)?.ok_or(CompileError::Expected("expr"))?;
-            match operand {
-                Expr::LValue(mem) => {
-                    let dest_ty = mem.ty.add_ref();
-                    let out = state.write_1(IR::LoadAddress, Dest::Stack, mem.to_src(), dest_ty, 0);
-                    Expr::Eval(out)
-                }
-                _ => return Err(CompileError::Expected("lvalue")),
-            }
+            operand.ref_(state)?
         }
         _ => return postfix_expr(state),
     };
@@ -1123,17 +1200,8 @@ fn assign_expr(state: &mut State) -> CompileOpt<Expr> {
     if token(state, Token::ColonEq)?.is_none() {
         return Ok(Some(left));
     }
-    match left {
-        Expr::LValue(target) => {
-            let src = op_expr(state)?
-                .ok_or(CompileError::Expected("expr"))?
-                .to_stack(state);
-
-            let out = state.write(IR::Mov, target, src.pop(state)?);
-            return Ok(Some(Expr::Eval(out)));
-        }
-        _ => return Err(CompileError::Expected("lvalue")),
-    };
+    let expr = op_expr(state)?.ok_or(CompileError::Expected("expr"))?;
+    left.assign(state, expr).map(Some)
 }
 
 fn as_expr(state: &mut State) -> CompileOpt<Expr> {
@@ -1144,17 +1212,12 @@ fn as_expr(state: &mut State) -> CompileOpt<Expr> {
     if token(state, Token::As)?.is_none() {
         return Ok(Some(value));
     }
-    let cast_ty = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
-    let out = match value {
-        Expr::Constant(x, ty) => Expr::Constant(x, ty.cast(cast_ty)?),
-        Expr::LValue(mem) => Expr::LValue(mem.cast(cast_ty)?),
-        Expr::Eval(mem) => Expr::Eval(mem.cast(cast_ty)?),
-    };
-    Ok(Some(out))
+    let ty = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
+    Ok(Some(value.cast_ty(ty)?))
 }
 
 fn expr(state: &mut State) -> CompileOpt<MemLocation> {
-    Ok(as_expr(state)?.map(|e| e.to_stack(state)))
+    Ok(as_expr(state)?.map(|e| e.resolve(state)))
 }
 
 // ### Bindings, TypeExprs, etc.
@@ -1284,17 +1347,6 @@ fn stmt(state: &mut State) -> CompileOpt<()> {
             state.lexer.advance();
             type_def_stmt(state)?;
         }
-        // Token::Identifier(_) => {
-        //     let rec = lvalue(state)?.unwrap();
-        //     if token(state, Token::ColonEq)?.is_some() {
-        //         // x := y
-        //         assign_stmt(state, rec)?;
-        //     } else {
-        //         // x + y
-        //         let lhs = state.push(rec.to_src(), rec.ty);
-        //         op_expr(state, lhs)?;
-        //     };
-        // }
         _ => {
             expr(state)?;
         }
@@ -1551,6 +1603,24 @@ mod test {
                 IR::Mov(IRDest::PushStack, IRSrc::R0Offset(0)),
             ],
         )
+    }
+
+    #[test]
+    fn ptr_assign() {
+        expect_ir(
+            "
+            let x := 1;
+            let ptr := &x;
+            ptr[] := 2;
+        ",
+            vec![
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(1)),
+                IR::LoadAddress(IRDest::PushStack, IRSrc::StackOffset(0)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(2)),
+                IR::Mov(IRDest::R0, IRSrc::StackOffset(1)),
+                IR::Mov(IRDest::R0Offset(0), IRSrc::PopStack),
+            ],
+        );
     }
 
     #[test]
