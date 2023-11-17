@@ -8,72 +8,6 @@ use std::collections::HashMap;
 
 pub type Word = i32;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IR {
-    pub kind: IRKind,
-}
-
-impl IR {
-    pub fn mov(dest: IRDest, src: IRSrc) -> Self {
-        IR {
-            kind: IRKind::Move(dest, src),
-        }
-    }
-    pub fn load_address(dest: IRDest, src: IRSrc) -> Self {
-        IR {
-            kind: IRKind::LoadAddress(dest, src),
-        }
-    }
-    pub fn add(dest: IRDest, src: IRSrc) -> Self {
-        IR {
-            kind: IRKind::Add(dest, src),
-        }
-    }
-    pub fn sub(dest: IRDest, src: IRSrc) -> Self {
-        IR {
-            kind: IRKind::Sub(dest, src),
-        }
-    }
-    pub fn mult(dest: IRDest, src: IRSrc) -> Self {
-        IR {
-            kind: IRKind::Mult(dest, src),
-        }
-    }
-    pub fn and(dest: IRDest, src: IRSrc) -> Self {
-        IR {
-            kind: IRKind::And(dest, src),
-        }
-    }
-    pub fn or(dest: IRDest, src: IRSrc) -> Self {
-        IR {
-            kind: IRKind::Or(dest, src),
-        }
-    }
-    pub fn xor(dest: IRDest, src: IRSrc) -> Self {
-        IR {
-            kind: IRKind::Xor(dest, src),
-        }
-    }
-    pub fn bit_test(dest: IRDest, src: IRSrc) -> Self {
-        IR {
-            kind: IRKind::BitTest(dest, src),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum IRKind {
-    Move(IRDest, IRSrc),
-    LoadAddress(IRDest, IRSrc),
-    Add(IRDest, IRSrc),
-    Sub(IRDest, IRSrc),
-    Mult(IRDest, IRSrc),
-    And(IRDest, IRSrc),
-    Or(IRDest, IRSrc),
-    Xor(IRDest, IRSrc),
-    BitTest(IRDest, IRSrc),
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum IRDest {
     PushStack,
@@ -89,6 +23,19 @@ pub enum IRSrc {
     R0,
     R0Offset(Word),
     PopStack,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IR {
+    Mov(IRDest, IRSrc),
+    LoadAddress(IRDest, IRSrc),
+    Add(IRDest, IRSrc),
+    Sub(IRDest, IRSrc),
+    Mult(IRDest, IRSrc),
+    And(IRDest, IRSrc),
+    Or(IRDest, IRSrc),
+    Xor(IRDest, IRSrc),
+    BitTest(IRDest, IRSrc),
 }
 
 pub struct Runtime {
@@ -120,49 +67,49 @@ impl Runtime {
         }
     }
     fn run_instr(&mut self, instr: &IR) {
-        match &instr.kind {
-            IRKind::Move(dest, src) => {
+        match &instr {
+            IR::Mov(dest, src) => {
                 let value = self.get_src(*src);
                 let dest_ptr = self.get_dest(*dest);
                 *dest_ptr = value;
             }
-            IRKind::LoadAddress(dest, src) => {
+            IR::LoadAddress(dest, src) => {
                 let effective_address = self.get_effective_address(*src);
                 let dest_ptr = self.get_dest(*dest);
                 *dest_ptr = effective_address;
             }
-            IRKind::Add(dest, src) => {
+            IR::Add(dest, src) => {
                 let value = self.get_src(*src);
                 let dest_ptr = self.get_dest(*dest);
                 *dest_ptr += value;
             }
-            IRKind::Sub(dest, src) => {
+            IR::Sub(dest, src) => {
                 let value = self.get_src(*src);
                 let dest_ptr = self.get_dest(*dest);
                 *dest_ptr -= value;
             }
-            IRKind::Mult(dest, src) => {
+            IR::Mult(dest, src) => {
                 let value = self.get_src(*src);
                 let dest_ptr = self.get_dest(*dest);
                 *dest_ptr *= value;
             }
-            IRKind::Xor(dest, src) => {
+            IR::Xor(dest, src) => {
                 let value = self.get_src(*src);
                 let dest_ptr = self.get_dest(*dest);
                 *dest_ptr ^= value;
             }
-            IRKind::And(dest, src) => {
+            IR::And(dest, src) => {
                 let value = self.get_src(*src);
                 let dest_ptr = self.get_dest(*dest);
                 *dest_ptr &= value;
             }
-            IRKind::Or(dest, src) => {
+            IR::Or(dest, src) => {
                 let value = self.get_src(*src);
                 let dest_ptr = self.get_dest(*dest);
                 *dest_ptr |= value;
             }
             // TODO: use a status register instead of r0
-            IRKind::BitTest(dest, src) => {
+            IR::BitTest(dest, src) => {
                 let bit = self.get_src(*src);
                 let dest = *self.get_dest(*dest);
                 self.r0 = if (dest & (1 << bit)) > 0 { 1 } else { 0 }
@@ -695,7 +642,7 @@ impl State {
     fn allocate(&mut self, ty: &Ty) -> MemLocation {
         self.current_frame_size += ty.size();
         self.output
-            .push(IR::sub(IRDest::SP, IRSrc::Immediate(ty.size())));
+            .push(IR::Sub(IRDest::SP, IRSrc::Immediate(ty.size())));
         MemLocation::local(self.current_frame_size, ty.clone())
     }
 }
@@ -711,7 +658,7 @@ fn program(input: &str) -> Compile<Vec<IR>> {
             break;
         }
     }
-    token(&mut state, Token::EndOfInput)?.ok_or(CompileError::ExpectedToken(Token::EndOfInput))?;
+    expect_token(&mut state, Token::EndOfInput)?;
     Ok(state.output)
 }
 
@@ -772,11 +719,11 @@ fn stmt(state: &mut State) -> CompileOpt<()> {
                 if token(state, Token::ColonEq)?.is_some() {
                     // assingment (x.y := z)
                     expr(state)?.ok_or(CompileError::Expected("expr"))?;
-                    state.write(IR::mov, rec.to_dest(), Src::PopStack, rec.ty);
+                    state.write(IR::Mov, rec.to_dest(), Src::PopStack, rec.ty);
                     Ok(Some(()))
                 } else {
                     // expression (x.y + 10)
-                    let lhs = state.write(IR::mov, Dest::Stack, rec.to_src(), rec.ty);
+                    let lhs = state.write(IR::Mov, Dest::Stack, rec.to_src(), rec.ty);
                     op_expr(state, lhs)?;
                     Ok(Some(()))
                 }
@@ -984,9 +931,9 @@ impl Op {
 
     fn ir(&self) -> IROp {
         match self {
-            Op::Add => IR::add,
-            Op::Sub => IR::sub,
-            Op::Mul => IR::mult,
+            Op::Add => IR::Add,
+            Op::Sub => IR::Sub,
+            Op::Mul => IR::Mult,
         }
     }
 }
@@ -1006,9 +953,9 @@ fn unary_op_expr(state: &mut State) -> CompileOpt<MemLocation> {
     match state.lexer.peek()? {
         Token::Minus => {
             state.lexer.advance();
-            let tgt = state.write(IR::mov, Dest::Stack, Src::Immediate(0), Ty::int());
+            let tgt = state.write(IR::Mov, Dest::Stack, Src::Immediate(0), Ty::int());
             unary_op_expr(state)?.ok_or(CompileError::Expected("expr"))?;
-            let out = state.write(IR::sub, tgt.to_dest(), Src::PopStack, tgt.ty);
+            let out = state.write(IR::Sub, tgt.to_dest(), Src::PopStack, tgt.ty);
 
             Ok(Some(out))
         }
@@ -1016,16 +963,23 @@ fn unary_op_expr(state: &mut State) -> CompileOpt<MemLocation> {
             state.lexer.advance();
             let res = lvalue(state)?.ok_or(CompileError::Expected("lvalue"))?;
             let dest_ty = res.ty.add_ref();
-            let out = state.write(IR::load_address, Dest::Stack, res.to_src(), dest_ty);
+            let out = state.write(IR::LoadAddress, Dest::Stack, res.to_src(), dest_ty);
             Ok(Some(out))
         }
         Token::At => {
             state.lexer.advance();
-            let res = unary_op_expr(state)?.ok_or(CompileError::Expected("expr"))?;
-            let dest_ty = res.ty.deref()?;
-            state.write(IR::mov, Dest::R0, Src::PopStack, res.ty);
-            let out = state.write(IR::mov, Dest::Stack, Src::R0Offset(0), dest_ty);
-            Ok(Some(out))
+            if let Some(res) = lvalue(state)? {
+                let dest_ty = res.ty.deref()?;
+                state.write(IR::Mov, Dest::R0, res.to_src(), res.ty);
+                let out = state.write(IR::Mov, Dest::Stack, Src::R0Offset(0), dest_ty);
+                Ok(Some(out))
+            } else {
+                let res = unary_op_expr(state)?.ok_or(CompileError::Expected("expr"))?;
+                let dest_ty = res.ty.deref()?;
+                state.write(IR::Mov, Dest::R0, Src::PopStack, res.ty);
+                let out = state.write(IR::Mov, Dest::Stack, Src::R0Offset(0), dest_ty);
+                Ok(Some(out))
+            }
         }
         _ => postfix_expr(state),
     }
@@ -1047,7 +1001,7 @@ fn postfix_expr(state: &mut State) -> CompileOpt<MemLocation> {
         let field_name = ident_token(state)?.ok_or(CompileError::Expected("field"))?;
         let field = fields.get(&field_name)?;
         left = state.write(
-            IR::mov,
+            IR::Mov,
             Dest::Stack,
             field.from_location(&left).to_src(),
             field.ty.clone(),
@@ -1089,18 +1043,18 @@ fn base_expr(state: &mut State) -> CompileOpt<MemLocation> {
 }
 
 fn number(state: &mut State, value: Word) -> Compile<MemLocation> {
-    Ok(state.write(IR::mov, Dest::Stack, Src::Immediate(value), Ty::int()))
+    Ok(state.write(IR::Mov, Dest::Stack, Src::Immediate(value), Ty::int()))
 }
 
 fn boolean(state: &mut State, value: bool) -> Compile<MemLocation> {
     let src = Src::Immediate(if value { 1 } else { 0 });
-    Ok(state.write(IR::mov, Dest::Stack, src, Ty::bool()))
+    Ok(state.write(IR::Mov, Dest::Stack, src, Ty::bool()))
 }
 
 fn identifier(state: &mut State, name: &str) -> Compile<MemLocation> {
     let record = state.scope.get(name)?;
     let src = record.to_src();
-    Ok(state.write(IR::mov, Dest::Stack, src, record.ty))
+    Ok(state.write(IR::Mov, Dest::Stack, src, record.ty))
 }
 
 fn struct_expr(state: &mut State, name: &str) -> Compile<MemLocation> {
@@ -1122,7 +1076,7 @@ fn struct_expr(state: &mut State, name: &str) -> Compile<MemLocation> {
         let value = expr(state)?.ok_or(CompileError::Expected("expr"))?;
         field.ty.check(&value.ty)?;
         state.write(
-            IR::mov,
+            IR::Mov,
             field_loc.to_dest(),
             Src::PopStack,
             field.ty.clone(),
@@ -1169,7 +1123,7 @@ mod test {
     fn integers() {
         expect_ir(
             "123",
-            vec![IR::mov(IRDest::PushStack, IRSrc::Immediate(123))],
+            vec![IR::Mov(IRDest::PushStack, IRSrc::Immediate(123))],
         )
     }
 
@@ -1180,7 +1134,7 @@ mod test {
             123
             
             ",
-            vec![IR::mov(IRDest::PushStack, IRSrc::Immediate(123))],
+            vec![IR::Mov(IRDest::PushStack, IRSrc::Immediate(123))],
         )
     }
 
@@ -1188,7 +1142,7 @@ mod test {
     fn comments() {
         expect_ir(
             "123 # This is a comment",
-            vec![IR::mov(IRDest::PushStack, IRSrc::Immediate(123))],
+            vec![IR::Mov(IRDest::PushStack, IRSrc::Immediate(123))],
         )
     }
 
@@ -1201,11 +1155,11 @@ mod test {
     fn bools() {
         expect_ir(
             "true",
-            vec![IR::mov(IRDest::PushStack, IRSrc::Immediate(1))],
+            vec![IR::Mov(IRDest::PushStack, IRSrc::Immediate(1))],
         );
         expect_ir(
             "false",
-            vec![IR::mov(IRDest::PushStack, IRSrc::Immediate(0))],
+            vec![IR::Mov(IRDest::PushStack, IRSrc::Immediate(0))],
         );
     }
 
@@ -1217,8 +1171,8 @@ mod test {
             true
         ",
             vec![
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(123)),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(1)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(123)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(1)),
             ],
         )
     }
@@ -1232,9 +1186,9 @@ mod test {
                 x
             ",
             vec![
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(1)),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(2)),
-                IR::mov(IRDest::PushStack, IRSrc::StackOffset(1)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(1)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(2)),
+                IR::Mov(IRDest::PushStack, IRSrc::StackOffset(1)),
             ],
         )
     }
@@ -1245,7 +1199,7 @@ mod test {
             "
                 let x : int := 1;
             ",
-            vec![IR::mov(IRDest::PushStack, IRSrc::Immediate(1))],
+            vec![IR::Mov(IRDest::PushStack, IRSrc::Immediate(1))],
         );
         expect_err(
             "
@@ -1265,11 +1219,11 @@ mod test {
             x
         ",
             vec![
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(1)),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(3)),
-                IR::mov(IRDest::PushStack, IRSrc::StackOffset(0)),
-                IR::mov(IRDest::StackOffset(1), IRSrc::PopStack),
-                IR::mov(IRDest::PushStack, IRSrc::StackOffset(1)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(1)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(3)),
+                IR::Mov(IRDest::PushStack, IRSrc::StackOffset(0)),
+                IR::Mov(IRDest::StackOffset(1), IRSrc::PopStack),
+                IR::Mov(IRDest::PushStack, IRSrc::StackOffset(1)),
             ],
         )
     }
@@ -1283,13 +1237,13 @@ mod test {
             x + 3 + y 
         ",
             vec![
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(1)), //     [x: 1]
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(2)), //     [y: 2, x: 1]
-                IR::mov(IRDest::PushStack, IRSrc::StackOffset(1)), //   [1, y: 2, x: 1]
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(3)), //     [3, 1, y: 2, x: 1]
-                IR::add(IRDest::StackOffset(0), IRSrc::PopStack), //    [4, y: 2, x: 1]
-                IR::mov(IRDest::PushStack, IRSrc::StackOffset(1)), //   [2, 4, y: 2, x: 1]
-                IR::add(IRDest::StackOffset(0), IRSrc::PopStack), //    [6, y: 2, x: 1]
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(1)), //     [x: 1]
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(2)), //     [y: 2, x: 1]
+                IR::Mov(IRDest::PushStack, IRSrc::StackOffset(1)), //   [1, y: 2, x: 1]
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(3)), //     [3, 1, y: 2, x: 1]
+                IR::Add(IRDest::StackOffset(0), IRSrc::PopStack), //    [4, y: 2, x: 1]
+                IR::Mov(IRDest::PushStack, IRSrc::StackOffset(1)), //   [2, 4, y: 2, x: 1]
+                IR::Add(IRDest::StackOffset(0), IRSrc::PopStack), //    [6, y: 2, x: 1]
             ],
         )
     }
@@ -1311,11 +1265,11 @@ mod test {
         expect_ir(
             "3 * (4 + 5)",
             vec![
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(3)),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(4)),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(5)),
-                IR::add(IRDest::StackOffset(0), IRSrc::PopStack),
-                IR::mult(IRDest::StackOffset(0), IRSrc::PopStack),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(3)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(4)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(5)),
+                IR::Add(IRDest::StackOffset(0), IRSrc::PopStack),
+                IR::Mult(IRDest::StackOffset(0), IRSrc::PopStack),
             ],
         )
     }
@@ -1325,11 +1279,11 @@ mod test {
         expect_ir(
             "4 + 5 * 3",
             vec![
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(4)),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(5)),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(3)),
-                IR::mult(IRDest::StackOffset(0), IRSrc::PopStack),
-                IR::add(IRDest::StackOffset(0), IRSrc::PopStack),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(4)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(5)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(3)),
+                IR::Mult(IRDest::StackOffset(0), IRSrc::PopStack),
+                IR::Add(IRDest::StackOffset(0), IRSrc::PopStack),
             ],
         )
     }
@@ -1339,9 +1293,9 @@ mod test {
         expect_ir(
             "-3",
             vec![
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(0)),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(3)),
-                IR::sub(IRDest::StackOffset(0), IRSrc::PopStack),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(0)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(3)),
+                IR::Sub(IRDest::StackOffset(0), IRSrc::PopStack),
             ],
         );
     }
@@ -1352,14 +1306,32 @@ mod test {
             "
             let x := 1;
             let ptr := &x;
+            @(ptr)
+        ",
+            vec![
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(1)),
+                IR::LoadAddress(IRDest::PushStack, IRSrc::StackOffset(0)),
+                // @(ptr)
+                IR::Mov(IRDest::PushStack, IRSrc::StackOffset(0)),
+                IR::Mov(IRDest::R0, IRSrc::PopStack),
+                IR::Mov(IRDest::PushStack, IRSrc::R0Offset(0)),
+            ],
+        )
+    }
+
+    #[test]
+    fn deref_lvalue() {
+        expect_ir(
+            "
+            let x := 1;
+            let ptr := &x;
             @ptr
         ",
             vec![
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(1)),
-                IR::load_address(IRDest::PushStack, IRSrc::StackOffset(0)),
-                IR::mov(IRDest::PushStack, IRSrc::StackOffset(0)),
-                IR::mov(IRDest::R0, IRSrc::PopStack),
-                IR::mov(IRDest::PushStack, IRSrc::R0Offset(0)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(1)),
+                IR::LoadAddress(IRDest::PushStack, IRSrc::StackOffset(0)),
+                IR::Mov(IRDest::R0, IRSrc::StackOffset(0)),
+                IR::Mov(IRDest::PushStack, IRSrc::R0Offset(0)),
             ],
         )
     }
@@ -1369,9 +1341,9 @@ mod test {
         expect_ir(
             "(true as int) + 2",
             vec![
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(1)),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(2)),
-                IR::add(IRDest::StackOffset(0), IRSrc::PopStack),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(1)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(2)),
+                IR::Add(IRDest::StackOffset(0), IRSrc::PopStack),
             ],
         )
     }
@@ -1383,7 +1355,7 @@ mod test {
                 type Word := int;
                 let a : Word := 3    
             ",
-            vec![IR::mov(IRDest::PushStack, IRSrc::Immediate(3))],
+            vec![IR::Mov(IRDest::PushStack, IRSrc::Immediate(3))],
         )
     }
 
@@ -1397,18 +1369,18 @@ mod test {
         ",
             vec![
                 // allocate
-                IR::sub(IRDest::SP, IRSrc::Immediate(2)),
+                IR::Sub(IRDest::SP, IRSrc::Immediate(2)),
                 // initialize
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(1)),
-                IR::mov(IRDest::StackOffset(0), IRSrc::PopStack),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(2)),
-                IR::mov(IRDest::StackOffset(1), IRSrc::PopStack),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(1)),
+                IR::Mov(IRDest::StackOffset(0), IRSrc::PopStack),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(2)),
+                IR::Mov(IRDest::StackOffset(1), IRSrc::PopStack),
                 // put whole value on stack
-                IR::sub(IRDest::SP, IRSrc::Immediate(2)),
-                IR::mov(IRDest::StackOffset(0), IRSrc::StackOffset(2)),
-                IR::mov(IRDest::StackOffset(1), IRSrc::StackOffset(3)),
+                IR::Sub(IRDest::SP, IRSrc::Immediate(2)),
+                IR::Mov(IRDest::StackOffset(0), IRSrc::StackOffset(2)),
+                IR::Mov(IRDest::StackOffset(1), IRSrc::StackOffset(3)),
                 // get field (leaving remainder on stack)
-                IR::mov(IRDest::PushStack, IRSrc::StackOffset(0)),
+                IR::Mov(IRDest::PushStack, IRSrc::StackOffset(0)),
             ],
         );
     }
@@ -1424,17 +1396,17 @@ mod test {
         ",
             vec![
                 // allocate
-                IR::sub(IRDest::SP, IRSrc::Immediate(2)),
+                IR::Sub(IRDest::SP, IRSrc::Immediate(2)),
                 // initialize
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(1)),
-                IR::mov(IRDest::StackOffset(0), IRSrc::PopStack),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(2)),
-                IR::mov(IRDest::StackOffset(1), IRSrc::PopStack),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(1)),
+                IR::Mov(IRDest::StackOffset(0), IRSrc::PopStack),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(2)),
+                IR::Mov(IRDest::StackOffset(1), IRSrc::PopStack),
                 // assign
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(3)),
-                IR::mov(IRDest::StackOffset(1), IRSrc::PopStack),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(3)),
+                IR::Mov(IRDest::StackOffset(1), IRSrc::PopStack),
                 // get just the field
-                IR::mov(IRDest::PushStack, IRSrc::StackOffset(0)),
+                IR::Mov(IRDest::PushStack, IRSrc::StackOffset(0)),
             ],
         );
     }
@@ -1447,24 +1419,49 @@ mod test {
             let p := Point { x: 1, y: 2 };
             let ptr := &p.x;
             p.x := 5;
+            @(ptr)
+        ",
+            vec![
+                //  Point { x: 1, y: 2 };
+                IR::Sub(IRDest::SP, IRSrc::Immediate(2)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(1)),
+                IR::Mov(IRDest::StackOffset(0), IRSrc::PopStack),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(2)),
+                IR::Mov(IRDest::StackOffset(1), IRSrc::PopStack),
+                // &p.x
+                IR::LoadAddress(IRDest::PushStack, IRSrc::StackOffset(0)),
+                // p.x := 5
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(5)),
+                IR::Mov(IRDest::StackOffset(1), IRSrc::PopStack),
+                // @ptr
+                IR::Mov(IRDest::PushStack, IRSrc::StackOffset(0)),
+                IR::Mov(IRDest::R0, IRSrc::PopStack),
+                IR::Mov(IRDest::PushStack, IRSrc::R0Offset(0)),
+            ],
+        )
+    }
+
+    #[test]
+    fn struct_pointer_lvalue() {
+        expect_ir(
+            "
+            type Point := struct { x: int, y: int };
+            let p := Point { x: 1, y: 2 };
+            let ptr := &p.x;
             @ptr
         ",
             vec![
                 //  Point { x: 1, y: 2 };
-                IR::sub(IRDest::SP, IRSrc::Immediate(2)),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(1)),
-                IR::mov(IRDest::StackOffset(0), IRSrc::PopStack),
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(2)),
-                IR::mov(IRDest::StackOffset(1), IRSrc::PopStack),
+                IR::Sub(IRDest::SP, IRSrc::Immediate(2)),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(1)),
+                IR::Mov(IRDest::StackOffset(0), IRSrc::PopStack),
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(2)),
+                IR::Mov(IRDest::StackOffset(1), IRSrc::PopStack),
                 // &p.x
-                IR::load_address(IRDest::PushStack, IRSrc::StackOffset(0)),
-                // p.x := 5
-                IR::mov(IRDest::PushStack, IRSrc::Immediate(5)),
-                IR::mov(IRDest::StackOffset(1), IRSrc::PopStack),
+                IR::LoadAddress(IRDest::PushStack, IRSrc::StackOffset(0)),
                 // @ptr
-                IR::mov(IRDest::PushStack, IRSrc::StackOffset(0)),
-                IR::mov(IRDest::R0, IRSrc::PopStack),
-                IR::mov(IRDest::PushStack, IRSrc::R0Offset(0)),
+                IR::Mov(IRDest::R0, IRSrc::StackOffset(0)),
+                IR::Mov(IRDest::PushStack, IRSrc::R0Offset(0)),
             ],
         )
     }
