@@ -371,6 +371,12 @@ impl Ty {
             ref_level: 0,
         }
     }
+    fn bitset(data: TyOneOf) -> Self {
+        Self {
+            kind: TyKind::BitSet(Box::new(data)),
+            ref_level: 0,
+        }
+    }
     fn add_ref(&self) -> Self {
         Self {
             kind: self.kind.clone(),
@@ -410,6 +416,8 @@ impl Ty {
             TyKind::Bool => 1,
             TyKind::Struct(s) => s.size,
             TyKind::OneOf(_) => 1,
+            // TODO: large bitsets
+            TyKind::BitSet(_) => 1,
         }
     }
 }
@@ -420,6 +428,7 @@ enum TyKind {
     Bool,
     Struct(Box<TyStruct>),
     OneOf(Box<TyOneOf>),
+    BitSet(Box<TyOneOf>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -471,6 +480,35 @@ impl StructField {
             }
             _ => unimplemented!(),
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TyOneOfMember {
+    index: Word,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TyOneOf {
+    id: usize,
+    members: HashMap<String, TyOneOfMember>,
+}
+
+impl TyOneOf {
+    fn new(id: usize) -> Self {
+        Self {
+            id,
+            members: HashMap::new(),
+        }
+    }
+    fn insert(&mut self, key: String, index: Word) -> Compile<()> {
+        match self.members.insert(key, TyOneOfMember { index }) {
+            Some(_) => Err(CompileError::DuplicateField),
+            None => Ok(()),
+        }
+    }
+    fn get(&self, key: &str) -> Compile<&TyOneOfMember> {
+        self.members.get(key).ok_or(CompileError::MissingField)
     }
 }
 
@@ -569,6 +607,7 @@ enum Src {
     Immediate(Word),
     FrameOffset(Word),
     PopStack,
+    R0,
     R0Offset(Word),
 }
 
@@ -629,6 +668,7 @@ impl State {
                 IRSrc::PopStack
             }
             Src::R0Offset(offset) => IRSrc::R0Offset(offset),
+            Src::R0 => IRSrc::R0,
         };
         let (ir_dest, result) = match dest {
             Dest::Stack => {
@@ -805,15 +845,41 @@ fn ident_token(state: &mut State) -> CompileOpt<String> {
     }
 }
 
+fn type_ident_token(state: &mut State) -> CompileOpt<String> {
+    match state.lexer.peek()? {
+        Token::TypeIdentifier(s) => {
+            state.lexer.advance();
+            Ok(Some(s))
+        }
+        _ => Ok(None),
+    }
+}
+
 // ### Exprs
 
-fn struct_expr(state: &mut State, name: &str) -> Compile<MemLocation> {
-    let ty = state.ty_scope.get(name)?;
-    let fields = match &ty.kind {
-        TyKind::Struct(fields) => fields,
-        _ => return Err(CompileError::Expected("struct")),
-    };
-    let base_res: MemLocation = state.allocate(&ty);
+fn bitset_expr(state: &mut State, fields: &TyOneOf) -> Compile<MemLocation> {
+    let ty = Ty::bitset(fields.clone());
+    let mut value = 0;
+    expect_token(state, Token::CurlyLeft)?;
+    loop {
+        let key = match type_ident_token(state)? {
+            Some(key) => key,
+            _ => break,
+        };
+        let field = fields.get(&key)?;
+        // TODO: check for dupes
+        value |= 1 << field.index;
+
+        if token(state, Token::Comma)?.is_none() {
+            break;
+        }
+    }
+    expect_token(state, Token::CurlyRight)?;
+    Ok(state.push(Src::Immediate(value), ty))
+}
+
+fn struct_expr(state: &mut State, fields: &TyStruct) -> Compile<MemLocation> {
+    let base_res: MemLocation = state.allocate(&Ty::struct_(fields.clone()));
     expect_token(state, Token::CurlyLeft)?;
     loop {
         let field_name = match ident_token(state)? {
@@ -842,11 +908,8 @@ fn oneof_member_expr(state: &mut State, name: &str) -> Compile<MemLocation> {
         _ => return Err(CompileError::Expected("oneof")),
     };
     expect_token(state, Token::Dot)?;
-    let member_name = match state.lexer.peek()? {
-        Token::TypeIdentifier(key) => {
-            state.lexer.advance();
-            key
-        }
+    let member_name = match type_ident_token(state)? {
+        Some(key) => key,
         _ => return Err(CompileError::Expected("oneof member")),
     };
     let field = fields.get(&member_name)?;
@@ -865,7 +928,14 @@ fn base_expr(state: &mut State) -> CompileOpt<MemLocation> {
             state.lexer.advance();
             match state.lexer.peek()? {
                 Token::Dot => oneof_member_expr(state, &name),
-                _ => struct_expr(state, &name),
+                _ => {
+                    let ty = state.ty_scope.get(&name)?;
+                    match &ty.kind {
+                        TyKind::Struct(fields) => struct_expr(state, fields),
+                        TyKind::OneOf(fields) => bitset_expr(state, fields),
+                        _ => return Err(CompileError::Expected("struct")),
+                    }
+                }
             }
         }
         Token::Integer(int) => {
@@ -900,14 +970,28 @@ fn postfix_expr(state: &mut State) -> CompileOpt<MemLocation> {
         if token(state, Token::Dot)?.is_none() {
             return Ok(Some(left));
         }
-        let fields = match &left.ty.kind {
-            TyKind::Struct(fields) => fields,
-            _ => return Err(CompileError::Expected("struct")),
-        };
-        let field_name = ident_token(state)?.ok_or(CompileError::Expected("field"))?;
-        let field = fields.get(&field_name)?;
-        left = state.push(field.from_location(&left).to_src(), field.ty.clone());
-        dbg!(&left);
+        match state.lexer.peek()? {
+            Token::Identifier(field_name) => {
+                state.lexer.advance();
+                let fields = match &left.ty.kind {
+                    TyKind::Struct(fields) => fields,
+                    _ => return Err(CompileError::Expected("struct")),
+                };
+                let field = fields.get(&field_name)?;
+                left = state.push(field.from_location(&left).to_src(), field.ty.clone());
+            }
+            Token::TypeIdentifier(field_name) => {
+                state.lexer.advance();
+                let fields = match left.ty.clone().kind {
+                    TyKind::BitSet(fields) => fields,
+                    _ => return Err(CompileError::Expected("bitset")),
+                };
+                let field = fields.get(&field_name)?;
+                state.write(IR::BitTest, left, Src::Immediate(field.index));
+                left = state.push(Src::R0, Ty::bool());
+            }
+            _ => return Err(CompileError::Expected("field")),
+        }
     }
 }
 
@@ -1042,46 +1126,14 @@ fn struct_ty(state: &mut State) -> Compile<Ty> {
     Ok(Ty::struct_(fields))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TyOneOfMember {
-    index: Word,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TyOneOf {
-    id: usize,
-    members: HashMap<String, TyOneOfMember>,
-}
-
-impl TyOneOf {
-    fn new(id: usize) -> Self {
-        Self {
-            id,
-            members: HashMap::new(),
-        }
-    }
-    fn insert(&mut self, key: String, index: Word) -> Compile<()> {
-        match self.members.insert(key, TyOneOfMember { index }) {
-            Some(_) => Err(CompileError::DuplicateField),
-            None => Ok(()),
-        }
-    }
-    fn get(&self, key: &str) -> Compile<&TyOneOfMember> {
-        self.members.get(key).ok_or(CompileError::MissingField)
-    }
-}
-
 fn oneof_ty(state: &mut State) -> Compile<Ty> {
     let mut data = TyOneOf::new(state.new_type_id());
 
     expect_token(state, Token::CurlyLeft)?;
     let mut i = 0;
     loop {
-        let key = match state.lexer.peek()? {
-            Token::TypeIdentifier(k) => {
-                state.lexer.advance();
-                k
-            }
+        let key = match type_ident_token(state)? {
+            Some(key) => key,
             _ => break,
         };
 
@@ -1570,6 +1622,23 @@ mod test {
             TrafficLight.Yellow
         ",
             vec![IR::Mov(IRDest::PushStack, IRSrc::Immediate(1))],
+        )
+    }
+
+    #[test]
+    fn bitset() {
+        expect_ir(
+            "
+            type Flags := oneof {Carry, Overflow, Zero, Negative, Extend};
+            let flags := Flags{Carry, Zero};
+            (flags.Carry)
+        ",
+            vec![
+                IR::Mov(IRDest::PushStack, IRSrc::Immediate(0b101)),
+                IR::Mov(IRDest::PushStack, IRSrc::StackOffset(0)),
+                IR::BitTest(IRDest::StackOffset(0), IRSrc::Immediate(0)),
+                IR::Mov(IRDest::PushStack, IRSrc::R0),
+            ],
         )
     }
 
