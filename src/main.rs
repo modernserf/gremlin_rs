@@ -893,7 +893,8 @@ fn type_ident_token(state: &mut State) -> CompileOpt<String> {
 #[derive(Debug)]
 enum Expr {
     Constant(Word, Ty),
-    LValue(MemLocation, usize),
+    LValue(MemLocation),
+    DerefLValue(MemLocation, StructField),
     Resolved(MemLocation),
 }
 
@@ -901,42 +902,82 @@ impl Expr {
     fn resolve(self, state: &mut State) -> MemLocation {
         match self {
             Expr::Constant(value, ty) => state.push(Src::Immediate(value), ty),
-            Expr::LValue(loc, deref_count) => {
-                if deref_count > 0 {
-                    debug_assert!(deref_count == 1);
-                    state.write(IR::Mov, MemLocation::r0(loc.ty.clone()), loc.to_src());
-                    state.push(Src::R0Offset(0), loc.ty)
-                } else {
-                    state.push(loc.to_src(), loc.ty)
-                }
-            }
             Expr::Resolved(loc) => loc,
+            Expr::LValue(loc) => state.push(loc.to_src(), loc.ty),
+            Expr::DerefLValue(loc, field) => {
+                state.write(IR::Mov, MemLocation::r0(loc.ty.clone()), loc.to_src());
+                state.push(Src::R0Offset(field.offset), field.ty)
+            }
         }
     }
-    fn ty(&self) -> &Ty {
+    fn assign(self, state: &mut State, value: Expr) -> Compile<Expr> {
+        match self {
+            Expr::LValue(target) => {
+                let src = value.resolve(state);
+                let out = state.write(IR::Mov, target, src.pop(state)?);
+                Ok(Expr::Resolved(out))
+            }
+            Expr::DerefLValue(target, field) => {
+                let src = value.resolve(state);
+                state.write(
+                    IR::Mov,
+                    MemLocation::r0(target.ty.add_ref()),
+                    target.to_src(),
+                );
+                Ok(Expr::Resolved(state.write(
+                    IR::Mov,
+                    MemLocation {
+                        ty: field.ty,
+                        kind: MemLocationKind::R0Offset(field.offset),
+                    },
+                    src.pop(state)?,
+                )))
+            }
+            _ => return Err(CompileError::Expected("lvalue")),
+        }
+    }
+    fn ty_(&self) -> &Ty {
         match self {
             Expr::Constant(_, ty) => ty,
-            Expr::LValue(m, deref_count) => {
-                debug_assert!(*deref_count == 0);
-                &m.ty
-            }
+            Expr::LValue(m) => &m.ty,
+            Expr::DerefLValue(m, _) => &m.ty,
             Expr::Resolved(m) => &m.ty,
         }
     }
-    fn struct_field(self, field: &StructField) -> Expr {
+    fn struct_field(self, field_name: &str) -> Compile<Expr> {
+        let ty = self.ty_();
+        if ty.ref_level > 1 {}
+
+        let fields = match &self.ty_().kind {
+            TyKind::Struct(fs) => fs,
+            _ => return Err(CompileError::Expected("struct")),
+        };
+        let field = fields.get(field_name)?.clone();
+
         match self {
             Expr::Constant(_, _) => unreachable!(),
-            Expr::LValue(m, deref_count) => {
-                debug_assert!(deref_count == 0);
-                Expr::LValue(field.from_location(&m), deref_count)
-            }
-            Expr::Resolved(m) => Expr::LValue(field.from_location(&m), 0),
+            Expr::LValue(m) => Ok(Expr::LValue(field.from_location(&m))),
+            Expr::DerefLValue(m, parent) => Ok(Expr::DerefLValue(
+                m,
+                StructField {
+                    ty: field.ty,
+                    offset: parent.offset + field.offset,
+                },
+            )),
+            Expr::Resolved(m) => Ok(Expr::LValue(field.from_location(&m))),
         }
     }
-    fn ref_(self, state: &mut State) -> Compile<Expr> {
+    fn bitset_field(&self, field_name: &str) -> Compile<TyOneOfMember> {
+        let fields = match &self.ty_().kind {
+            TyKind::BitSet(fs) => fs,
+            _ => return Err(CompileError::Expected("bitset")),
+        };
+        Ok(fields.get(field_name)?.clone())
+    }
+
+    fn add_ref(self, state: &mut State) -> Compile<Expr> {
         match self {
-            Expr::LValue(mem, deref_count) => {
-                debug_assert!(deref_count == 0);
+            Expr::LValue(mem) => {
                 let dest_ty = mem.ty.add_ref();
                 let out = state.write_1(IR::LoadAddress, Dest::Stack, mem.to_src(), dest_ty, 0);
                 Ok(Expr::Resolved(out))
@@ -946,59 +987,29 @@ impl Expr {
     }
     fn deref(self, state: &mut State) -> Compile<Expr> {
         match self {
-            Expr::Constant(_, _) => unimplemented!(),
-            Expr::LValue(mut mem, deref_count) => {
-                mem.ty = mem.ty.deref()?;
-                Ok(Expr::LValue(mem, deref_count + 1))
-            }
             Expr::Resolved(mem) => {
                 let res = state.write(IR::Mov, MemLocation::r0(mem.ty.clone()), mem.pop(state)?);
                 Ok(Expr::Resolved(
                     state.push(Src::R0Offset(0), res.ty.deref()?),
                 ))
             }
+            Expr::LValue(mem) => Ok(Expr::DerefLValue(
+                mem.clone(),
+                StructField {
+                    ty: mem.ty,
+                    offset: 0,
+                },
+            )),
+            _ => unimplemented!(),
         }
     }
     fn cast_ty(self, cast_ty: Ty) -> Compile<Expr> {
         Ok(match self {
             Expr::Constant(x, ty) => Expr::Constant(x, ty.cast(cast_ty)?),
-            Expr::LValue(mem, deref_count) => {
-                // TODO
-                debug_assert!(deref_count == 0);
-                Expr::LValue(mem.cast(cast_ty)?, deref_count)
-            }
+            Expr::LValue(mem) => Expr::LValue(mem.cast(cast_ty)?),
+            Expr::DerefLValue(_, _) => unimplemented!(),
             Expr::Resolved(mem) => Expr::Resolved(mem.cast(cast_ty)?),
         })
-    }
-    fn assign(self, state: &mut State, value: Expr) -> Compile<Expr> {
-        match self {
-            Expr::LValue(target, deref_count) => {
-                let src = value.resolve(state);
-                match deref_count {
-                    0 => {
-                        let out = state.write(IR::Mov, target, src.pop(state)?);
-                        Ok(Expr::Resolved(out))
-                    }
-                    1 => {
-                        state.write(
-                            IR::Mov,
-                            MemLocation::r0(target.ty.add_ref()),
-                            target.to_src(),
-                        );
-                        Ok(Expr::Resolved(state.write(
-                            IR::Mov,
-                            MemLocation {
-                                ty: target.ty,
-                                kind: MemLocationKind::R0Offset(0),
-                            },
-                            src.pop(state)?,
-                        )))
-                    }
-                    _ => unimplemented!(),
-                }
-            }
-            _ => return Err(CompileError::Expected("lvalue")),
-        }
     }
 }
 
@@ -1098,7 +1109,7 @@ fn base_expr(state: &mut State) -> CompileOpt<Expr> {
         Token::Identifier(name) => {
             state.lexer.advance();
             let record = state.scope.get(&name)?;
-            Expr::LValue(record, 0)
+            Expr::LValue(record)
         }
         _ => return Ok(None),
     };
@@ -1122,21 +1133,12 @@ fn postfix_expr(state: &mut State) -> CompileOpt<Expr> {
                 match state.lexer.peek()? {
                     Token::Identifier(field_name) => {
                         state.lexer.advance();
-                        let fields = match left.ty().clone().kind {
-                            TyKind::Struct(fields) => fields,
-                            _ => return Err(CompileError::Expected("struct")),
-                        };
-                        let field = fields.get(&field_name)?;
-                        let next = left.struct_field(field);
+                        let next = left.struct_field(&field_name)?;
                         left = next
                     }
                     Token::TypeIdentifier(field_name) => {
                         state.lexer.advance();
-                        let fields = match left.ty().clone().kind {
-                            TyKind::BitSet(fields) => fields,
-                            _ => return Err(CompileError::Expected("bitset")),
-                        };
-                        let field = fields.get(&field_name)?;
+                        let field = left.bitset_field(&field_name)?;
                         let left_res = left.resolve(state);
                         state.write(IR::BitTest, left_res, Src::Immediate(field.index));
                         left = Expr::Resolved(state.push(Src::R0, Ty::bool()));
@@ -1164,7 +1166,7 @@ fn unary_op_expr(state: &mut State) -> CompileOpt<Expr> {
         Token::Ampersand => {
             state.lexer.advance();
             let operand = unary_op_expr(state)?.ok_or(CompileError::Expected("expr"))?;
-            operand.ref_(state)?
+            operand.add_ref(state)?
         }
         _ => return postfix_expr(state),
     };
@@ -1377,7 +1379,18 @@ mod test {
     use super::{EA::*, IR::*};
 
     fn expect_ir(code: &str, ir: Vec<IR>) {
-        assert_eq!(program(code), Ok(ir))
+        assert_eq!(program(code), Ok(ir));
+    }
+    fn expect_result(code: &str, value: Word) {
+        let ir = program(code).expect("compile");
+        let res = Runtime::eval(&ir);
+        assert_eq!(res, value);
+    }
+    fn expect_ir_result(code: &str, ir: Vec<IR>, result: Word) {
+        let actual_ir = program(code).expect("compile");
+        let actual_result: i32 = Runtime::eval(&actual_ir);
+        assert_eq!(actual_ir, ir);
+        assert_eq!(actual_result, result);
     }
     fn expect_err(code: &str, err: CompileError) {
         assert_eq!(program(code), Err(err))
@@ -1390,7 +1403,7 @@ mod test {
 
     #[test]
     fn integers() {
-        expect_ir("123", vec![Mov(PushStack, Immediate(123))])
+        expect_ir_result("123", vec![Mov(PushStack, Immediate(123))], 123);
     }
 
     #[test]
@@ -1436,7 +1449,7 @@ mod test {
 
     #[test]
     fn let_stmts() {
-        expect_ir(
+        expect_ir_result(
             "
                 let x := 1;
                 let y := 2;
@@ -1447,7 +1460,8 @@ mod test {
                 Mov(PushStack, Immediate(2)),
                 Mov(PushStack, StackOffset(1)),
             ],
-        )
+            1,
+        );
     }
 
     #[test]
@@ -1468,7 +1482,7 @@ mod test {
 
     #[test]
     fn assignment() {
-        expect_ir(
+        expect_ir_result(
             "
             let x := 1;
             let y := 3;
@@ -1482,12 +1496,13 @@ mod test {
                 Mov(StackOffset(1), PopStack),
                 Mov(PushStack, StackOffset(1)),
             ],
-        )
+            3,
+        );
     }
 
     #[test]
     fn addition() {
-        expect_ir(
+        expect_ir_result(
             "
             let x := 1;
             let y := 2;
@@ -1502,7 +1517,8 @@ mod test {
                 Mov(PushStack, StackOffset(1)), // [2, 4, y: 2, x: 1]
                 Add(StackOffset(0), PopStack),  // [6, y: 2, x: 1]
             ],
-        )
+            6,
+        );
     }
 
     #[test]
@@ -1533,7 +1549,7 @@ mod test {
 
     #[test]
     fn precedence() {
-        expect_ir(
+        expect_ir_result(
             "(4) + (5) * (3)",
             vec![
                 Mov(PushStack, Immediate(4)),
@@ -1542,24 +1558,26 @@ mod test {
                 Mult(StackOffset(0), PopStack),
                 Add(StackOffset(0), PopStack),
             ],
-        )
+            19,
+        );
     }
 
     #[test]
     fn negation() {
-        expect_ir(
+        expect_ir_result(
             "-3",
             vec![
                 Mov(PushStack, Immediate(0)),
                 Mov(PushStack, Immediate(3)),
                 Sub(StackOffset(0), PopStack),
             ],
+            -3,
         );
     }
 
     #[test]
     fn ref_deref() {
-        expect_ir(
+        expect_ir_result(
             "
             let x := 1;
             let ptr := &x;
@@ -1573,12 +1591,13 @@ mod test {
                 Mov(R0, PopStack),
                 Mov(PushStack, R0Offset(0)),
             ],
-        )
+            1,
+        );
     }
 
     #[test]
     fn deref_lvalue() {
-        expect_ir(
+        expect_ir_result(
             "
             let x := 1;
             let ptr := &x;
@@ -1590,16 +1609,18 @@ mod test {
                 Mov(R0, StackOffset(0)),
                 Mov(PushStack, R0Offset(0)),
             ],
-        )
+            1,
+        );
     }
 
     #[test]
     fn ptr_assign() {
-        expect_ir(
+        expect_ir_result(
             "
             let x := 1;
             let ptr := &x;
             ptr[] := 2;
+            x
         ",
             vec![
                 Mov(PushStack, Immediate(1)),
@@ -1607,7 +1628,9 @@ mod test {
                 Mov(PushStack, Immediate(2)),
                 Mov(R0, StackOffset(1)),
                 Mov(R0Offset(0), PopStack),
+                Mov(PushStack, StackOffset(1)),
             ],
+            2,
         );
     }
 
@@ -1662,7 +1685,7 @@ mod test {
 
     #[test]
     fn struct_lvalue() {
-        expect_ir(
+        expect_ir_result(
             "
             type Point := struct { x: Int, y: Int };
             let p := Point { x: 1, y: 2 };
@@ -1683,6 +1706,7 @@ mod test {
                 // get just the field
                 Mov(PushStack, StackOffset(0)),
             ],
+            1,
         );
     }
 
@@ -1742,6 +1766,32 @@ mod test {
     }
 
     #[test]
+    fn struct_pointer_field() {
+        expect_ir_result(
+            "
+            type Point := struct { x: Int, y: Int };
+            let p := Point { x: 1, y: 2 };
+            let ptr := &p;
+            ptr[].y
+        ",
+            vec![
+                //  Point { x: 1, y: 2 };
+                Sub(SP, Immediate(2)),
+                Mov(PushStack, Immediate(1)),
+                Mov(StackOffset(0), PopStack),
+                Mov(PushStack, Immediate(2)),
+                Mov(StackOffset(1), PopStack),
+                // &p
+                LoadAddress(PushStack, StackOffset(0)),
+                // ptr[].y
+                Mov(R0, StackOffset(0)),
+                Mov(PushStack, R0Offset(1)),
+            ],
+            2,
+        );
+    }
+
+    #[test]
     fn oneof() {
         expect_ir(
             "
@@ -1754,7 +1804,7 @@ mod test {
 
     #[test]
     fn bitset() {
-        expect_ir(
+        expect_ir_result(
             "
             type Flags := oneof {Carry, Overflow, Zero, Negative, Extend};
             let flags := Flags{Carry, Zero};
@@ -1766,6 +1816,7 @@ mod test {
                 BitTest(StackOffset(0), Immediate(0)),
                 Mov(PushStack, R0),
             ],
-        )
+            1,
+        );
     }
 }
