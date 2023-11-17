@@ -17,6 +17,8 @@ pub enum EA {
     // registers with offset
     StackOffset(Word),
     R0Offset(Word),
+    // (SP + R0 + offset)
+    Indexed(Word),
     // stack ops
     PushStack,
     PopStack,
@@ -128,6 +130,7 @@ impl Runtime {
                 self.sp += 1;
                 value
             }
+            EA::Indexed(offset) => self.memory[(self.r0 + self.sp + offset) as usize],
             _ => unimplemented!(),
         }
     }
@@ -181,6 +184,7 @@ pub enum Token {
     As,
     Type,
     Struct,
+    Array,
     OneOf,
     Colon,
     Semicolon,
@@ -239,7 +243,13 @@ mod lexer {
                     }
                 }
                 'f' => self.keyword("false", Token::False),
-                'a' => self.keyword("as", Token::As),
+                'a' => {
+                    self.adv_char();
+                    match self.peek_char() {
+                        'r' => self.keyword_idx("array", 1, Token::Array),
+                        _ => self.keyword_idx("as", 1, Token::As),
+                    }
+                }
                 's' => self.keyword("struct", Token::Struct),
                 'o' => self.keyword("oneof", Token::OneOf),
                 ';' => self.operator(Token::Semicolon),
@@ -309,7 +319,11 @@ mod lexer {
                         .identifier(&keyword[0..(i + start_index)])
                         .map(Token::Identifier);
                 }
-                self.adv_char()
+                self.adv_char();
+            }
+            let ch = self.peek_char();
+            if ch.is_alphanumeric() || ch == '_' {
+                return self.identifier(keyword).map(Token::Identifier);
             }
 
             Ok(token)
@@ -381,6 +395,15 @@ impl Ty {
     fn bitset(data: TyOneOf) -> Self {
         Self {
             kind: TyKind::BitSet(Box::new(data)),
+            ref_level: 0,
+        }
+    }
+    fn array(item_ty: Ty, capacity: Word) -> Self {
+        Self {
+            kind: TyKind::Array(Box::new(TyArray {
+                ty: item_ty,
+                capacity,
+            })),
             ref_level: 0,
         }
     }
@@ -643,6 +666,7 @@ enum Src {
     PopStack,
     R0,
     R0Offset(Word),
+    Indexed(Word),
 }
 
 struct State {
@@ -701,6 +725,7 @@ impl State {
             }
             Src::R0Offset(offset) => EA::R0Offset(offset),
             Src::R0 => EA::R0,
+            Src::Indexed(offset) => EA::Indexed(offset),
         };
         let (ir_dest, result) = match dest {
             Dest::Stack => {
@@ -944,6 +969,12 @@ impl Expr {
             Expr::Resolved(m) => &m.ty,
         }
     }
+    fn item_ty(&self) -> Compile<&Ty> {
+        match &self.ty_().kind {
+            TyKind::Array(a) => Ok(&a.ty),
+            _ => Err(CompileError::Expected("array")),
+        }
+    }
     fn struct_field(self, field_name: &str) -> Compile<Expr> {
         let ty = self.ty_();
         if ty.ref_level > 1 {}
@@ -1111,6 +1142,32 @@ fn base_expr(state: &mut State) -> CompileOpt<Expr> {
             let record = state.scope.get(&name)?;
             Expr::LValue(record)
         }
+        Token::Array => {
+            state.lexer.advance();
+            expect_token(state, Token::SqLeft)?;
+            let item_ty = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
+            expect_token(state, Token::SqRight)?;
+            expect_token(state, Token::CurlyLeft)?;
+            let mut capacity = 0;
+            let frame_offset = state.current_frame_size;
+            loop {
+                // TODO: need to keep stack clean between exprs
+                match expr(state)? {
+                    Some(mem) => {
+                        item_ty.check(&mem.ty)?;
+                        capacity += 1;
+                    }
+                    None => break,
+                };
+                if token(state, Token::Comma)?.is_none() {
+                    break;
+                };
+            }
+
+            expect_token(state, Token::CurlyRight)?;
+            let ty = Ty::array(item_ty, capacity);
+            Expr::Resolved(MemLocation::local(frame_offset, ty))
+        }
         _ => return Ok(None),
     };
     Ok(Some(res))
@@ -1125,8 +1182,23 @@ fn postfix_expr(state: &mut State) -> CompileOpt<Expr> {
         match state.lexer.peek()? {
             Token::SqLeft => {
                 state.lexer.advance();
-                expect_token(state, Token::SqRight)?;
-                left = left.deref(state)?
+                match state.lexer.peek()? {
+                    Token::SqRight => {
+                        state.lexer.advance();
+                        left = left.deref(state)?
+                    }
+                    _ => {
+                        let index = expr(state)?.ok_or(CompileError::Expected("expr"))?;
+                        expect_token(state, Token::SqRight)?;
+                        state.write(
+                            IR::Mov,
+                            MemLocation::r0(index.ty.clone()),
+                            index.pop(state)?,
+                        );
+                        let item_ty = left.item_ty()?.clone();
+                        left = Expr::Resolved(state.push(Src::Indexed(0), item_ty));
+                    }
+                }
             }
             Token::Dot => {
                 state.lexer.advance();
@@ -1817,6 +1889,25 @@ mod test {
                 Mov(PushStack, R0),
             ],
             1,
+        );
+    }
+
+    #[test]
+    fn array() {
+        expect_ir_result(
+            "
+                let xs := array[Int]{10, 20, 30};
+                xs[1]
+            ",
+            vec![
+                Mov(PushStack, Immediate(10)),
+                Mov(PushStack, Immediate(20)),
+                Mov(PushStack, Immediate(30)),
+                Mov(PushStack, Immediate(1)),
+                Mov(R0, PopStack),
+                Mov(PushStack, Indexed(0)),
+            ],
+            20,
         );
     }
 }
