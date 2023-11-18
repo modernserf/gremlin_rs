@@ -168,6 +168,7 @@ pub enum CompileError {
     DuplicateField,
     MissingField,
 }
+use CompileError::*;
 
 type Compile<T> = Result<T, CompileError>;
 type CompileOpt<T> = Result<Option<T>, CompileError>;
@@ -274,7 +275,7 @@ mod lexer {
                 }
                 'a'..='z' => self.identifier("").map(Token::Identifier),
                 'A'..='Z' => self.identifier("").map(Token::TypeIdentifier),
-                _ => Err(CompileError::UnexpectedChar),
+                _ => Err(UnexpectedChar),
             }
         }
         fn whitespace(&mut self) -> Compile<Token> {
@@ -415,7 +416,7 @@ impl Ty {
     }
     fn deref(&self) -> Compile<Self> {
         if self.ref_level == 0 {
-            Err(CompileError::InvalidDeref)
+            Err(InvalidDeref)
         } else {
             Ok(Self {
                 kind: self.kind.clone(),
@@ -427,12 +428,12 @@ impl Ty {
         if self == other {
             Ok(())
         } else {
-            Err(CompileError::ExpectedType(self.clone(), other.clone()))
+            Err(ExpectedType(self.clone(), other.clone()))
         }
     }
     fn cast(&self, other: Self) -> Compile<Self> {
         if self.size() != other.size() {
-            Err(CompileError::InvalidCast)
+            Err(InvalidCast)
         } else {
             Ok(other)
         }
@@ -480,7 +481,7 @@ impl TyStruct {
     }
     fn insert(&mut self, k: String, ty: Ty) -> Compile<()> {
         if self.fields.contains_key(&k) {
-            return Err(CompileError::DuplicateField);
+            return Err(DuplicateField);
         }
         let size = ty.size();
         self.fields.insert(
@@ -494,7 +495,7 @@ impl TyStruct {
         return Ok(());
     }
     fn get(&self, k: &str) -> Compile<&StructField> {
-        self.fields.get(k).ok_or(CompileError::MissingField)
+        self.fields.get(k).ok_or(MissingField)
     }
 }
 
@@ -502,17 +503,6 @@ impl TyStruct {
 struct StructField {
     ty: Ty,
     offset: Word,
-}
-
-impl StructField {
-    fn from_location(&self, loc: &MemLocation) -> MemLocation {
-        match loc.kind {
-            MemLocationKind::FrameOffset(parent_offset) => {
-                MemLocation::local(parent_offset - self.offset, self.ty.clone())
-            }
-            _ => unimplemented!(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -535,12 +525,12 @@ impl TyOneOf {
     }
     fn insert(&mut self, key: String, index: Word) -> Compile<()> {
         match self.members.insert(key, TyOneOfMember { index }) {
-            Some(_) => Err(CompileError::DuplicateField),
+            Some(_) => Err(DuplicateField),
             None => Ok(()),
         }
     }
     fn get(&self, key: &str) -> Compile<&TyOneOfMember> {
-        self.members.get(key).ok_or(CompileError::MissingField)
+        self.members.get(key).ok_or(MissingField)
     }
 }
 
@@ -596,6 +586,14 @@ impl MemLocation {
             ty: self.ty.cast(ty)?,
         })
     }
+    fn struct_field(self, field: &StructField) -> MemLocation {
+        match self.kind {
+            MemLocationKind::FrameOffset(parent_offset) => {
+                MemLocation::local(parent_offset - field.offset, field.ty.clone())
+            }
+            _ => unimplemented!(),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -619,7 +617,7 @@ impl Scope {
         self.data
             .get(key)
             .map(|t| t.clone())
-            .ok_or_else(|| CompileError::UnknownIdentifier(key.to_string()))
+            .ok_or_else(|| UnknownIdentifier(key.to_string()))
     }
     fn assign(&mut self, key: String, record: MemLocation) {
         self.data.insert(key, record);
@@ -644,7 +642,7 @@ impl TyScope {
         self.data
             .get(key)
             .map(|t| t.clone())
-            .ok_or_else(|| CompileError::UnknownTypeIdentifier(key.to_string()))
+            .ok_or_else(|| UnknownTypeIdentifier(key.to_string()))
     }
     fn assign(&mut self, key: String, record: Ty) {
         self.data.insert(key, record);
@@ -879,7 +877,7 @@ fn token(state: &mut State, token: Token) -> CompileOpt<()> {
 }
 
 fn expect_token(state: &mut State, tok: Token) -> Compile<()> {
-    token(state, tok.clone())?.ok_or(CompileError::ExpectedToken(tok))
+    token(state, tok.clone())?.ok_or(ExpectedToken(tok))
 }
 
 fn operator(state: &mut State) -> CompileOpt<Op> {
@@ -958,7 +956,7 @@ impl Expr {
                     src.pop(state)?,
                 )))
             }
-            _ => return Err(CompileError::Expected("lvalue")),
+            _ => return Err(Expected("lvalue")),
         }
     }
     fn ty_(&self) -> &Ty {
@@ -972,7 +970,7 @@ impl Expr {
     fn item_ty(&self) -> Compile<&Ty> {
         match &self.ty_().kind {
             TyKind::Array(a) => Ok(&a.ty),
-            _ => Err(CompileError::Expected("array")),
+            _ => Err(Expected("array")),
         }
     }
     fn struct_field(self, field_name: &str) -> Compile<Expr> {
@@ -981,13 +979,13 @@ impl Expr {
 
         let fields = match &self.ty_().kind {
             TyKind::Struct(fs) => fs,
-            _ => return Err(CompileError::Expected("struct")),
+            _ => return Err(Expected("struct")),
         };
         let field = fields.get(field_name)?.clone();
 
         match self {
             Expr::Constant(_, _) => unreachable!(),
-            Expr::LValue(m) => Ok(Expr::LValue(field.from_location(&m))),
+            Expr::LValue(m) => Ok(Expr::LValue(m.struct_field(&field))),
             Expr::DerefLValue(m, parent) => Ok(Expr::DerefLValue(
                 m,
                 StructField {
@@ -995,13 +993,13 @@ impl Expr {
                     offset: parent.offset + field.offset,
                 },
             )),
-            Expr::Resolved(m) => Ok(Expr::LValue(field.from_location(&m))),
+            Expr::Resolved(m) => Ok(Expr::LValue(m.struct_field(&field))),
         }
     }
     fn bitset_field(&self, field_name: &str) -> Compile<TyOneOfMember> {
         let fields = match &self.ty_().kind {
             TyKind::BitSet(fs) => fs,
-            _ => return Err(CompileError::Expected("bitset")),
+            _ => return Err(Expected("bitset")),
         };
         Ok(fields.get(field_name)?.clone())
     }
@@ -1013,7 +1011,7 @@ impl Expr {
                 let out = state.write_1(IR::LoadAddress, Dest::Stack, mem.to_src(), dest_ty, 0);
                 Ok(Expr::Resolved(out))
             }
-            _ => Err(CompileError::Expected("lvalue")),
+            _ => Err(Expected("lvalue")),
         }
     }
     fn deref(self, state: &mut State) -> Compile<Expr> {
@@ -1075,8 +1073,8 @@ fn struct_expr(state: &mut State, fields: &TyStruct) -> Compile<Expr> {
         };
         expect_token(state, Token::Colon)?;
         let field = fields.get(&field_name)?;
-        let field_loc = field.from_location(&base_res);
-        let value = expr(state)?.ok_or(CompileError::Expected("expr"))?;
+        let field_loc = base_res.clone().struct_field(field);
+        let value = expr(state)?.ok_or(Expected("expr"))?;
         field.ty.check(&value.ty)?;
         state.write(IR::Mov, field_loc, Src::PopStack);
 
@@ -1092,12 +1090,12 @@ fn oneof_member_expr(state: &mut State, name: &str) -> Compile<Expr> {
     let ty = state.ty_scope.get(name)?;
     let fields = match &ty.kind {
         TyKind::OneOf(fields) => fields,
-        _ => return Err(CompileError::Expected("oneof")),
+        _ => return Err(Expected("oneof")),
     };
     expect_token(state, Token::Dot)?;
     let member_name = match type_ident_token(state)? {
         Some(key) => key,
-        _ => return Err(CompileError::Expected("oneof member")),
+        _ => return Err(Expected("oneof member")),
     };
     let field = fields.get(&member_name)?;
     Ok(Expr::Constant(field.index, ty))
@@ -1107,7 +1105,7 @@ fn base_expr(state: &mut State) -> CompileOpt<Expr> {
     let res = match state.lexer.peek()? {
         Token::ParLeft => {
             state.lexer.advance();
-            let res = expr(state)?.ok_or(CompileError::Expected("expr"))?;
+            let res = expr(state)?.ok_or(Expected("expr"))?;
             expect_token(state, Token::ParRight)?;
             Expr::Resolved(res)
         }
@@ -1120,7 +1118,7 @@ fn base_expr(state: &mut State) -> CompileOpt<Expr> {
                     match &ty.kind {
                         TyKind::Struct(fields) => struct_expr(state, fields)?,
                         TyKind::OneOf(fields) => bitset_expr(state, fields)?,
-                        _ => return Err(CompileError::Expected("struct")),
+                        _ => return Err(Expected("struct")),
                     }
                 }
             }
@@ -1145,7 +1143,7 @@ fn base_expr(state: &mut State) -> CompileOpt<Expr> {
         Token::Array => {
             state.lexer.advance();
             expect_token(state, Token::SqLeft)?;
-            let item_ty = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
+            let item_ty = type_expr(state)?.ok_or(Expected("type expr"))?;
             expect_token(state, Token::SqRight)?;
             expect_token(state, Token::CurlyLeft)?;
             let mut capacity = 0;
@@ -1188,7 +1186,7 @@ fn postfix_expr(state: &mut State) -> CompileOpt<Expr> {
                         left = left.deref(state)?
                     }
                     _ => {
-                        let index = expr(state)?.ok_or(CompileError::Expected("expr"))?;
+                        let index = expr(state)?.ok_or(Expected("expr"))?;
                         expect_token(state, Token::SqRight)?;
                         state.write(
                             IR::Mov,
@@ -1215,7 +1213,7 @@ fn postfix_expr(state: &mut State) -> CompileOpt<Expr> {
                         state.write(IR::BitTest, left_res, Src::Immediate(field.index));
                         left = Expr::Resolved(state.push(Src::R0, Ty::bool()));
                     }
-                    _ => return Err(CompileError::Expected("field")),
+                    _ => return Err(Expected("field")),
                 }
             }
             _ => return Ok(Some(left)),
@@ -1230,14 +1228,14 @@ fn unary_op_expr(state: &mut State) -> CompileOpt<Expr> {
             state.lexer.advance();
             let tgt = state.push(Src::Immediate(0), Ty::int());
             let operand = unary_op_expr(state)?
-                .ok_or(CompileError::Expected("expr"))?
+                .ok_or(Expected("expr"))?
                 .resolve(state);
             let out = state.write(IR::Sub, tgt, operand.pop(state)?);
             Expr::Resolved(out)
         }
         Token::Ampersand => {
             state.lexer.advance();
-            let operand = unary_op_expr(state)?.ok_or(CompileError::Expected("expr"))?;
+            let operand = unary_op_expr(state)?.ok_or(Expected("expr"))?;
             operand.add_ref(state)?
         }
         _ => return postfix_expr(state),
@@ -1256,7 +1254,7 @@ fn op_expr(state: &mut State) -> CompileOpt<Expr> {
         match operator(state)? {
             Some(op) => {
                 op_parser.next(state, op)?;
-                let res = unary_op_expr(state)?.ok_or(CompileError::Expected("expr"))?;
+                let res = unary_op_expr(state)?.ok_or(Expected("expr"))?;
                 op_parser.push_rhs(res);
             }
             None => return Ok(Some(op_parser.unwind(state)?)),
@@ -1272,7 +1270,7 @@ fn assign_expr(state: &mut State) -> CompileOpt<Expr> {
     if token(state, Token::ColonEq)?.is_none() {
         return Ok(Some(left));
     }
-    let expr = op_expr(state)?.ok_or(CompileError::Expected("expr"))?;
+    let expr = op_expr(state)?.ok_or(Expected("expr"))?;
     left.assign(state, expr).map(Some)
 }
 
@@ -1284,7 +1282,7 @@ fn as_expr(state: &mut State) -> CompileOpt<Expr> {
     if token(state, Token::As)?.is_none() {
         return Ok(Some(value));
     }
-    let ty = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
+    let ty = type_expr(state)?.ok_or(Expected("type expr"))?;
     Ok(Some(value.cast_ty(ty)?))
 }
 
@@ -1324,7 +1322,7 @@ fn struct_ty(state: &mut State) -> Compile<Ty> {
             None => break,
         };
         expect_token(state, Token::Colon)?;
-        let ty = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
+        let ty = type_expr(state)?.ok_or(Expected("type expr"))?;
         fields.insert(key, ty)?;
 
         if token(state, Token::Comma)?.is_none() {
@@ -1384,23 +1382,23 @@ fn type_expr(state: &mut State) -> CompileOpt<Ty> {
 // ### Statements
 
 fn type_def_stmt(state: &mut State) -> Compile<()> {
-    let tb = type_binding(state)?.ok_or(CompileError::Expected("type binding"))?;
+    let tb = type_binding(state)?.ok_or(Expected("type binding"))?;
     expect_token(state, Token::ColonEq)?;
-    let te = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
+    let te = type_expr(state)?.ok_or(Expected("type expr"))?;
     state.ty_scope.assign(tb, te);
     Ok(())
 }
 
 fn let_stmt(state: &mut State) -> Compile<()> {
-    let b = binding(state)?.ok_or(CompileError::Expected("binding"))?;
+    let b = binding(state)?.ok_or(Expected("binding"))?;
     let bind_ty = if token(state, Token::Colon)?.is_some() {
-        let ty = type_expr(state)?.ok_or(CompileError::Expected("type expr"))?;
+        let ty = type_expr(state)?.ok_or(Expected("type expr"))?;
         Some(ty)
     } else {
         None
     };
     expect_token(state, Token::ColonEq)?;
-    let rec = expr(state)?.ok_or(CompileError::Expected("expr"))?;
+    let rec = expr(state)?.ok_or(Expected("expr"))?;
     match bind_ty {
         Some(b) => b.check(&rec.ty)?,
         None => {}
@@ -1499,7 +1497,7 @@ mod test {
 
     #[test]
     fn unexpected_char() {
-        expect_err(" £ ", CompileError::UnexpectedChar)
+        expect_err(" £ ", UnexpectedChar)
     }
 
     #[test]
@@ -1548,7 +1546,7 @@ mod test {
             "
             let x : Bool := 1;
         ",
-            CompileError::ExpectedType(Ty::bool(), Ty::int()),
+            ExpectedType(Ty::bool(), Ty::int()),
         )
     }
 
@@ -1595,14 +1593,8 @@ mod test {
 
     #[test]
     fn typechecked_arithmetic() {
-        expect_err(
-            "1 + true",
-            CompileError::ExpectedType(Ty::int(), Ty::bool()),
-        );
-        expect_err(
-            "true + 1",
-            CompileError::ExpectedType(Ty::int(), Ty::bool()),
-        );
+        expect_err("1 + true", ExpectedType(Ty::int(), Ty::bool()));
+        expect_err("true + 1", ExpectedType(Ty::int(), Ty::bool()));
     }
 
     #[test]
