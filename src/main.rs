@@ -111,16 +111,21 @@ impl OpParser {
         }
     }
     fn apply(&mut self, writer: &mut Writer, op: Op) -> Compile<()> {
-        // TODO: constant folding
         let right_expr = self.operands.pop().expect("rhs");
         let left_expr = self.operands.pop().expect("lhs");
         let ty = op.check_ty(&left_expr.ty, &right_expr.ty)?;
 
-        let left = left_expr.resolve(writer);
-        let right = right_expr.resolve(writer);
-        writer.from_stack(op.ir(), &left.loc, &right.loc);
+        let result = match (left_expr.get_constant(), right_expr.get_constant()) {
+            (Some(left), Some(right)) => Expr::constant(ty, op.inline(left, right)),
+            _ => {
+                let left = left_expr.resolve(writer);
+                let right = right_expr.resolve(writer);
+                writer.take_from(op.ir(), &left.loc, right.loc);
+                Expr::resolved(ty, left.loc)
+            }
+        };
 
-        self.operands.push(Expr::resolved(ty, left.loc));
+        self.operands.push(result);
         Ok(())
     }
     fn unwind(&mut self, writer: &mut Writer) -> Compile<Expr> {
@@ -178,7 +183,13 @@ impl Op {
         Ty::int().check(right)?;
         Ok(Ty::int())
     }
-
+    fn inline(&self, left: Word, right: Word) -> Word {
+        match self {
+            Op::Add => left + right,
+            Op::Mul => left * right,
+            Op::Sub => left - right,
+        }
+    }
     fn ir(&self) -> IROp {
         match self {
             Op::Add => IR::Add,
@@ -196,9 +207,6 @@ struct ResolvedExpr {
 impl ResolvedExpr {
     fn new(ty: Ty, loc: MemLocation) -> Self {
         Self { ty, loc }
-    }
-    fn to_expr(self) -> Expr {
-        Expr::resolved(self.ty, self.loc)
     }
 }
 
@@ -257,14 +265,14 @@ impl Expr {
         match self.kind {
             ExprKind::LValue(target) => {
                 let src = value.resolve(writer);
-                writer.from_stack(IR::Mov, &target, &src.loc);
+                writer.take_from(IR::Mov, &target, src.loc);
                 Ok(Expr::resolved(self.ty, target))
             }
             ExprKind::DerefLValue(target, field) => {
                 let src = value.resolve(writer);
                 writer.write(IR::Mov, &MemLocation::r0(), target.to_src());
                 let out = MemLocation::r0_offset(field);
-                writer.from_stack(IR::Mov, &out, &src.loc);
+                writer.take_from(IR::Mov, &out, src.loc);
                 Ok(Expr::resolved(self.ty, out))
             }
             _ => return Err(Expected("lvalue")),
@@ -302,7 +310,7 @@ impl Expr {
             ExprKind::Resolved(mem) => {
                 let dest = MemLocation::r0();
                 let ty = self.ty.deref()?;
-                writer.from_stack(IR::Mov, &dest, &mem);
+                writer.take_from(IR::Mov, &dest, mem);
                 let loc = writer.to_stack(IR::Mov, Src::R0Offset(0), &ty);
                 Ok(Expr::resolved(ty, loc))
             }
@@ -324,9 +332,10 @@ impl Expr {
         })
     }
     // TODO: can evaluation of these be delayed?
-    fn index(self, index: ResolvedExpr, writer: &mut Writer) -> Compile<Self> {
+    fn index(self, index: Expr, writer: &mut Writer) -> Compile<Self> {
         let item_ty = self.ty.index_ty(&index.ty)?.clone();
-        writer.from_stack(IR::Mov, &MemLocation::r0(), &index.loc);
+        let index_res = index.resolve(writer);
+        writer.take_from(IR::Mov, &MemLocation::r0(), index_res.loc);
         let loc = writer.to_stack(IR::Mov, Src::Indexed(0), &item_ty);
         Ok(Expr::resolved(item_ty, loc))
     }
@@ -338,15 +347,25 @@ impl Expr {
         let loc = writer.to_stack(IR::Mov, Src::R0, &ty);
         Ok(Expr::resolved(ty, loc))
     }
-
-    // TODO: Op table, NEG IR, defer evaluation
+    fn get_constant(&self) -> Option<Word> {
+        match &self.kind {
+            ExprKind::Constant(value) => Some(*value),
+            _ => None,
+        }
+    }
+    // TODO: unary op table
     fn negate(self, writer: &mut Writer) -> Compile<Self> {
         let ty = Ty::int();
-        let tgt = writer.to_stack(IR::Mov, Src::Immediate(0), &ty);
-        let operand = self.resolve(writer);
-        ty.check(&operand.ty)?;
-        writer.from_stack(IR::Sub, &tgt, &operand.loc);
-        Ok(Expr::resolved(ty, tgt))
+        ty.check(&self.ty)?;
+        match self.get_constant() {
+            Some(value) => Ok(Self::constant(self.ty, -value)),
+            None => {
+                let tgt = writer.to_stack(IR::Mov, Src::Immediate(0), &ty);
+                let operand = self.resolve(writer);
+                writer.take_from(IR::Sub, &tgt, operand.loc);
+                Ok(Self::resolved(ty, tgt))
+            }
+        }
     }
 }
 
@@ -360,11 +379,12 @@ impl StructBuilder {
         let loc = writer.allocate(&ty);
         Self { loc, ty }
     }
-    fn field(&self, field_name: &str, value: ResolvedExpr, writer: &mut Writer) -> Compile<()> {
+    fn field(&self, field_name: &str, value: Expr, writer: &mut Writer) -> Compile<()> {
         let field = self.ty.struct_field(&field_name)?;
         let field_loc = self.loc.struct_field(&field);
         field.ty.check(&value.ty)?;
-        writer.from_stack(IR::Mov, &field_loc, &value.loc);
+        let resolved_value = value.resolve(writer);
+        writer.take_from(IR::Mov, &field_loc, resolved_value.loc);
         Ok(())
     }
     fn resolve(self) -> Expr {
@@ -386,10 +406,11 @@ impl ArrayBuilder {
             capacity: 0,
         }
     }
-    fn push(&mut self, value: ResolvedExpr) -> Compile<()> {
+    fn push(&mut self, value: Expr, writer: &mut Writer) -> Compile<()> {
         self.item_ty.check(&value.ty)?;
         self.capacity += 1;
-        self.loc = self.loc.append(&value.loc);
+        let value_res = value.resolve(writer);
+        self.loc = self.loc.append(&value_res.loc);
         Ok(())
     }
     fn resolve(self) -> Expr {
@@ -473,7 +494,7 @@ impl Compiler {
         loop {
             // TODO: expr must clean up stack when resolving
             match self.expr()? {
-                Some(p) => builder.push(p)?,
+                Some(p) => builder.push(p, &mut self.writer)?,
                 None => break,
             };
             if self.lexer.token(Token::Comma)?.is_none() {
@@ -488,9 +509,9 @@ impl Compiler {
         let res = match self.lexer.peek()? {
             Token::ParLeft => {
                 self.lexer.advance();
-                let res = self.expect_expr()?.to_expr();
+                let expr = self.expect_expr()?;
                 self.lexer.expect_token(Token::ParRight)?;
-                res
+                expr
             }
             Token::TypeIdentifier(name) => {
                 self.lexer.advance();
@@ -546,7 +567,7 @@ impl Compiler {
                 Token::SqLeft => {
                     self.lexer.advance();
                     left = match self.expr()? {
-                        Some(pair) => left.index(pair, &mut self.writer)?,
+                        Some(expr) => left.index(expr, &mut self.writer)?,
                         None => left.deref(&mut self.writer)?,
                     };
                     self.lexer.expect_token(Token::SqRight)?;
@@ -581,6 +602,12 @@ impl Compiler {
                 self.lexer.advance();
                 let operand = self.expect_unary_op_expr()?;
                 operand.add_ref(&mut self.writer)?
+            }
+            Token::Volatile => {
+                self.lexer.advance();
+                let operand = self.expect_unary_op_expr()?;
+                let res = operand.resolve(&mut self.writer);
+                Expr::resolved(res.ty, res.loc)
             }
             _ => return self.postfix_expr(),
         };
@@ -634,11 +661,11 @@ impl Compiler {
         Ok(Some(value.cast_ty(ty)?))
     }
 
-    fn expr(&mut self) -> CompileOpt<ResolvedExpr> {
-        Ok(self.as_expr()?.map(|e| e.resolve(&mut self.writer)))
+    fn expr(&mut self) -> CompileOpt<Expr> {
+        self.as_expr()
     }
 
-    fn expect_expr(&mut self) -> Compile<ResolvedExpr> {
+    fn expect_expr(&mut self) -> Compile<Expr> {
         self.expr()?.ok_or(Expected("expr"))
     }
 
@@ -742,7 +769,7 @@ impl Compiler {
             None
         };
         self.lexer.expect_token(Token::ColonEq)?;
-        let expr = self.expect_expr()?;
+        let expr = self.expect_expr()?.resolve(&mut self.writer);
         match bind_ty {
             Some(b) => b.check(&expr.ty)?,
             None => {}
@@ -762,7 +789,10 @@ impl Compiler {
                 self.type_def_stmt()?;
             }
             _ => {
-                self.expr()?;
+                match self.expr()? {
+                    Some(expr) => expr.resolve(&mut self.writer),
+                    None => return Ok(None),
+                };
             }
         };
         Ok(Some(()))
@@ -796,7 +826,6 @@ mod test {
     fn expect_ir(code: &str, ir: Vec<IR>) {
         assert_eq!(Compiler::program(code), Ok(ir));
     }
-    #[allow(dead_code)]
     fn expect_result(code: &str, value: Word) {
         let ir = Compiler::program(code).expect("compile");
         let res = Runtime::eval(&ir);
@@ -945,8 +974,8 @@ mod test {
 
     #[test]
     fn parens() {
-        expect_ir(
-            "(3) * (4 + 5)",
+        expect_ir_result(
+            "volatile 3 * (volatile 4 + volatile 5)",
             vec![
                 Mov(PushStack, Immediate(3)),
                 Mov(PushStack, Immediate(4)),
@@ -954,13 +983,15 @@ mod test {
                 Add(StackOffset(0), PopStack),
                 Mult(StackOffset(0), PopStack),
             ],
-        )
+            27,
+        );
+        expect_result("3 * (4 + 5)", 27);
     }
 
     #[test]
     fn precedence() {
         expect_ir_result(
-            "(4) + (5) * (3)",
+            "volatile 4 + volatile 5 * volatile 3",
             vec![
                 Mov(PushStack, Immediate(4)),
                 Mov(PushStack, Immediate(5)),
@@ -970,16 +1001,31 @@ mod test {
             ],
             19,
         );
+        expect_result("4 + 5 * 3", 19);
     }
 
     #[test]
     fn negation() {
+        expect_ir_result("-3", vec![Mov(PushStack, Immediate(-3))], -3);
+
         expect_ir_result(
-            "-3",
+            "let a := 3; -a",
             vec![
-                Mov(PushStack, Immediate(0)),
                 Mov(PushStack, Immediate(3)),
+                Mov(PushStack, Immediate(0)),
+                Mov(PushStack, StackOffset(1)),
                 Sub(StackOffset(0), PopStack),
+            ],
+            -3,
+        );
+
+        // TODO: this should clean up
+        expect_ir_result(
+            "-(volatile 3)",
+            vec![
+                Mov(PushStack, Immediate(3)),
+                Mov(PushStack, Immediate(0)),
+                Sub(StackOffset(0), StackOffset(1)),
             ],
             -3,
         );
@@ -991,7 +1037,7 @@ mod test {
             "
             let x := 1;
             let ptr := &x;
-            (ptr)[]
+            (volatile ptr)[]
         ",
             vec![
                 Mov(PushStack, Immediate(1)),
@@ -1003,10 +1049,7 @@ mod test {
             ],
             1,
         );
-    }
 
-    #[test]
-    fn deref_lvalue() {
         expect_ir_result(
             "
             let x := 1;
@@ -1046,14 +1089,7 @@ mod test {
 
     #[test]
     fn type_casting() {
-        expect_ir(
-            "(true as Int) + 2",
-            vec![
-                Mov(PushStack, Immediate(1)),
-                Mov(PushStack, Immediate(2)),
-                Add(StackOffset(0), PopStack),
-            ],
-        )
+        expect_result("(true as Int) +  2", 3);
     }
 
     #[test]
@@ -1073,7 +1109,7 @@ mod test {
             "
             type Point := struct { x: Int, y: Int };
             let p := Point { x: 1, y: 2 };
-            (p).x
+            (volatile p).x
         ",
             vec![
                 // allocate
@@ -1128,7 +1164,7 @@ mod test {
             let p := Point { x: 1, y: 2 };
             let ptr := &p.x;
             p.x := 5;
-            (ptr)[]
+            (volatile ptr)[]
         ",
             vec![
                 //  Point { x: 1, y: 2 };

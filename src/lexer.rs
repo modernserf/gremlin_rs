@@ -14,6 +14,7 @@ pub enum Token {
     Struct,
     Array,
     OneOf,
+    Volatile,
     Colon,
     Semicolon,
     Comma,
@@ -121,6 +122,7 @@ impl Lexer {
             }
             's' => self.keyword("struct", Token::Struct),
             'o' => self.keyword("oneof", Token::OneOf),
+            'v' => self.keyword("volatile", Token::Volatile),
             ';' => self.punc(Token::Semicolon),
             ',' => self.punc(Token::Comma),
             '.' => self.punc(Token::Dot),

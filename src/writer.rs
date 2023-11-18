@@ -111,11 +111,13 @@ impl Writer {
         self.write(op, &loc, src);
         loc
     }
-    pub fn from_stack(&mut self, op: IROp, dest: &MemLocation, src: &MemLocation) {
+    pub fn take_from(&mut self, op: IROp, dest: &MemLocation, src: MemLocation) {
         match src.kind {
             MemLocationKind::FrameOffset(frame_offset) => {
                 let stack_offset = self.current_frame_size - frame_offset;
-                assert!(stack_offset == 0);
+                if stack_offset > 0 {
+                    return self.write(op, dest, src.to_src());
+                }
             }
             _ => unimplemented!(),
         };
