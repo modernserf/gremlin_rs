@@ -118,9 +118,9 @@ impl OpParser {
 
         let left = left_expr.resolve(writer);
         let right = right_expr.resolve(writer);
-        writer.from_stack(op.ir(), &left, &right);
+        writer.from_stack(op.ir(), &left.loc, &right.loc);
 
-        self.operands.push(Expr::resolved(ty, left));
+        self.operands.push(Expr::resolved(ty, left.loc));
         Ok(())
     }
     fn unwind(&mut self, writer: &mut Writer) -> Compile<Expr> {
@@ -188,6 +188,20 @@ impl Op {
     }
 }
 
+struct ResolvedExpr {
+    loc: MemLocation,
+    ty: Ty,
+}
+
+impl ResolvedExpr {
+    fn new(ty: Ty, loc: MemLocation) -> Self {
+        Self { ty, loc }
+    }
+    fn to_expr(self) -> Expr {
+        Expr::resolved(self.ty, self.loc)
+    }
+}
+
 #[derive(Debug)]
 struct Expr {
     kind: ExprKind,
@@ -227,8 +241,8 @@ impl Expr {
             kind: ExprKind::Resolved(loc),
         }
     }
-    fn resolve(self, writer: &mut Writer) -> MemLocation {
-        match self.kind {
+    fn resolve(self, writer: &mut Writer) -> ResolvedExpr {
+        let loc = match self.kind {
             ExprKind::Constant(value) => writer.to_stack(IR::Mov, Src::Immediate(value), &self.ty),
             ExprKind::Resolved(loc) => loc,
             ExprKind::LValue(loc) => writer.to_stack(IR::Mov, loc.to_src(), &self.ty),
@@ -236,20 +250,21 @@ impl Expr {
                 writer.write(IR::Mov, &MemLocation::r0(), loc.to_src());
                 writer.to_stack(IR::Mov, Src::R0Offset(field.offset), &field.ty)
             }
-        }
+        };
+        ResolvedExpr::new(self.ty, loc)
     }
     fn assign(self, writer: &mut Writer, value: Expr) -> Compile<Expr> {
         match self.kind {
             ExprKind::LValue(target) => {
                 let src = value.resolve(writer);
-                writer.from_stack(IR::Mov, &target, &src);
+                writer.from_stack(IR::Mov, &target, &src.loc);
                 Ok(Expr::resolved(self.ty, target))
             }
             ExprKind::DerefLValue(target, field) => {
                 let src = value.resolve(writer);
                 writer.write(IR::Mov, &MemLocation::r0(), target.to_src());
                 let out = MemLocation::r0_offset(field);
-                writer.from_stack(IR::Mov, &out, &src);
+                writer.from_stack(IR::Mov, &out, &src.loc);
                 Ok(Expr::resolved(self.ty, out))
             }
             _ => return Err(Expected("lvalue")),
@@ -308,6 +323,79 @@ impl Expr {
             kind: self.kind,
         })
     }
+    // TODO: can evaluation of these be delayed?
+    fn index(self, index: ResolvedExpr, writer: &mut Writer) -> Compile<Self> {
+        let item_ty = self.ty.index_ty(&index.ty)?.clone();
+        writer.from_stack(IR::Mov, &MemLocation::r0(), &index.loc);
+        let loc = writer.to_stack(IR::Mov, Src::Indexed(0), &item_ty);
+        Ok(Expr::resolved(item_ty, loc))
+    }
+    fn bitset_field(self, field_name: &str, writer: &mut Writer) -> Compile<Self> {
+        let field = self.ty.oneof_member(&field_name)?;
+        let left_res = self.resolve(writer);
+        writer.write(IR::BitTest, &left_res.loc, Src::Immediate(field.index));
+        let ty = Ty::bool();
+        let loc = writer.to_stack(IR::Mov, Src::R0, &ty);
+        Ok(Expr::resolved(ty, loc))
+    }
+
+    // TODO: Op table, NEG IR, defer evaluation
+    fn negate(self, writer: &mut Writer) -> Compile<Self> {
+        let ty = Ty::int();
+        let tgt = writer.to_stack(IR::Mov, Src::Immediate(0), &ty);
+        let operand = self.resolve(writer);
+        ty.check(&operand.ty)?;
+        writer.from_stack(IR::Sub, &tgt, &operand.loc);
+        Ok(Expr::resolved(ty, tgt))
+    }
+}
+
+struct StructBuilder {
+    ty: Ty,
+    loc: MemLocation,
+}
+
+impl StructBuilder {
+    fn allocate(ty: Ty, writer: &mut Writer) -> Self {
+        let loc = writer.allocate(&ty);
+        Self { loc, ty }
+    }
+    fn field(&self, field_name: &str, value: ResolvedExpr, writer: &mut Writer) -> Compile<()> {
+        let field = self.ty.struct_field(&field_name)?;
+        let field_loc = self.loc.struct_field(&field);
+        field.ty.check(&value.ty)?;
+        writer.from_stack(IR::Mov, &field_loc, &value.loc);
+        Ok(())
+    }
+    fn resolve(self) -> Expr {
+        Expr::resolved(self.ty, self.loc)
+    }
+}
+
+struct ArrayBuilder {
+    item_ty: Ty,
+    loc: MemLocation,
+    capacity: Word,
+}
+
+impl ArrayBuilder {
+    fn init(item_ty: Ty, writer: &mut Writer) -> Self {
+        Self {
+            item_ty,
+            loc: writer.allocate_zero(),
+            capacity: 0,
+        }
+    }
+    fn push(&mut self, value: ResolvedExpr) -> Compile<()> {
+        self.item_ty.check(&value.ty)?;
+        self.capacity += 1;
+        self.loc = self.loc.append(&value.loc);
+        Ok(())
+    }
+    fn resolve(self) -> Expr {
+        let ty = Ty::array(self.item_ty, self.capacity);
+        Expr::resolved(ty, self.loc)
+    }
 }
 
 struct Compiler {
@@ -346,24 +434,21 @@ impl Compiler {
     }
 
     fn struct_expr(&mut self, ty: Ty) -> Compile<Expr> {
-        let base_res: MemLocation = self.writer.allocate(&ty);
+        let builder = StructBuilder::allocate(ty, &mut self.writer);
         loop {
             let field_name = match self.lexer.ident_token()? {
                 Some(s) => s,
                 None => break,
             };
             self.lexer.expect_token(Token::Colon)?;
-            let field = ty.struct_field(&field_name)?;
-            let field_loc = base_res.clone().struct_field(&field);
-            let (field_ty, value) = self.expect_expr()?;
-            field.ty.check(&field_ty)?;
-            self.writer.from_stack(IR::Mov, &field_loc, &value);
+            let pair = self.expect_expr()?;
+            builder.field(&field_name, pair, &mut self.writer)?;
 
             if self.lexer.token(Token::Comma)?.is_none() {
                 break;
             }
         }
-        Ok(Expr::resolved(ty, base_res))
+        Ok(builder.resolve())
     }
 
     fn oneof_member_expr(&mut self, name: &str) -> Compile<Expr> {
@@ -379,13 +464,33 @@ impl Compiler {
         Ok(Expr::constant(ty, member.index))
     }
 
+    fn array_expr(&mut self) -> Compile<Expr> {
+        self.lexer.expect_token(Token::SqLeft)?;
+        let item_ty = self.expect_type_expr()?;
+        self.lexer.expect_token(Token::SqRight)?;
+        self.lexer.expect_token(Token::CurlyLeft)?;
+        let mut builder = ArrayBuilder::init(item_ty, &mut self.writer);
+        loop {
+            // TODO: expr must clean up stack when resolving
+            match self.expr()? {
+                Some(p) => builder.push(p)?,
+                None => break,
+            };
+            if self.lexer.token(Token::Comma)?.is_none() {
+                break;
+            };
+        }
+        self.lexer.expect_token(Token::CurlyRight)?;
+        Ok(builder.resolve())
+    }
+
     fn base_expr(&mut self) -> CompileOpt<Expr> {
         let res = match self.lexer.peek()? {
             Token::ParLeft => {
                 self.lexer.advance();
-                let (ty, res) = self.expect_expr()?;
+                let res = self.expect_expr()?.to_expr();
                 self.lexer.expect_token(Token::ParRight)?;
-                Expr::resolved(ty, res)
+                res
             }
             Token::TypeIdentifier(name) => {
                 self.lexer.advance();
@@ -405,6 +510,10 @@ impl Compiler {
                     _ => return Err(Expected("struct or bitset")),
                 }
             }
+            Token::Array => {
+                self.lexer.advance();
+                self.array_expr()?
+            }
             Token::Integer(int) => {
                 self.lexer.advance();
                 Expr::constant(Ty::int(), int)
@@ -419,35 +528,8 @@ impl Compiler {
             }
             Token::Identifier(name) => {
                 self.lexer.advance();
-                let (ty, record) = self.scope.get(&name)?;
-                Expr::lvalue(ty, record)
-            }
-            Token::Array => {
-                self.lexer.advance();
-                self.lexer.expect_token(Token::SqLeft)?;
-                let item_ty = self.expect_type_expr()?;
-                self.lexer.expect_token(Token::SqRight)?;
-                self.lexer.expect_token(Token::CurlyLeft)?;
-                let mut capacity = 0;
-                let frame_offset = self.writer.get_current_frame_size();
-                loop {
-                    // TODO: need to keep stack clean between exprs
-                    match self.expr()? {
-                        Some((ty, _)) => {
-                            item_ty.check(&ty)?;
-                            capacity += 1;
-                        }
-                        None => break,
-                    };
-                    if self.lexer.token(Token::Comma)?.is_none() {
-                        break;
-                    };
-                }
-
-                self.lexer.expect_token(Token::CurlyRight)?;
-                let ty = Ty::array(item_ty, capacity);
-                let size = ty.size();
-                Expr::resolved(ty, MemLocation::local(frame_offset, size))
+                let (ty, loc) = self.scope.get(&name)?;
+                Expr::lvalue(ty, loc)
             }
             _ => return Ok(None),
         };
@@ -463,39 +545,22 @@ impl Compiler {
             match self.lexer.peek()? {
                 Token::SqLeft => {
                     self.lexer.advance();
-                    match self.lexer.peek()? {
-                        Token::SqRight => {
-                            self.lexer.advance();
-                            left = left.deref(&mut self.writer)?
-                        }
-                        _ => {
-                            let (index_ty, index) = self.expect_expr()?;
-                            Ty::int().check(&index_ty)?;
-                            self.lexer.expect_token(Token::SqRight)?;
-                            self.writer.from_stack(IR::Mov, &MemLocation::r0(), &index);
-                            let item_ty = left.ty.item_ty()?.clone();
-                            let loc = self.writer.to_stack(IR::Mov, Src::Indexed(0), &item_ty);
-                            left = Expr::resolved(item_ty, loc);
-                        }
-                    }
+                    left = match self.expr()? {
+                        Some(pair) => left.index(pair, &mut self.writer)?,
+                        None => left.deref(&mut self.writer)?,
+                    };
+                    self.lexer.expect_token(Token::SqRight)?;
                 }
                 Token::Dot => {
                     self.lexer.advance();
-                    match self.lexer.peek()? {
+                    left = match self.lexer.peek()? {
                         Token::Identifier(field_name) => {
                             self.lexer.advance();
-                            let next = left.struct_field(&field_name)?;
-                            left = next
+                            left.struct_field(&field_name)?
                         }
                         Token::TypeIdentifier(field_name) => {
                             self.lexer.advance();
-                            let field = left.ty.oneof_member(&field_name)?;
-                            let left_res = left.resolve(&mut self.writer);
-                            self.writer
-                                .write(IR::BitTest, &left_res, Src::Immediate(field.index));
-                            let ty = Ty::bool();
-                            let loc = self.writer.to_stack(IR::Mov, Src::R0, &ty);
-                            left = Expr::resolved(ty, loc);
+                            left.bitset_field(&field_name, &mut self.writer)?
                         }
                         _ => return Err(Expected("field")),
                     }
@@ -508,13 +573,9 @@ impl Compiler {
     fn unary_op_expr(&mut self) -> CompileOpt<Expr> {
         let out = match self.lexer.peek()? {
             Token::Minus => {
-                // TODO: NEG IR, constant folding
                 self.lexer.advance();
-                let ty = Ty::int();
-                let tgt = self.writer.to_stack(IR::Mov, Src::Immediate(0), &ty);
-                let operand = self.expect_unary_op_expr()?.resolve(&mut self.writer);
-                self.writer.from_stack(IR::Sub, &tgt, &operand);
-                Expr::resolved(ty, tgt)
+                let operand = self.expect_unary_op_expr()?;
+                operand.negate(&mut self.writer)?
             }
             Token::Ampersand => {
                 self.lexer.advance();
@@ -573,13 +634,11 @@ impl Compiler {
         Ok(Some(value.cast_ty(ty)?))
     }
 
-    fn expr(&mut self) -> CompileOpt<(Ty, MemLocation)> {
-        Ok(self
-            .as_expr()?
-            .map(|e| (e.ty.clone(), e.resolve(&mut self.writer))))
+    fn expr(&mut self) -> CompileOpt<ResolvedExpr> {
+        Ok(self.as_expr()?.map(|e| e.resolve(&mut self.writer)))
     }
 
-    fn expect_expr(&mut self) -> Compile<(Ty, MemLocation)> {
+    fn expect_expr(&mut self) -> Compile<ResolvedExpr> {
         self.expr()?.ok_or(Expected("expr"))
     }
 
@@ -683,12 +742,12 @@ impl Compiler {
             None
         };
         self.lexer.expect_token(Token::ColonEq)?;
-        let (ty, rec) = self.expect_expr()?;
+        let expr = self.expect_expr()?;
         match bind_ty {
-            Some(b) => b.check(&ty)?,
+            Some(b) => b.check(&expr.ty)?,
             None => {}
         };
-        self.scope.assign(binding, rec, ty);
+        self.scope.assign(binding, expr.loc, expr.ty);
         Ok(())
     }
 

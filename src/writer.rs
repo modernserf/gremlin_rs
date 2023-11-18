@@ -33,10 +33,24 @@ impl MemLocation {
             _ => unimplemented!(),
         }
     }
-    pub fn struct_field(self, field: &StructField) -> MemLocation {
+    pub fn struct_field(&self, field: &StructField) -> MemLocation {
         match self.kind {
             MemLocationKind::FrameOffset(parent_offset) => {
                 MemLocation::local(parent_offset - field.offset, field.ty.size())
+            }
+            _ => unimplemented!(),
+        }
+    }
+    pub fn append(&self, other: &MemLocation) -> MemLocation {
+        match (self.kind, self.size, other.kind, other.size) {
+            (
+                MemLocationKind::FrameOffset(left_loc),
+                left_size,
+                MemLocationKind::FrameOffset(right_loc),
+                right_size,
+            ) => {
+                assert!(right_loc - right_size == left_loc);
+                Self::local(right_loc, left_size + right_size)
             }
             _ => unimplemented!(),
         }
@@ -83,15 +97,7 @@ impl Writer {
     pub fn done(self) -> Vec<IR> {
         self.output
     }
-    pub fn get_current_frame_size(&self) -> Word {
-        self.current_frame_size
-    }
     pub fn write(&mut self, op: IROp, dest: &MemLocation, src: Src) {
-        if dest.size == 1 {
-            self.write_inner(op, dest.to_dest(), src, 0);
-            return;
-        }
-
         for i in 0..dest.size {
             self.write_inner(op, dest.to_dest(), src, i);
         }
@@ -109,13 +115,13 @@ impl Writer {
         match src.kind {
             MemLocationKind::FrameOffset(frame_offset) => {
                 let stack_offset = self.current_frame_size - frame_offset;
-                if stack_offset == 0 && dest.size == 1 {
-                    self.write_inner(op, dest.to_dest(), Src::PopStack, 0);
-                    return;
-                }
-                unimplemented!()
+                assert!(stack_offset == 0);
             }
             _ => unimplemented!(),
+        };
+        assert_eq!(dest.size, src.size);
+        for i in 0..src.size {
+            self.write_inner(op, dest.to_dest(), Src::PopStack, i);
         }
     }
     fn write_inner(&mut self, op: IROp, dest: Dest, src: Src, i: Word) {
@@ -153,5 +159,8 @@ impl Writer {
         self.current_frame_size += ty.size();
         self.output.push(IR::Sub(EA::SP, EA::Immediate(ty.size())));
         MemLocation::local(self.current_frame_size, ty.size())
+    }
+    pub fn allocate_zero(&mut self) -> MemLocation {
+        MemLocation::local(self.current_frame_size, 0)
     }
 }

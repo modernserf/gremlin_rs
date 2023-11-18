@@ -90,10 +90,13 @@ impl Ty {
             TyKind::Array(a) => a.ty.size() * a.capacity,
         }
     }
-    pub fn item_ty(&self) -> Compile<&Ty> {
+    pub fn index_ty(&self, index: &Ty) -> Compile<&Ty> {
         match &self.kind {
-            TyKind::Array(a) => Ok(&a.ty),
-            _ => Err(Expected("array")),
+            TyKind::Array(a) => {
+                Ty::int().check(index)?;
+                Ok(&a.ty)
+            }
+            _ => Err(Expected("indexable type")),
         }
     }
     pub fn struct_field(&self, field_name: &str) -> Compile<StructField> {
