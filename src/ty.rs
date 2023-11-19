@@ -7,6 +7,12 @@ pub struct Ty {
 }
 
 impl Ty {
+    pub fn void() -> Self {
+        Self {
+            kind: TyKind::Void,
+            ref_level: 0,
+        }
+    }
     pub fn int() -> Self {
         Self {
             kind: TyKind::Int,
@@ -81,6 +87,7 @@ impl Ty {
             return 1;
         }
         match &self.kind {
+            TyKind::Void => 0,
             TyKind::Int => 1,
             TyKind::Bool => 1,
             TyKind::Struct(s) => s.size,
@@ -99,12 +106,12 @@ impl Ty {
             _ => Err(Expected("indexable type")),
         }
     }
-    pub fn struct_field(&self, field_name: &str) -> Compile<StructField> {
+    pub fn struct_field(&self, field_name: &str) -> Compile<&StructField> {
         let fields = match &self.kind {
             TyKind::Struct(fs) => fs,
             _ => return Err(Expected("struct")),
         };
-        Ok(fields.get(field_name)?.clone())
+        Ok(fields.get(field_name)?)
     }
     pub fn oneof_member(&self, member_name: &str) -> Compile<TyOneOfMember> {
         let fields = match &self.kind {
@@ -117,6 +124,7 @@ impl Ty {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TyKind {
+    Void,
     Int,
     Bool,
     Struct(Box<TyStruct>),

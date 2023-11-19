@@ -98,6 +98,16 @@ impl Lexer {
             _ => Ok(None),
         }
     }
+    pub fn int_token(&mut self) -> CompileOpt<Word> {
+        match self.peek()? {
+            Token::Integer(value) => {
+                self.advance();
+                Ok(Some(value))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn next_token(&mut self) -> Compile<Token> {
         match self.peek_char() {
             ' ' | '\n' => self.whitespace(),

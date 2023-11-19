@@ -31,6 +31,7 @@ pub enum IR {
     Or(IRDest, IRSrc),
     Xor(IRDest, IRSrc),
     BitTest(IRDest, IRSrc),
+    DebugStack,
 }
 
 pub struct Runtime {
@@ -108,6 +109,10 @@ impl Runtime {
                 let bit = self.get_src(*src);
                 let dest = *self.get_dest(*dest);
                 self.r0 = if (dest & (1 << bit)) > 0 { 1 } else { 0 }
+            }
+
+            IR::DebugStack => {
+                dbg!(&self.memory[(self.sp as usize)..]);
             }
         }
     }
