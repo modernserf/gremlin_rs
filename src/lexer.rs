@@ -24,6 +24,7 @@ pub enum Token {
     Semicolon,
     Comma,
     Dot,
+    Equal,
     ColonEq,
     Plus,
     Minus,
@@ -78,6 +79,7 @@ impl Lexer {
             Token::Plus => Op::Add,
             Token::Minus => Op::Sub,
             Token::Star => Op::Mul,
+            Token::Equal => Op::Equal,
             _ => return Ok(None),
         };
         self.advance();
@@ -155,6 +157,7 @@ impl Lexer {
             '-' => self.punc(Token::Minus),
             '*' => self.punc(Token::Star),
             '&' => self.punc(Token::Ampersand),
+            '=' => self.punc(Token::Equal),
             '(' => self.punc(Token::ParLeft),
             ')' => self.punc(Token::ParRight),
             '{' => self.punc(Token::CurlyLeft),

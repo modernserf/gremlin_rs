@@ -72,6 +72,7 @@ pub enum Op {
     Add,
     Sub,
     Mul,
+    Equal,
 }
 
 impl Op {
@@ -80,6 +81,7 @@ impl Op {
             Op::Add => 1,
             Op::Sub => 1,
             Op::Mul => 0,
+            Op::Equal => 2,
         }
     }
     fn check_ty(&self, left: &Ty, right: &Ty) -> Compile<Ty> {
@@ -87,6 +89,7 @@ impl Op {
             Op::Add => self.arithmetic(left, right),
             Op::Sub => self.arithmetic(left, right),
             Op::Mul => self.arithmetic(left, right),
+            Op::Equal => self.equal(left, right),
         }
     }
     fn arithmetic(&self, left: &Ty, right: &Ty) -> Compile<Ty> {
@@ -94,18 +97,31 @@ impl Op {
         Ty::int().check(right)?;
         Ok(Ty::int())
     }
+    fn equal(&self, left: &Ty, right: &Ty) -> Compile<Ty> {
+        left.check(right)?;
+        Ok(Ty::bool())
+    }
     pub fn inline(&self, left: Word, right: Word) -> Word {
         match self {
             Op::Add => left + right,
             Op::Mul => left * right,
             Op::Sub => left - right,
+            Op::Equal => {
+                if left == right {
+                    1
+                } else {
+                    0
+                }
+            }
         }
     }
+    // TODO: operators that aren't single instructions as `dest = dest • src`
     pub fn ir(&self) -> IROp {
         match self {
             Op::Add => IR::Add,
             Op::Sub => IR::Sub,
             Op::Mul => IR::Mult,
+            Op::Equal => IR::Equal,
         }
     }
 }

@@ -122,14 +122,7 @@ impl Memory {
     ) -> Block {
         assert_eq!(ptr_block.size(), 1);
         self.write(IR::Mov, Dest::R0, Src::Block(ptr_block));
-        self.write(
-            IR::Mov,
-            ctx.to_dest(dest_size),
-            Src::R0Offset {
-                offset: focus.offset,
-                size: focus.size,
-            },
-        )
+        self.write(IR::Mov, ctx.to_dest(dest_size), Src::R0Offset(focus))
     }
 
     pub fn begin_if(&mut self, expr: Expr) -> IfRecord {
@@ -263,23 +256,15 @@ enum Src {
     Block(Block),
     Immediate(Word),
     R0,
-    R0Offset { offset: Word, size: Word },
+    R0Offset(Slice),
 }
 
 impl Src {
-    fn size(&self) -> Word {
-        match &self {
-            Self::Block(block) => block.size(),
-            Self::Immediate(_) => 1,
-            Self::R0 => 1,
-            Self::R0Offset { size, .. } => *size,
-        }
-    }
     fn to_ea(&self, current_frame_offset: Word, index: Word) -> EA {
         match &self {
             Self::Immediate(value) => EA::Immediate(*value),
             Self::Block(block) => block.to_ea(current_frame_offset, index),
-            Self::R0Offset { offset, .. } => EA::R0Offset(*offset),
+            Self::R0Offset(slice) => EA::R0Offset(slice.offset),
             Self::R0 => EA::R0,
         }
     }

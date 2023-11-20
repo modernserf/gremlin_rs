@@ -30,6 +30,7 @@ pub enum IR {
     And(IRDest, IRSrc),
     Or(IRDest, IRSrc),
     Xor(IRDest, IRSrc),
+    Equal(IRDest, IRSrc),
     BitTest(IRDest, IRSrc),
     DebugStack,
     BranchZero(Word, IRSrc),
@@ -104,6 +105,12 @@ impl Runtime {
                 let value = self.get_src(*src);
                 let dest_ptr = self.get_dest(*dest);
                 *dest_ptr |= value;
+            }
+            // TODO: Cmp IR that puts result in status register
+            IR::Equal(dest, src) => {
+                let value = self.get_src(*src);
+                let dest_ptr = self.get_dest(*dest);
+                *dest_ptr = if value == *dest_ptr { 1 } else { 0 }
             }
             // TODO: use a status register instead of r0
             IR::BitTest(dest, src) => {
