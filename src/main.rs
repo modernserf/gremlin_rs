@@ -461,10 +461,10 @@ impl Compiler {
         Ok(())
     }
 
-    fn if_cond(&mut self) -> Compile<IfRecord> {
+    fn if_cond(&mut self) -> Compile<CondRecord> {
         let cond = self.expect_expr(ExprContext::Stack)?;
         Ty::bool().check(&cond.ty)?;
-        Ok(self.memory.begin_if(cond))
+        Ok(self.memory.begin_cond(cond))
     }
 
     // TODO: if as expr
@@ -517,6 +517,16 @@ impl Compiler {
         Ok(())
     }
 
+    fn while_stmt(&mut self) -> Compile<()> {
+        let while_idx = self.memory.begin_while();
+        let cond = self.if_cond()?;
+        self.lexer.expect_token(Token::Loop)?;
+        self.block()?;
+        self.lexer.expect_token(Token::End)?;
+        self.memory.end_while(while_idx, cond);
+        Ok(())
+    }
+
     fn stmt(&mut self) -> CompileOpt<()> {
         match self.lexer.peek()? {
             Token::Let => {
@@ -530,6 +540,10 @@ impl Compiler {
             Token::If => {
                 self.lexer.advance();
                 self.if_stmt()?;
+            }
+            Token::While => {
+                self.lexer.advance();
+                self.while_stmt()?;
             }
             _ => {
                 match self.expr(ExprContext::Stack)? {
@@ -584,8 +598,8 @@ mod test {
     }
     fn expect_ir_result(code: &str, ir: Vec<IR>, result: Word) {
         let actual_ir = Compiler::program(code).expect("compile");
-        let actual_result: i32 = Runtime::eval(&actual_ir);
         assert_eq!(actual_ir, ir);
+        let actual_result: i32 = Runtime::eval(&actual_ir);
         assert_eq!(actual_result, result);
     }
     fn expect_err(code: &str, err: CompileError) {
@@ -1142,17 +1156,15 @@ mod test {
         ",
             vec![
                 // let i := 1;
-                Mov(PushStack, Immediate(1)), //[i: 1]
+                Mov(PushStack, Immediate(1)),
                 // false
-                Mov(PushStack, Immediate(0)), //[false, i: 1]
+                Mov(PushStack, Immediate(0)),
                 // if .. then
-                BranchZero(1, StackOffset(0)),
+                BranchZero(1, PopStack),
                 // i := 3
-                Mov(StackOffset(1), Immediate(3)),
-                // i; drop cond
-                Mov(PushStack, StackOffset(1)), // [1, false, i: 1]
-                Mov(StackOffset(1), StackOffset(0)), // [1, 1, i: 1]
-                Add(SP, Immediate(1)),          // [1, i: 1]
+                Mov(StackOffset(0), Immediate(3)),
+                // i;
+                Mov(PushStack, StackOffset(0)),
             ],
             1,
         );
@@ -1187,18 +1199,16 @@ mod test {
                 // true
                 Mov(PushStack, Immediate(1)),
                 // if .. then
-                BranchZero(2, StackOffset(0)),
+                BranchZero(2, PopStack),
                 // i := 3
-                Mov(StackOffset(1), Immediate(3)),
+                Mov(StackOffset(0), Immediate(3)),
                 // -> skip else
                 BranchZero(1, Immediate(0)),
                 // else:
                 // i := 4;
-                Mov(StackOffset(1), Immediate(4)),
+                Mov(StackOffset(0), Immediate(4)),
                 // i
-                Mov(PushStack, StackOffset(1)),
-                Mov(StackOffset(1), StackOffset(0)),
-                Add(SP, Immediate(1)),
+                Mov(PushStack, StackOffset(0)),
             ],
             3,
         );
@@ -1237,27 +1247,57 @@ mod test {
                 // false
                 Mov(PushStack, Immediate(0)),
                 // if .. then
-                BranchZero(2, StackOffset(0)),
+                BranchZero(2, PopStack),
                 // i := 3
-                Mov(StackOffset(1), Immediate(3)),
+                Mov(StackOffset(0), Immediate(3)),
                 // -> end
                 BranchZero(5, Immediate(0)),
                 // true
                 Mov(PushStack, Immediate(1)),
                 // if .. then
-                BranchZero(2, StackOffset(0)),
+                BranchZero(2, PopStack),
                 // i := 4
-                Mov(StackOffset(2), Immediate(4)),
+                Mov(StackOffset(0), Immediate(4)),
                 //  -> end
                 BranchZero(1, Immediate(0)),
                 // i := 5
-                Mov(StackOffset(2), Immediate(5)),
-                // end: i; cleanup
-                Mov(PushStack, StackOffset(2)),
-                Mov(StackOffset(2), StackOffset(0)),
-                Add(SP, Immediate(2)),
+                Mov(StackOffset(0), Immediate(5)),
+                // end: i
+                Mov(PushStack, StackOffset(0)),
             ],
             4,
+        );
+    }
+
+    #[test]
+    fn while_stmt() {
+        expect_ir_result(
+            "
+            let count := 0;
+            while count != 10 loop
+                count := count + 1;
+            end;
+            count
+        ",
+            vec![
+                // let count := 0;
+                Mov(PushStack, Immediate(0)),
+                // begin:
+                // count
+                Mov(PushStack, StackOffset(0)),
+                // != 10
+                NotEqual(StackOffset(0), Immediate(10)),
+                // -> end
+                BranchZero(2, PopStack),
+                // count := count + 1
+                Add(StackOffset(0), Immediate(1)),
+                // -> begin
+                BranchZero(-5, Immediate(0)),
+                // end:
+                // count
+                Mov(PushStack, StackOffset(0)),
+            ],
+            10,
         );
     }
 }

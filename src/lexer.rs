@@ -20,11 +20,14 @@ pub enum Token {
     Then,
     End,
     Else,
+    While,
+    Loop,
     Colon,
     Semicolon,
     Comma,
     Dot,
     Equal,
+    NotEqual,
     ColonEq,
     Plus,
     Minus,
@@ -80,6 +83,7 @@ impl Lexer {
             Token::Minus => Op::Sub,
             Token::Star => Op::Mul,
             Token::Equal => Op::Equal,
+            Token::NotEqual => Op::NotEqual,
             _ => return Ok(None),
         };
         self.advance();
@@ -138,7 +142,13 @@ impl Lexer {
             }
             'f' => self.keyword("false", Token::False),
             'i' => self.keyword("if", Token::If),
-            'l' => self.keyword("let", Token::Let),
+            'l' => {
+                self.adv_char();
+                match self.peek_char() {
+                    'e' => self.keyword_idx("let", 1, Token::Let),
+                    _ => self.keyword_idx("loop", 1, Token::Loop),
+                }
+            }
             'o' => self.keyword("oneof", Token::OneOf),
             's' => self.keyword("struct", Token::Struct),
             't' => {
@@ -150,6 +160,7 @@ impl Lexer {
                 }
             }
             'v' => self.keyword("volatile", Token::Volatile),
+            'w' => self.keyword("while", Token::While),
             ';' => self.punc(Token::Semicolon),
             ',' => self.punc(Token::Comma),
             '.' => self.punc(Token::Dot),
@@ -158,6 +169,13 @@ impl Lexer {
             '*' => self.punc(Token::Star),
             '&' => self.punc(Token::Ampersand),
             '=' => self.punc(Token::Equal),
+            '!' => {
+                self.adv_char();
+                match self.peek_char() {
+                    '=' => self.punc(Token::NotEqual),
+                    _ => Err(UnexpectedChar),
+                }
+            }
             '(' => self.punc(Token::ParLeft),
             ')' => self.punc(Token::ParRight),
             '{' => self.punc(Token::CurlyLeft),

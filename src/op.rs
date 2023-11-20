@@ -73,6 +73,7 @@ pub enum Op {
     Sub,
     Mul,
     Equal,
+    NotEqual,
 }
 
 impl Op {
@@ -82,6 +83,7 @@ impl Op {
             Op::Sub => 1,
             Op::Mul => 0,
             Op::Equal => 2,
+            Op::NotEqual => 2,
         }
     }
     fn check_ty(&self, left: &Ty, right: &Ty) -> Compile<Ty> {
@@ -90,6 +92,7 @@ impl Op {
             Op::Sub => self.arithmetic(left, right),
             Op::Mul => self.arithmetic(left, right),
             Op::Equal => self.equal(left, right),
+            Op::NotEqual => self.equal(left, right),
         }
     }
     fn arithmetic(&self, left: &Ty, right: &Ty) -> Compile<Ty> {
@@ -113,6 +116,13 @@ impl Op {
                     0
                 }
             }
+            Op::NotEqual => {
+                if left == right {
+                    0
+                } else {
+                    1
+                }
+            }
         }
     }
     // TODO: operators that aren't single instructions as `dest = dest • src`
@@ -122,6 +132,7 @@ impl Op {
             Op::Sub => IR::Sub,
             Op::Mul => IR::Mult,
             Op::Equal => IR::Equal,
+            Op::NotEqual => IR::NotEqual,
         }
     }
 }

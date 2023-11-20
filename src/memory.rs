@@ -125,28 +125,51 @@ impl Memory {
         self.write(IR::Mov, ctx.to_dest(dest_size), Src::R0Offset(focus))
     }
 
-    pub fn begin_if(&mut self, expr: Expr) -> IfRecord {
+    pub fn begin_cond(&mut self, expr: Expr) -> CondRecord {
         let res = expr.resolve(self);
-        let ea = res.block.to_ea(self.current_frame_offset, 0);
+        let ea = match res.block {
+            Block::Stack(slice) => {
+                assert!(
+                    slice.offset == self.current_frame_offset,
+                    "must be top of stack"
+                );
+                self.current_frame_offset -= 1;
+                EA::PopStack
+            }
+            block => block.to_ea(self.current_frame_offset, 0),
+        };
         let index = self.output.len();
         self.output.push(IR::BranchZero(0, ea));
-        IfRecord { index }
+        CondRecord { index }
     }
 
-    pub fn begin_else(&mut self, if_rec: IfRecord) -> IfRecord {
+    pub fn begin_else(&mut self, if_rec: CondRecord) -> CondRecord {
         let else_index = self.output.len();
         self.output.push(IR::BranchZero(0, EA::Immediate(0)));
         self.end_if(if_rec);
-        IfRecord { index: else_index }
+        CondRecord { index: else_index }
     }
 
-    pub fn end_if(&mut self, rec: IfRecord) {
+    pub fn end_if(&mut self, rec: CondRecord) {
         let original = &self.output[rec.index];
-        let displacement = (self.output.len() - rec.index) as Word;
+        let displacement = (self.output.len() - rec.index - 1) as Word;
         self.output[rec.index] = match original {
-            IR::BranchZero(_, ea) => IR::BranchZero(displacement - 1, *ea),
+            IR::BranchZero(_, ea) => IR::BranchZero(displacement, *ea),
             _ => unreachable!(),
         };
+    }
+
+    pub fn begin_while(&mut self) -> WhileRecord {
+        WhileRecord {
+            index: self.output.len(),
+        }
+    }
+
+    pub fn end_while(&mut self, while_rec: WhileRecord, cond: CondRecord) {
+        let jump_back = (self.output.len() - while_rec.index + 1) as Word;
+        self.output
+            .push(IR::BranchZero(-jump_back, EA::Immediate(0)));
+        self.end_if(cond);
     }
 }
 
@@ -271,7 +294,12 @@ impl Src {
 }
 
 #[derive(Debug)]
-pub struct IfRecord {
+pub struct CondRecord {
+    index: usize,
+}
+
+#[derive(Debug)]
+pub struct WhileRecord {
     index: usize,
 }
 
