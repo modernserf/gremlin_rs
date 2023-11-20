@@ -139,13 +139,14 @@ impl Memory {
             block => block.to_ea(self.current_frame_offset, 0),
         };
         let index = self.output.len();
-        self.output.push(IR::BranchZero(0, ea));
+        self.output.push(IR::BranchZero(EA::Immediate(-1), ea));
         CondRecord { index }
     }
 
     pub fn begin_else(&mut self, if_rec: CondRecord) -> CondRecord {
         let else_index = self.output.len();
-        self.output.push(IR::BranchZero(0, EA::Immediate(0)));
+        self.output
+            .push(IR::BranchZero(EA::Immediate(-1), EA::Immediate(0)));
         self.end_if(if_rec);
         CondRecord { index: else_index }
     }
@@ -154,7 +155,7 @@ impl Memory {
         let original = &self.output[rec.index];
         let displacement = (self.output.len() - rec.index - 1) as Word;
         self.output[rec.index] = match original {
-            IR::BranchZero(_, ea) => IR::BranchZero(displacement, *ea),
+            IR::BranchZero(_, ea) => IR::BranchZero(EA::Immediate(displacement), *ea),
             _ => unreachable!(),
         };
     }
@@ -168,8 +169,48 @@ impl Memory {
     pub fn end_while(&mut self, while_rec: WhileRecord, cond: CondRecord) {
         let jump_back = (self.output.len() - while_rec.index + 1) as Word;
         self.output
-            .push(IR::BranchZero(-jump_back, EA::Immediate(0)));
+            .push(IR::BranchZero(EA::Immediate(-jump_back), EA::Immediate(0)));
         self.end_if(cond);
+    }
+
+    fn begin_match(&mut self, block: Block, size: usize) -> usize {
+        self.output.push(IR::BranchZero(
+            block.to_ea(self.current_frame_offset, 0),
+            EA::Immediate(0),
+        ));
+        let jump_table_addr = self.output.len();
+        for i in 0..size {
+            self.output
+                .push(IR::BranchZero(EA::Immediate(-1), EA::Immediate(0)));
+        }
+        jump_table_addr
+    }
+    fn set_jump_target(&mut self, table_index: usize, offset: usize) {
+        let displacement = (self.output.len() - table_index - 1 - offset) as Word;
+        self.output[table_index + offset] =
+            IR::BranchZero(EA::Immediate(displacement), EA::Immediate(0));
+    }
+    fn end_case(&mut self) -> usize {
+        let index = self.output.len();
+        self.output
+            .push(IR::BranchZero(EA::Immediate(-1), EA::Immediate(0)));
+        index
+    }
+    fn set_jump_end_targets(&mut self, table_index: usize, len: usize, case_ends: &[usize]) {
+        let displacement = (self.output.len() - table_index - 1) as Word;
+        for i in 0..len {
+            match &self.output[table_index + i] {
+                IR::BranchZero(EA::Immediate(-1), _) => {}
+                IR::BranchZero(_, _) => continue,
+                _ => panic!("expected jump table instruction"),
+            }
+            self.output[table_index + i] =
+                IR::BranchZero(EA::Immediate(displacement), EA::Immediate(0));
+        }
+        for index in case_ends {
+            let displacement = (self.output.len() - index - 1) as Word;
+            self.output[*index] = IR::BranchZero(EA::Immediate(displacement), EA::Immediate(0));
+        }
     }
 }
 
@@ -469,6 +510,14 @@ impl Expr {
         memory.write(IR::Mov, Dest::Block(out), Src::R0);
         Ok(Expr::resolved(ty, out))
     }
+    pub fn begin_match(self, memory: &mut Memory) -> Compile<MatchBuilder> {
+        let res = self.resolve(memory);
+        let (case_field, map) = res.ty.struct_cases()?;
+        let case_value = res.block.focus(Slice::from_struct_field(case_field));
+        let jump_table = memory.begin_match(case_value, map.len());
+        let cases = map.clone();
+        Ok(MatchBuilder::new(res.ty, res.block, jump_table, cases))
+    }
 
     pub fn resolve(self, memory: &mut Memory) -> ResolvedExpr {
         match self.kind {
@@ -565,5 +614,72 @@ impl ExprContext {
             Self::Stack => Self::Stack,
             _ => unimplemented!(),
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct MatchBuilder {
+    table_index: usize,
+    ty: Ty,
+    cases: HashMap<String, Word>,
+    end_addrs: Vec<usize>,
+    block: Block,
+}
+impl MatchBuilder {
+    fn new(ty: Ty, block: Block, table_index: usize, cases: HashMap<String, Word>) -> Self {
+        Self {
+            ty,
+            block,
+            table_index,
+            cases,
+            end_addrs: Vec::new(),
+        }
+    }
+    pub fn add_case(&self, tag: &str, memory: &mut Memory) -> Compile<MatchCaseBuilder> {
+        let case_id = *self.cases.get(tag).ok_or(Expected("case"))?;
+        memory.set_jump_target(self.table_index, case_id as usize);
+
+        Ok(MatchCaseBuilder::new(self.ty.clone(), case_id, self.block))
+    }
+    pub fn end_case(&mut self, case: MatchCaseBuilder, memory: &mut Memory) {
+        self.end_addrs.push(memory.end_case());
+    }
+    pub fn resolve(self, memory: &mut Memory) {
+        memory.set_jump_end_targets(self.table_index, self.cases.len(), &self.end_addrs)
+    }
+}
+
+#[derive(Debug)]
+pub struct MatchCaseBuilder {
+    ty: Ty,
+    case_id: Word,
+    parent_block: Block,
+}
+
+impl MatchCaseBuilder {
+    fn new(ty: Ty, case_id: Word, parent_block: Block) -> Self {
+        Self {
+            ty,
+            case_id,
+            parent_block,
+        }
+    }
+    // TODO: create a new scope for each match case
+    pub fn add_binding(&self, binding: String, memory: &mut Memory) -> Compile<()> {
+        let field = self.ty.struct_field(&binding, Some(self.case_id))?;
+        let block = self.parent_block.focus(Slice::from_struct_field(field));
+        let frame_offset = match block {
+            Block::Stack(slice) => slice.offset,
+            Block::Local(slice) => slice.offset,
+            _ => panic!("invalid block"),
+        };
+        memory.locals.insert(
+            binding,
+            ScopeRecord {
+                frame_offset,
+                ty: field.ty.clone(),
+            },
+        );
+        Ok(())
     }
 }

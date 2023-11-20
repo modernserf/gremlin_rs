@@ -114,6 +114,20 @@ impl Ty {
             _ => Err(Expected("struct")),
         }
     }
+    pub fn struct_cases(&self) -> Compile<(&StructField, &HashMap<String, i32>)> {
+        match &self.kind {
+            TyKind::Struct(fs) => {
+                let case_field = fs
+                    .case_field
+                    .as_ref()
+                    .ok_or(Expected("struct with cases"))?;
+                let case_map = &fs.cases;
+                Ok((case_field, case_map))
+            }
+            _ => Err(Expected("struct")),
+        }
+    }
+
     pub fn oneof_member(&self, member_name: &str) -> Compile<&TyOneOfMember> {
         let fields = match &self.kind {
             TyKind::OneOf(fields) => fields,
@@ -184,6 +198,7 @@ impl TyStruct {
 
         Ok(id)
     }
+    // TODO: cases use shared space
     pub fn insert(&mut self, k: String, ty: Ty, case: StructCase) -> Compile<()> {
         let key = (case, k);
         if self.fields.contains_key(&key) {

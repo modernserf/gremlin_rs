@@ -34,7 +34,8 @@ pub enum IR {
     NotEqual(IRDest, IRSrc),
     BitTest(IRDest, IRSrc),
     DebugStack,
-    BranchZero(Word, IRSrc),
+    BranchZero(IRDest, IRSrc),
+    Halt,
 }
 
 pub struct Runtime {
@@ -61,6 +62,9 @@ impl Runtime {
     fn run_program(&mut self, program: &[IR]) {
         while self.ip < program.len() {
             let instruction = &program[self.ip];
+            if instruction == &IR::Halt {
+                break;
+            }
             self.ip += 1;
             self.run_instr(instruction);
         }
@@ -125,8 +129,10 @@ impl Runtime {
                 let dest = *self.get_dest(*dest);
                 self.r0 = if (dest & (1 << bit)) > 0 { 1 } else { 0 }
             }
-            IR::BranchZero(displacement, src) => {
+
+            IR::BranchZero(dest, src) => {
                 let value = self.get_src(*src);
+                let displacement = self.get_branch_dest(*dest);
                 if value == 0 {
                     self.ip = (self.ip as Word + displacement) as usize
                 }
@@ -135,6 +141,7 @@ impl Runtime {
             IR::DebugStack => {
                 dbg!(&self.memory[(self.sp as usize)..]);
             }
+            IR::Halt => {}
         }
     }
     fn get_src(&mut self, src: EA) -> Word {
@@ -168,6 +175,13 @@ impl Runtime {
                 self.sp -= 1;
                 &mut self.memory[self.sp as usize]
             }
+            _ => unimplemented!(),
+        }
+    }
+    fn get_branch_dest(&mut self, dest: EA) -> Word {
+        match dest {
+            EA::Immediate(value) => value,
+            EA::StackOffset(offset) => self.memory[(self.sp + offset) as usize],
             _ => unimplemented!(),
         }
     }

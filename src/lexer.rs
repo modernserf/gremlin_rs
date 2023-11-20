@@ -6,39 +6,44 @@ pub enum Token {
     Identifier(String),
     TypeIdentifier(String),
     EndOfInput,
+    // keyword values
     True,
     False,
-    Let,
-    As,
-    Type,
-    Struct,
+    // keywords
     Array,
-    OneOf,
-    Volatile,
+    As,
     Case,
-    If,
-    Then,
-    End,
+    Do,
     Else,
-    While,
+    End,
+    If,
+    Let,
     Loop,
-    Colon,
-    Semicolon,
-    Comma,
-    Dot,
-    Equal,
-    NotEqual,
-    ColonEq,
-    Plus,
-    Minus,
-    Star,
+    Match,
+    OneOf,
+    Struct,
+    Then,
+    Type,
+    Volatile,
+    While,
+    // punctuation
     Ampersand,
-    ParLeft,
-    ParRight,
+    Colon,
+    ColonEq,
+    Comma,
     CurlyLeft,
     CurlyRight,
+    Dot,
+    Equal,
+    Minus,
+    NotEqual,
+    ParLeft,
+    ParRight,
+    Plus,
+    Semicolon,
     SqLeft,
     SqRight,
+    Star,
 }
 
 pub struct Lexer {
@@ -133,6 +138,7 @@ impl Lexer {
                 }
             }
             'c' => self.keyword("case", Token::Case),
+            'd' => self.keyword("do", Token::Do),
             'e' => {
                 self.adv_char();
                 match self.peek_char() {
@@ -149,6 +155,7 @@ impl Lexer {
                     _ => self.keyword_idx("loop", 1, Token::Loop),
                 }
             }
+            'm' => self.keyword("match", Token::Match),
             'o' => self.keyword("oneof", Token::OneOf),
             's' => self.keyword("struct", Token::Struct),
             't' => {
