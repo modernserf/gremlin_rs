@@ -19,6 +19,7 @@ pub enum Token {
     If,
     Then,
     End,
+    Else,
     Colon,
     Semicolon,
     Comma,
@@ -126,7 +127,13 @@ impl Lexer {
                 }
             }
             'c' => self.keyword("case", Token::Case),
-            'e' => self.keyword("end", Token::End),
+            'e' => {
+                self.adv_char();
+                match self.peek_char() {
+                    'l' => self.keyword_idx("else", 1, Token::Else),
+                    _ => self.keyword_idx("end", 1, Token::End),
+                }
+            }
             'f' => self.keyword("false", Token::False),
             'i' => self.keyword("if", Token::If),
             'l' => self.keyword("let", Token::Let),

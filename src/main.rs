@@ -468,8 +468,15 @@ impl Compiler {
         let idx = self.memory.begin_if(cond);
         self.lexer.expect_token(Token::Then)?;
         self.block()?;
-        self.lexer.expect_token(Token::End)?;
-        self.memory.end_if(idx);
+        if self.lexer.token(Token::Else)?.is_some() {
+            let else_idx = self.memory.begin_else(idx);
+            self.block()?;
+            self.lexer.expect_token(Token::End)?;
+            self.memory.end_if(else_idx);
+        } else {
+            self.lexer.expect_token(Token::End)?;
+            self.memory.end_if(idx);
+        }
         Ok(())
     }
 
@@ -1107,7 +1114,7 @@ mod test {
     }
 
     #[test]
-    fn conditionals() {
+    fn if_stmt() {
         expect_ir_result(
             "
             let i := 1;
@@ -1118,17 +1125,17 @@ mod test {
         ",
             vec![
                 // let i := 1;
-                Mov(PushStack, Immediate(1)),
+                Mov(PushStack, Immediate(1)), //[i: 1]
                 // false
-                Mov(PushStack, Immediate(0)),
+                Mov(PushStack, Immediate(0)), //[false, i: 1]
                 // if .. then
                 BranchZero(1, StackOffset(0)),
                 // i := 3
                 Mov(StackOffset(1), Immediate(3)),
-                // i (???)
-                Mov(PushStack, StackOffset(1)),
-                Mov(StackOffset(1), StackOffset(0)),
-                Add(SP, Immediate(1)),
+                // i; drop cond
+                Mov(PushStack, StackOffset(1)), // [1, false, i: 1]
+                Mov(StackOffset(1), StackOffset(0)), // [1, 1, i: 1]
+                Add(SP, Immediate(1)),          // [1, i: 1]
             ],
             1,
         );
@@ -1142,6 +1149,54 @@ mod test {
         ",
             vec![],
             3,
+        );
+    }
+
+    #[test]
+    fn if_else_stmt() {
+        expect_ir_result(
+            "
+            let i := 0;
+            if true then
+                i := 3;
+            else
+                i := 4;
+            end;
+            i
+        ",
+            vec![
+                // let i := 0
+                Mov(PushStack, Immediate(0)),
+                // true
+                Mov(PushStack, Immediate(1)),
+                // if .. then
+                BranchZero(2, StackOffset(0)),
+                // i := 3
+                Mov(StackOffset(1), Immediate(3)),
+                // -> skip else
+                BranchZero(1, Immediate(0)),
+                // else:
+                // i := 4;
+                Mov(StackOffset(1), Immediate(4)),
+                // i
+                Mov(PushStack, StackOffset(1)),
+                Mov(StackOffset(1), StackOffset(0)),
+                Add(SP, Immediate(1)),
+            ],
+            3,
+        );
+        expect_result(
+            "
+            let i := 0;
+            if false then
+                i := 3;
+            else
+                i := 4;
+            end;
+            i
+        ",
+            vec![],
+            4,
         );
     }
 }

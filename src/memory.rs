@@ -140,6 +140,13 @@ impl Memory {
         IfRecord { index }
     }
 
+    pub fn begin_else(&mut self, if_rec: IfRecord) -> IfRecord {
+        let else_index = self.output.len();
+        self.output.push(IR::BranchZero(0, EA::Immediate(0)));
+        self.end_if(if_rec);
+        IfRecord { index: else_index }
+    }
+
     pub fn end_if(&mut self, rec: IfRecord) {
         let original = &self.output[rec.index];
         let displacement = (self.output.len() - rec.index) as Word;
