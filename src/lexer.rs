@@ -16,6 +16,9 @@ pub enum Token {
     OneOf,
     Volatile,
     Case,
+    If,
+    Then,
+    End,
     Colon,
     Semicolon,
     Comma,
@@ -24,7 +27,6 @@ pub enum Token {
     Plus,
     Minus,
     Star,
-    // At,
     Ampersand,
     ParLeft,
     ParRight,
@@ -124,13 +126,16 @@ impl Lexer {
                 }
             }
             'c' => self.keyword("case", Token::Case),
+            'e' => self.keyword("end", Token::End),
             'f' => self.keyword("false", Token::False),
+            'i' => self.keyword("if", Token::If),
             'l' => self.keyword("let", Token::Let),
             'o' => self.keyword("oneof", Token::OneOf),
             's' => self.keyword("struct", Token::Struct),
             't' => {
                 self.adv_char();
                 match self.peek_char() {
+                    'h' => self.keyword_idx("then", 1, Token::Then),
                     'r' => self.keyword_idx("true", 1, Token::True),
                     _ => self.keyword_idx("type", 1, Token::Type),
                 }

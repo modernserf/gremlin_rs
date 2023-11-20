@@ -461,6 +461,18 @@ impl Compiler {
         Ok(())
     }
 
+    // TODO: else, else-if, if as expr
+    fn if_stmt(&mut self) -> Compile<()> {
+        let cond = self.expect_expr(ExprContext::Stack)?;
+        Ty::bool().check(&cond.ty)?;
+        let idx = self.memory.begin_if(cond);
+        self.lexer.expect_token(Token::Then)?;
+        self.block()?;
+        self.lexer.expect_token(Token::End)?;
+        self.memory.end_if(idx);
+        Ok(())
+    }
+
     fn let_stmt(&mut self) -> Compile<()> {
         let binding = self.binding()?.ok_or(Expected("binding"))?;
         let bind_ty = if self.lexer.token(Token::Colon)?.is_some() {
@@ -491,6 +503,10 @@ impl Compiler {
                 self.lexer.advance();
                 self.type_def_stmt()?;
             }
+            Token::If => {
+                self.lexer.advance();
+                self.if_stmt()?;
+            }
             _ => {
                 match self.expr(ExprContext::Stack)? {
                     Some(expr) => {
@@ -504,16 +520,21 @@ impl Compiler {
         Ok(Some(()))
     }
 
-    pub fn program(input: &str) -> Compile<Vec<IR>> {
-        let mut parse = Self::new(input);
+    // TODO: more idiomatic semicolon rules
+    fn block(&mut self) -> Compile<()> {
         loop {
-            if parse.stmt()?.is_none() {
-                break;
+            if self.stmt()?.is_none() {
+                return Ok(());
             }
-            if parse.lexer.token(Token::Semicolon)?.is_none() {
-                break;
+            if self.lexer.token(Token::Semicolon)?.is_none() {
+                return Ok(());
             }
         }
+    }
+
+    pub fn program(input: &str) -> Compile<Vec<IR>> {
+        let mut parse = Self::new(input);
+        parse.block()?;
         parse.lexer.expect_token(Token::EndOfInput)?;
         Ok(parse.memory.done())
     }
@@ -1082,6 +1103,45 @@ mod test {
             ",
             vec![],
             1,
+        );
+    }
+
+    #[test]
+    fn conditionals() {
+        expect_ir_result(
+            "
+            let i := 1;
+            if false then
+                i := 3;
+            end;
+            i
+        ",
+            vec![
+                // let i := 1;
+                Mov(PushStack, Immediate(1)),
+                // false
+                Mov(PushStack, Immediate(0)),
+                // if .. then
+                BranchZero(1, StackOffset(0)),
+                // i := 3
+                Mov(StackOffset(1), Immediate(3)),
+                // i (???)
+                Mov(PushStack, StackOffset(1)),
+                Mov(StackOffset(1), StackOffset(0)),
+                Add(SP, Immediate(1)),
+            ],
+            1,
+        );
+        expect_result(
+            "
+            let i := 1;
+            if true then
+                i := 3;
+            end;
+            i
+        ",
+            vec![],
+            3,
         );
     }
 }

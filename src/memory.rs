@@ -131,6 +131,23 @@ impl Memory {
             },
         )
     }
+
+    pub fn begin_if(&mut self, expr: Expr) -> IfRecord {
+        let res = expr.resolve(self);
+        let ea = res.block.to_ea(self.current_frame_offset, 0);
+        let index = self.output.len();
+        self.output.push(IR::BranchZero(0, ea));
+        IfRecord { index }
+    }
+
+    pub fn end_if(&mut self, rec: IfRecord) {
+        let original = &self.output[rec.index];
+        let displacement = (self.output.len() - rec.index) as Word;
+        self.output[rec.index] = match original {
+            IR::BranchZero(_, ea) => IR::BranchZero(displacement - 1, *ea),
+            _ => unreachable!(),
+        };
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -259,6 +276,11 @@ impl Src {
             Self::R0 => EA::R0,
         }
     }
+}
+
+#[derive(Debug)]
+pub struct IfRecord {
+    index: usize,
 }
 
 enum Dest {

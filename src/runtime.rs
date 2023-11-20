@@ -32,6 +32,7 @@ pub enum IR {
     Xor(IRDest, IRSrc),
     BitTest(IRDest, IRSrc),
     DebugStack,
+    BranchZero(Word, IRSrc),
 }
 
 pub struct Runtime {
@@ -109,6 +110,12 @@ impl Runtime {
                 let bit = self.get_src(*src);
                 let dest = *self.get_dest(*dest);
                 self.r0 = if (dest & (1 << bit)) > 0 { 1 } else { 0 }
+            }
+            IR::BranchZero(displacement, src) => {
+                let value = self.get_src(*src);
+                if value == 0 {
+                    self.ip = (self.ip as Word + displacement) as usize
+                }
             }
 
             IR::DebugStack => {
