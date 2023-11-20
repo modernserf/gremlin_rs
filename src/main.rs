@@ -49,7 +49,7 @@ impl TyScope {
     fn get(&self, key: &str) -> Compile<Ty> {
         self.data
             .get(key)
-            .map(|t| t.clone())
+            .cloned()
             .ok_or_else(|| UnknownTypeIdentifier(key.to_string()))
     }
     fn assign(&mut self, key: String, record: Ty) {
@@ -92,10 +92,10 @@ impl Compiler {
                 break;
             }
         }
-        Ok(ctx.constant(ty, value))
+        Ok(ctx.constant(ty.as_bitset()?, value))
     }
 
-    fn struct_expr(&mut self, ty: Ty, ctx: ExprContext) -> Compile<Expr> {
+    fn struct_expr(&mut self, ty: Ty, ctx: ExprContext, case: Option<Word>) -> Compile<Expr> {
         let struct_block = ctx.allocate(ty.size(), &mut self.memory);
 
         loop {
@@ -104,7 +104,7 @@ impl Compiler {
                 None => break,
             };
             self.lexer.expect_token(Token::Colon)?;
-            let field = ty.struct_field(&field_name)?;
+            let field = ty.struct_field(&field_name, case)?;
             let field_ctx = ExprContext::Block(struct_block.struct_field(field));
             let expr = self.expect_expr(field_ctx)?.resolve(&mut self.memory);
             field.ty.check(&expr.ty)?;
@@ -120,13 +120,24 @@ impl Compiler {
         let ty = self.ty_scope.get(name)?;
 
         self.lexer.expect_token(Token::Dot)?;
-        let member_name = self
+        let key = self
             .lexer
             .type_ident_token()?
-            .ok_or(Expected("oneof member"))?;
-        let member = ty.oneof_member(&member_name)?;
+            .ok_or(Expected("type identifier"))?;
 
-        Ok(ctx.constant(ty, member.index))
+        match self.lexer.peek()? {
+            Token::CurlyLeft => {
+                self.lexer.advance();
+                let case = ty.struct_case(&key)?;
+                let out = self.struct_expr(ty, ctx, Some(case))?;
+                self.lexer.expect_token(Token::CurlyRight)?;
+                Ok(out)
+            }
+            _ => {
+                let member = ty.oneof_member(&key)?;
+                Ok(ctx.constant(ty.clone(), member.index))
+            }
+        }
     }
 
     fn array_expr(&mut self, ctx: ExprContext) -> Compile<Expr> {
@@ -179,7 +190,7 @@ impl Compiler {
                         let ty = self.ty_scope.get(&name)?;
                         let out = match self.lexer.peek()? {
                             Token::TypeIdentifier(_) => self.bitset_expr(ty, ctx)?,
-                            Token::Identifier(_) => self.struct_expr(ty, ctx)?,
+                            Token::Identifier(_) => self.struct_expr(ty, ctx, None)?,
                             _ => unimplemented!(),
                         };
                         self.lexer.expect_token(Token::CurlyRight)?;
@@ -352,24 +363,41 @@ impl Compiler {
         self.lexer.type_ident_token()
     }
 
-    fn struct_ty(&mut self) -> Compile<Ty> {
-        let mut fields = TyStruct::new(self.ty_scope.new_type_id());
-
+    fn struct_items(&mut self, fields: &mut TyStruct, case: Option<Word>) -> Compile<()> {
         self.lexer.expect_token(Token::CurlyLeft)?;
         loop {
+            if self.lexer.token(Token::Case)?.is_some() {
+                let case_name = self
+                    .lexer
+                    .type_ident_token()?
+                    .ok_or(Expected("case identifier"))?;
+
+                let case_id = fields.insert_case(case_name)?;
+                self.struct_items(fields, Some(case_id))?;
+                self.lexer.token(Token::Comma)?;
+                continue;
+            }
+
             let key = match self.lexer.ident_token()? {
                 Some(s) => s,
                 None => break,
             };
             self.lexer.expect_token(Token::Colon)?;
             let ty = self.expect_type_expr()?;
-            fields.insert(key, ty)?;
+            fields.insert(key, ty, case)?;
 
             if self.lexer.token(Token::Comma)?.is_none() {
                 break;
             }
         }
         self.lexer.expect_token(Token::CurlyRight)?;
+        Ok(())
+    }
+
+    fn struct_ty(&mut self) -> Compile<Ty> {
+        let mut fields = TyStruct::new(self.ty_scope.new_type_id());
+
+        self.struct_items(&mut fields, None)?;
 
         Ok(Ty::struct_(fields))
     }
@@ -1024,6 +1052,36 @@ mod test {
                 Mov(StackOffset(0), R0Offset(0)),
             ],
             20,
+        );
+    }
+
+    #[test]
+    fn variants() {
+        expect_result(
+            "
+                type Point := struct { x: Int, y: Int };
+                type Shape := struct {
+                    fill: Bool,
+                    case Rect {
+                        top_left: Point,
+                        bottom_right: Point,
+                    }
+                    case Circle {
+                        center: Point,
+                        radius: Int
+                    }
+                };
+                
+                let disc := Shape.Circle{
+                    fill: true,
+                    center: Point{x: 0, y: 1},
+                    radius: 3
+                };
+
+                disc.fill
+            ",
+            vec![],
+            1,
         );
     }
 }

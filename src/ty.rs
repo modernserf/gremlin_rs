@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use crate::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,25 +29,19 @@ impl Ty {
     }
     pub fn struct_(data: TyStruct) -> Self {
         Self {
-            kind: TyKind::Struct(Box::new(data)),
+            kind: TyKind::Struct(Rc::new(data)),
             ref_level: 0,
         }
     }
     pub fn oneof(data: TyOneOf) -> Self {
         Self {
-            kind: TyKind::OneOf(Box::new(data)),
-            ref_level: 0,
-        }
-    }
-    pub fn bitset(data: TyOneOf) -> Self {
-        Self {
-            kind: TyKind::BitSet(Box::new(data)),
+            kind: TyKind::OneOf(Rc::new(data)),
             ref_level: 0,
         }
     }
     pub fn array(item_ty: Ty, capacity: Word) -> Self {
         Self {
-            kind: TyKind::Array(Box::new(TyArray {
+            kind: TyKind::Array(Rc::new(TyArray {
                 ty: item_ty,
                 capacity,
             })),
@@ -106,19 +102,35 @@ impl Ty {
             _ => Err(Expected("indexable type")),
         }
     }
-    pub fn struct_field(&self, field_name: &str) -> Compile<&StructField> {
-        let fields = match &self.kind {
-            TyKind::Struct(fs) => fs,
-            _ => return Err(Expected("struct")),
-        };
-        Ok(fields.get(field_name)?)
+    pub fn struct_case(&self, case_name: &str) -> Compile<Word> {
+        match &self.kind {
+            TyKind::Struct(fs) => fs.get_case(case_name),
+            _ => Err(Expected("struct case")),
+        }
     }
-    pub fn oneof_member(&self, member_name: &str) -> Compile<TyOneOfMember> {
+    pub fn struct_field(&self, field_name: &str, case: StructCase) -> Compile<&StructField> {
+        match &self.kind {
+            TyKind::Struct(fs) => fs.get(field_name, case),
+            _ => Err(Expected("struct")),
+        }
+    }
+    pub fn oneof_member(&self, member_name: &str) -> Compile<&TyOneOfMember> {
         let fields = match &self.kind {
             TyKind::OneOf(fields) => fields,
+            TyKind::BitSet(fields) => fields,
             _ => return Err(Expected("oneof")),
         };
-        Ok(fields.get(&member_name)?.clone())
+        fields.get(member_name)
+    }
+    pub fn as_bitset(self) -> Compile<Self> {
+        match self.kind {
+            TyKind::OneOf(fields) => Ok(Self {
+                ref_level: self.ref_level,
+                kind: TyKind::BitSet(fields),
+            }),
+            TyKind::BitSet(_) => Ok(self),
+            _ => Err(Expected("bitset-compatible")),
+        }
     }
 }
 
@@ -127,18 +139,22 @@ enum TyKind {
     Void,
     Int,
     Bool,
-    Struct(Box<TyStruct>),
-    OneOf(Box<TyOneOf>),
-    BitSet(Box<TyOneOf>),
-    Array(Box<TyArray>),
+    Struct(Rc<TyStruct>),
+    OneOf(Rc<TyOneOf>),
+    BitSet(Rc<TyOneOf>),
+    Array(Rc<TyArray>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TyStruct {
     id: usize,
     size: Word,
-    fields: HashMap<String, StructField>,
+    fields: HashMap<(StructCase, String), StructField>,
+    cases: HashMap<String, Word>,
+    case_field: Option<StructField>,
 }
+
+type StructCase = Option<Word>;
 
 impl TyStruct {
     pub fn new(id: usize) -> Self {
@@ -146,25 +162,53 @@ impl TyStruct {
             id,
             size: 0,
             fields: HashMap::new(),
+            cases: HashMap::new(),
+            case_field: None,
         }
     }
-    pub fn insert(&mut self, k: String, ty: Ty) -> Compile<()> {
-        if self.fields.contains_key(&k) {
+    pub fn insert_case(&mut self, k: String) -> Compile<Word> {
+        let id = self.cases.len() as Word;
+        // insert a field for the case discriminator itself
+        if self.case_field.is_none() {
+            self.case_field = Some(StructField {
+                ty: Ty::int(),
+                offset: self.size,
+                case: None,
+            });
+            self.size += 1;
+        }
+
+        if self.cases.insert(k, id).is_some() {
+            return Err(Expected("duplicate struct case"));
+        }
+
+        Ok(id)
+    }
+    pub fn insert(&mut self, k: String, ty: Ty, case: StructCase) -> Compile<()> {
+        let key = (case, k);
+        if self.fields.contains_key(&key) {
             return Err(DuplicateField);
         }
         let size = ty.size();
         self.fields.insert(
-            k,
+            key,
             StructField {
                 ty,
                 offset: self.size,
+                case: None,
             },
         );
         self.size += size;
-        return Ok(());
+        Ok(())
     }
-    pub fn get(&self, k: &str) -> Compile<&StructField> {
-        self.fields.get(k).ok_or(MissingField)
+    pub fn get(&self, k: &str, case: StructCase) -> Compile<&StructField> {
+        self.fields
+            .get(&(case, k.to_string())) // fixme
+            .or_else(|| self.fields.get(&(None, k.to_string())))
+            .ok_or(MissingField)
+    }
+    pub fn get_case(&self, k: &str) -> Compile<Word> {
+        self.cases.get(k).copied().ok_or(Expected("case"))
     }
 }
 
@@ -172,6 +216,7 @@ impl TyStruct {
 pub struct StructField {
     pub ty: Ty,
     pub offset: Word,
+    pub case: Option<Word>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

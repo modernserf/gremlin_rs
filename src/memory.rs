@@ -197,7 +197,7 @@ impl Block {
             _ => unimplemented!(),
         }
     }
-    fn to_ea(&self, current_frame_offset: Word, index: Word) -> EA {
+    fn to_ea(self, current_frame_offset: Word, index: Word) -> EA {
         match &self {
             Self::Local(slice) => EA::StackOffset(current_frame_offset - slice.offset + index),
             Self::Stack(slice) => EA::StackOffset(current_frame_offset - slice.offset + index),
@@ -275,14 +275,6 @@ pub struct Expr {
     ctx: ExprContext,
 }
 
-// #[derive(Debug)]
-// enum ExprKind {
-//     Constant(Word),
-//     Resolved(Block),
-//     LValue(Block),
-//     DerefLValue(Block),
-// }
-
 #[derive(Debug)]
 #[allow(dead_code)]
 enum ExprKind {
@@ -305,7 +297,7 @@ impl Expr {
     pub fn resolved(ty: Ty, block: Block) -> Self {
         Self {
             ty,
-            kind: ExprKind::Resolved(block.clone()),
+            kind: ExprKind::Resolved(block),
             ctx: ExprContext::Block(block),
         }
     }
@@ -372,7 +364,7 @@ impl Expr {
         })
     }
     pub fn struct_field(self, field_name: &str) -> Compile<Self> {
-        let field = self.ty.struct_field(field_name)?;
+        let field = self.ty.struct_field(field_name, None)?;
         match self.kind {
             ExprKind::Constant(_) => unimplemented!(),
             ExprKind::Resolved(block) => Ok(Self {
@@ -397,36 +389,6 @@ impl Expr {
             }),
         }
     }
-    // pub fn index_ctx(self) -> Compile<ExprContext> {
-    //     Ok(ExprContext::Block(Block::R0))
-    // }
-    // pub fn index(self, index: Expr, memory: &mut Memory) -> Compile<Expr> {
-    //     let item_ty = self.ty.index_ty(&index.ty)?;
-
-    //     match self.kind {
-    //         ExprKind::Constant(_) => unimplemented!(),
-    //         ExprKind::Resolved(block) => unimplemented!(),
-    //         ExprKind::Reference {
-    //             deref_level,
-    //             next,
-    //             focus,
-    //         } => {
-    //             assert!(deref_level == 0, "todo: index array ptr");
-    //             // TODO: const indexes
-    //             index.resolve(memory);
-    //             memory.write(
-    //                 IR::Mov,
-    //                 self.ctx.to_dest(item_ty.size()),
-    //                 next.focus(focus).indexed(),
-    //             )
-    //         }
-    //     };
-    //     unimplemented!()
-    //     // xs[1]
-    //     //  Mov(R0, Immediate(1)),
-    //     //  Mov(dest, Indexed(0)),
-    // }
-
     pub fn op(self, memory: &mut Memory, op: Op, other: Expr, out_ty: Ty) -> Expr {
         match (&self.get_constant(), &other.get_constant()) {
             (Some(l), Some(r)) => {
@@ -451,14 +413,14 @@ impl Expr {
                 };
                 Self {
                     ty: out_ty,
-                    ctx: ExprContext::Block(block.clone()),
+                    ctx: ExprContext::Block(block),
                     kind: ExprKind::Resolved(block),
                 }
             }
         }
     }
     pub fn bitset_field(self, field_name: &str, memory: &mut Memory) -> Compile<Expr> {
-        let field = self.ty.oneof_member(&field_name)?;
+        let field = self.ty.oneof_member(field_name)?.clone();
         let dest = Dest::Block(self.resolve(memory).block);
         let out = memory.write(IR::BitTest, dest, Src::Immediate(field.index));
         let ty = Ty::bool();
@@ -485,10 +447,7 @@ impl Expr {
                     ResolvedExpr { ty: self.ty, block }
                 } else if deref_level == 1 {
                     let block = memory.deref(next, self.ty.size(), self.ctx, focus);
-                    ResolvedExpr {
-                        ty: self.ty,
-                        block: block,
-                    }
+                    ResolvedExpr { ty: self.ty, block }
                 } else {
                     unimplemented!()
                 }

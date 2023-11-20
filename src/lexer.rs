@@ -15,6 +15,7 @@ pub enum Token {
     Array,
     OneOf,
     Volatile,
+    Case,
     Colon,
     Semicolon,
     Comma,
@@ -59,9 +60,10 @@ impl Lexer {
     pub fn token(&mut self, token: Token) -> CompileOpt<()> {
         if self.peek()? == token {
             self.advance();
-            return Ok(Some(()));
+            Ok(Some(()))
+        } else {
+            Ok(None)
         }
-        return Ok(None);
     }
 
     pub fn expect_token(&mut self, tok: Token) -> Compile<()> {
@@ -114,15 +116,6 @@ impl Lexer {
             '#' => self.comment(),
             '\0' => Ok(Token::EndOfInput),
             '0'..='9' => self.number(),
-            'l' => self.keyword("let", Token::Let),
-            't' => {
-                self.adv_char();
-                match self.peek_char() {
-                    'r' => self.keyword_idx("true", 1, Token::True),
-                    _ => self.keyword_idx("type", 1, Token::Type),
-                }
-            }
-            'f' => self.keyword("false", Token::False),
             'a' => {
                 self.adv_char();
                 match self.peek_char() {
@@ -130,8 +123,18 @@ impl Lexer {
                     _ => self.keyword_idx("as", 1, Token::As),
                 }
             }
-            's' => self.keyword("struct", Token::Struct),
+            'c' => self.keyword("case", Token::Case),
+            'f' => self.keyword("false", Token::False),
+            'l' => self.keyword("let", Token::Let),
             'o' => self.keyword("oneof", Token::OneOf),
+            's' => self.keyword("struct", Token::Struct),
+            't' => {
+                self.adv_char();
+                match self.peek_char() {
+                    'r' => self.keyword_idx("true", 1, Token::True),
+                    _ => self.keyword_idx("type", 1, Token::Type),
+                }
+            }
             'v' => self.keyword("volatile", Token::Volatile),
             ';' => self.punc(Token::Semicolon),
             ',' => self.punc(Token::Comma),
