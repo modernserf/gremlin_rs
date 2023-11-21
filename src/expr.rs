@@ -102,7 +102,8 @@ impl Expr {
         })
     }
     pub fn record_field(self, field_name: &str) -> Compile<Self> {
-        let field = self.ty.record_field(field_name, None)?;
+        let record = self.ty.get_record()?;
+        let field = record.get(field_name, None)?;
         match self.kind {
             ExprKind::Constant(_) => unimplemented!(),
             ExprKind::Resolved(block) => Ok(Self {
@@ -167,11 +168,11 @@ impl Expr {
     }
     pub fn begin_match(self, memory: &mut Memory) -> Compile<MatchBuilder> {
         let res = self.resolve(memory);
-        let (case_field, map) = res.ty.record_cases()?;
-        let case_value = res.block.record_field(case_field);
-        let jump_table = memory.begin_match(case_value, map.len());
-        let cases = map.clone();
-        Ok(MatchBuilder::new(res.ty, res.block, jump_table, cases))
+        let record = res.ty.get_record()?;
+        let case_field = record.case_field.as_ref().ok_or(Expected("case field"))?;
+        let case_value = res.block.record_field(&case_field);
+        let jump_table = memory.begin_match(case_value, record.cases.len());
+        Ok(MatchBuilder::new(record, res.block, jump_table))
     }
 
     pub fn resolve(self, memory: &mut Memory) -> ResolvedExpr {

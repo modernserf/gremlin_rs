@@ -91,53 +91,55 @@ pub struct TyOneOfMember {
 #[derive(Debug)]
 pub struct MatchBuilder {
     table_index: usize,
-    ty: Ty,
-    cases: HashMap<String, Word>,
+    record: Rc<TyRecord>,
     end_addrs: Vec<usize>,
     block: Block,
 }
 impl MatchBuilder {
-    pub fn new(ty: Ty, block: Block, table_index: usize, cases: HashMap<String, Word>) -> Self {
+    pub fn new(record: Rc<TyRecord>, block: Block, table_index: usize) -> Self {
         Self {
-            ty,
+            record,
             block,
             table_index,
-            cases,
             end_addrs: Vec::new(),
         }
     }
     pub fn add_case(&self, tag: &str, memory: &mut Memory) -> Compile<MatchCaseBuilder> {
-        let case_id = *self.cases.get(tag).ok_or(Expected("case"))?;
+        let case_id = *self.record.cases.get(tag).ok_or(Expected("case"))?;
         memory.set_jump_target(self.table_index, case_id as usize);
 
-        Ok(MatchCaseBuilder::new(self.ty.clone(), case_id, self.block))
+        Ok(MatchCaseBuilder::new(
+            self.record.clone(),
+            case_id,
+            self.block,
+        ))
     }
     pub fn end_case(&mut self, memory: &mut Memory) {
         self.end_addrs.push(memory.end_case());
     }
     pub fn resolve(self, memory: &mut Memory) {
-        memory.set_jump_end_targets(self.table_index, self.cases.len(), &self.end_addrs)
+        memory.set_jump_end_targets(self.table_index, self.record.cases.len(), &self.end_addrs)
     }
 }
 
 #[derive(Debug)]
 pub struct MatchCaseBuilder {
-    ty: Ty,
+    record: Rc<TyRecord>,
     case_id: Word,
     parent_block: Block,
 }
 
 impl MatchCaseBuilder {
-    fn new(ty: Ty, case_id: Word, parent_block: Block) -> Self {
+    fn new(record: Rc<TyRecord>, case_id: Word, parent_block: Block) -> Self {
         Self {
-            ty,
+            record,
             case_id,
             parent_block,
         }
     }
     // TODO: create a new scope for each match case
     pub fn add_binding(&self, binding: String, scope: &mut Scope) -> Compile<()> {
-        let field = self.ty.record_field(&binding, Some(self.case_id))?;
+        let field = self.record.get(&binding, Some(self.case_id))?;
         let block = self.parent_block.record_field(field);
         scope.add_case_binding(binding, field.ty.clone(), block);
         Ok(())

@@ -102,11 +102,12 @@ impl Compiler {
     }
 
     fn record_expr(&mut self, ty: Ty, ctx: ExprContext, case: Option<Word>) -> Compile<Expr> {
-        let record = ctx.allocate(ty.size(), &mut self.memory);
+        let block = ctx.allocate(ty.size(), &mut self.memory);
+        let record = ty.get_record()?;
 
         if let Some(case_id) = case {
-            let (case_field, _) = ty.record_cases()?;
-            let field_ctx = ExprContext::Block(record.record_field(case_field));
+            let case_field = record.case_field.as_ref().ok_or(Expected("case field"))?;
+            let field_ctx = ExprContext::Block(block.record_field(case_field));
             field_ctx
                 .constant(Ty::int(), case_id)
                 .resolve(&mut self.memory);
@@ -118,8 +119,8 @@ impl Compiler {
                 None => break,
             };
             self.lexer.expect_token(Token::Colon)?;
-            let field = ty.record_field(&field_name, case)?;
-            let field_ctx = ExprContext::Block(record.record_field(field));
+            let field = record.get(&field_name, case)?;
+            let field_ctx = ExprContext::Block(block.record_field(field));
             let expr = self.expect_expr(field_ctx)?.resolve(&mut self.memory);
             field.ty.check(&expr.ty)?;
 
@@ -127,7 +128,7 @@ impl Compiler {
                 break;
             }
         }
-        Ok(Expr::resolved(ty, record))
+        Ok(Expr::resolved(ty, block))
     }
 
     fn oneof_member_expr(&mut self, name: &str, ctx: ExprContext) -> Compile<Expr> {
@@ -142,7 +143,7 @@ impl Compiler {
         match self.lexer.peek()? {
             Token::CurlyLeft => {
                 self.lexer.advance();
-                let case = ty.record_case(&key)?;
+                let case = ty.get_record()?.get_case(&key)?;
                 let out = self.record_expr(ty, ctx, Some(case))?;
                 self.lexer.expect_token(Token::CurlyRight)?;
                 Ok(out)

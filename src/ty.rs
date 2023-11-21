@@ -102,32 +102,12 @@ impl Ty {
             _ => Err(Expected("indexable type")),
         }
     }
-    pub fn record_case(&self, case_name: &str) -> Compile<Word> {
+    pub fn get_record(&self) -> Compile<Rc<TyRecord>> {
         match &self.kind {
-            TyKind::Struct(fs) => fs.get_case(case_name),
+            TyKind::Struct(fs) => Ok(fs.clone()),
             _ => Err(Expected("struct case")),
         }
     }
-    pub fn record_field(&self, field_name: &str, case: RecordCase) -> Compile<&RecordField> {
-        match &self.kind {
-            TyKind::Struct(fs) => fs.get(field_name, case),
-            _ => Err(Expected("struct")),
-        }
-    }
-    pub fn record_cases(&self) -> Compile<(&RecordField, &HashMap<String, i32>)> {
-        match &self.kind {
-            TyKind::Struct(fs) => {
-                let case_field = fs
-                    .case_field
-                    .as_ref()
-                    .ok_or(Expected("struct with cases"))?;
-                let case_map = &fs.cases;
-                Ok((case_field, case_map))
-            }
-            _ => Err(Expected("struct")),
-        }
-    }
-
     pub fn oneof_member(&self, member_name: &str) -> Compile<&TyOneOfMember> {
         let fields = match &self.kind {
             TyKind::OneOf(fields) => fields,
