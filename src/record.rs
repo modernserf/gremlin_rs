@@ -136,21 +136,10 @@ impl MatchCaseBuilder {
         }
     }
     // TODO: create a new scope for each match case
-    pub fn add_binding(&self, binding: String, memory: &mut Memory) -> Compile<()> {
+    pub fn add_binding(&self, binding: String, scope: &mut Scope) -> Compile<()> {
         let field = self.ty.struct_field(&binding, Some(self.case_id))?;
-        let block = self.parent_block.focus(Slice::from_struct_field(field));
-        let frame_offset = match block {
-            Block::Stack(slice) => slice.offset,
-            Block::Local(slice) => slice.offset,
-            _ => panic!("invalid block"),
-        };
-        memory.locals.insert(
-            binding,
-            ScopeRecord {
-                frame_offset,
-                ty: field.ty.clone(),
-            },
-        );
+        let block = self.parent_block.struct_field(field);
+        scope.add_case_binding(binding, field.ty.clone(), block);
         Ok(())
     }
 }

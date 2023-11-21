@@ -75,7 +75,7 @@ impl Expr {
         match self.kind {
             ExprKind::Resolved(block) => {
                 let size = deref_ty.size();
-                let out = memory.deref(block, size, self.ctx, Slice { offset: 0, size });
+                let out = memory.deref(block, size, self.ctx, None);
                 Ok(Self::resolved(deref_ty, out))
             }
             ExprKind::Reference {
@@ -168,7 +168,7 @@ impl Expr {
     pub fn begin_match(self, memory: &mut Memory) -> Compile<MatchBuilder> {
         let res = self.resolve(memory);
         let (case_field, map) = res.ty.struct_cases()?;
-        let case_value = res.block.focus(Slice::from_struct_field(case_field));
+        let case_value = res.block.struct_field(case_field);
         let jump_table = memory.begin_match(case_value, map.len());
         let cases = map.clone();
         Ok(MatchBuilder::new(res.ty, res.block, jump_table, cases))
@@ -192,7 +192,7 @@ impl Expr {
                         memory.write(IR::Mov, self.ctx.to_dest(src.size()), Src::Block(src));
                     ResolvedExpr { ty: self.ty, block }
                 } else if deref_level == 1 {
-                    let block = memory.deref(next, self.ty.size(), self.ctx, focus);
+                    let block = memory.deref(next, self.ty.size(), self.ctx, Some(focus));
                     ResolvedExpr { ty: self.ty, block }
                 } else {
                     unimplemented!()
@@ -235,10 +235,7 @@ impl ExprContext {
             ctx: self,
             kind: ExprKind::Reference {
                 deref_level: 0,
-                focus: Slice {
-                    offset: 0,
-                    size: block.size(),
-                },
+                focus: Slice::with_size(block.size()),
                 next: block,
             },
         }

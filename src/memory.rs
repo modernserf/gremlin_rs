@@ -7,9 +7,39 @@ use crate::ty::*;
 use crate::Compile;
 use crate::CompileError::*;
 
+pub struct Scope {
+    locals: HashMap<String, ScopeRecord>,
+}
+
+impl Scope {
+    pub fn new() -> Self {
+        Self {
+            locals: HashMap::new(),
+        }
+    }
+    pub fn identifier(&self, key: &str, ctx: ExprContext) -> Compile<Expr> {
+        let record = self
+            .locals
+            .get(key)
+            .ok_or_else(|| UnknownIdentifier(key.to_string()))?;
+        let block = Block::local(record.frame_offset, record.ty.size());
+        Ok(ctx.lvalue(record.ty.clone(), block))
+    }
+    pub fn store_local(&mut self, key: String, ty: Ty, frame_offset: Word) {
+        self.locals.insert(key, ScopeRecord { frame_offset, ty });
+    }
+    pub fn add_case_binding(&mut self, name: String, ty: Ty, block: Block) {
+        let frame_offset = match block {
+            Block::Stack(slice) => slice.offset,
+            Block::Local(slice) => slice.offset,
+            _ => panic!("invalid block"),
+        };
+        self.locals.insert(name, ScopeRecord { frame_offset, ty });
+    }
+}
+
 #[derive(Debug)]
 pub struct Memory {
-    pub locals: HashMap<String, ScopeRecord>,
     locals_offset: Word,
     current_frame_offset: Word,
     output: Vec<IR>,
@@ -18,7 +48,6 @@ pub struct Memory {
 impl Memory {
     pub fn new() -> Self {
         Self {
-            locals: HashMap::new(),
             locals_offset: 0,
             current_frame_offset: 0,
             output: Vec::new(),
@@ -33,6 +62,11 @@ impl Memory {
             self.output.push(IR::Sub(EA::SP, EA::Immediate(size)));
         }
         Block::stack(self.current_frame_offset, size)
+    }
+    pub fn store_local(&mut self, key: String, expr: ResolvedExpr, scope: &mut Scope) {
+        self.compact(expr.block);
+        self.locals_offset = self.current_frame_offset;
+        scope.store_local(key, expr.ty, self.locals_offset);
     }
     pub fn write(&mut self, op: IROp, dest: Dest, src: Src) -> Block {
         match dest {
@@ -72,25 +106,7 @@ impl Memory {
         }
         dest
     }
-    pub fn identifier(&self, key: &str, ctx: ExprContext) -> Compile<Expr> {
-        let record = self
-            .locals
-            .get(key)
-            .ok_or_else(|| UnknownIdentifier(key.to_string()))?;
-        let block = Block::local(record.frame_offset, record.ty.size());
-        Ok(ctx.lvalue(record.ty.clone(), block))
-    }
-    pub fn store_local(&mut self, key: String, expr: ResolvedExpr) {
-        self.compact(expr.block);
-        self.locals_offset = self.current_frame_offset;
-        self.locals.insert(
-            key,
-            ScopeRecord {
-                frame_offset: self.locals_offset,
-                ty: expr.ty,
-            },
-        );
-    }
+
     pub fn compact(&mut self, block: Block) {
         let stack_space = block.stack_space();
         if stack_space.size == 0 {
@@ -119,8 +135,9 @@ impl Memory {
         ptr_block: Block,
         dest_size: Word,
         ctx: ExprContext,
-        focus: Slice,
+        focus: Option<Slice>,
     ) -> Block {
+        let focus = focus.unwrap_or(Slice::with_size(dest_size));
         assert_eq!(ptr_block.size(), 1);
         self.write(IR::Mov, Dest::R0, Src::Block(ptr_block));
         self.write(IR::Mov, ctx.to_dest(dest_size), Src::R0Offset(focus))
@@ -217,11 +234,15 @@ impl Memory {
 
 #[derive(Debug, Copy, Clone)]
 pub struct Slice {
-    pub offset: Word,
-    pub size: Word,
+    offset: Word,
+    size: Word,
 }
 
 impl Slice {
+    pub fn with_size(size: Word) -> Self {
+        Self { offset: 0, size }
+    }
+
     pub fn from_struct_field(field: &RecordField) -> Self {
         Self {
             offset: field.offset,
@@ -312,9 +333,9 @@ impl Block {
 }
 
 #[derive(Debug)]
-pub struct ScopeRecord {
-    pub frame_offset: Word,
-    pub ty: Ty,
+struct ScopeRecord {
+    frame_offset: Word,
+    ty: Ty,
 }
 #[derive(Debug)]
 pub enum Src {

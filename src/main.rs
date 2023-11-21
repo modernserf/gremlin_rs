@@ -68,6 +68,7 @@ impl TyScope {
 
 struct Compiler {
     memory: Memory,
+    scope: Scope,
     ty_scope: TyScope,
     lexer: Lexer,
 }
@@ -76,6 +77,7 @@ impl Compiler {
     fn new(input: &str) -> Self {
         Self {
             lexer: Lexer::new(input),
+            scope: Scope::new(),
             ty_scope: TyScope::new(),
             memory: Memory::new(),
         }
@@ -229,7 +231,7 @@ impl Compiler {
             }
             Token::Identifier(name) => {
                 self.lexer.advance();
-                self.memory.identifier(&name, ctx)?
+                self.scope.identifier(&name, ctx)?
             }
             _ => return Ok(None),
         };
@@ -519,7 +521,7 @@ impl Compiler {
                 Some(b) => b,
                 None => break,
             };
-            case.add_binding(binding, &mut self.memory)?;
+            case.add_binding(binding, &mut self.scope)?;
             if self.lexer.token(Token::Comma)?.is_none() {
                 break;
             }
@@ -577,7 +579,7 @@ impl Compiler {
             Some(b) => b.check(&expr.ty)?,
             None => {}
         };
-        self.memory.store_local(binding, expr);
+        self.memory.store_local(binding, expr, &mut self.scope);
         Ok(())
     }
 
