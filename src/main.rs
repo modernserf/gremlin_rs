@@ -487,7 +487,7 @@ impl Compiler {
         let mut elses = Vec::new();
         let mut if_rec = self.if_cond()?;
         self.lexer.expect_token(Token::Then)?;
-        self.block()?;
+        self.scoped_block()?;
         loop {
             if self.lexer.token(Token::Else)?.is_none() {
                 break;
@@ -497,10 +497,10 @@ impl Compiler {
                 elses.push(self.memory.begin_else(if_rec));
                 if_rec = self.if_cond()?;
                 self.lexer.expect_token(Token::Then)?;
-                self.block()?;
+                self.scoped_block()?;
             } else {
                 if_rec = self.memory.begin_else(if_rec);
-                self.block()?;
+                self.scoped_block()?;
                 break;
             }
         }
@@ -545,9 +545,12 @@ impl Compiler {
                 .type_ident_token()?
                 .ok_or(Expected("match case"))?;
             let mut case = match_builder.add_case(&tag, &mut self.memory)?;
+
+            self.scope.push_scope(&self.memory);
             self.match_bindings(&mut case)?;
             self.block()?;
             match_builder.end_case(&mut self.memory);
+            self.scope.pop_scope(&mut self.memory);
         }
         self.lexer.expect_token(Token::End)?;
         match_builder.resolve(&mut self.memory);
@@ -558,7 +561,7 @@ impl Compiler {
         let while_idx = self.memory.begin_while();
         let cond = self.if_cond()?;
         self.lexer.expect_token(Token::Loop)?;
-        self.block()?;
+        self.scoped_block()?;
         self.lexer.expect_token(Token::End)?;
         self.memory.end_while(while_idx, cond);
         Ok(())
@@ -617,6 +620,13 @@ impl Compiler {
             }
         };
         Ok(Some(()))
+    }
+
+    fn scoped_block(&mut self) -> Compile<()> {
+        self.scope.push_scope(&self.memory);
+        self.block()?;
+        self.scope.pop_scope(&mut self.memory);
+        Ok(())
     }
 
     // TODO: more idiomatic semicolon rules
@@ -1468,6 +1478,37 @@ mod test {
                 Add(SP, Immediate(2)),
             ],
             10,
+        );
+    }
+
+    #[test]
+    fn block_scope() {
+        expect_ir_result(
+            "
+            let x := 1;
+            if true then
+                let x := 2;
+                x := 3;
+            end;
+            x
+        ",
+            vec![
+                // let x:= 1
+                Mov(PushStack, Immediate(1)),
+                // true
+                Mov(PushStack, Immediate(1)),
+                // if .. then
+                BranchZero(Immediate(3), PopStack),
+                // let x := 2; (new x)
+                Mov(PushStack, Immediate(2)),
+                // x := 3;
+                Mov(StackOffset(0), Immediate(3)),
+                // drop scope
+                Add(SP, Immediate(1)),
+                // x
+                Mov(PushStack, StackOffset(0)),
+            ],
+            1,
         );
     }
 }

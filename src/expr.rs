@@ -218,34 +218,65 @@ impl ResolvedExpr {
 }
 
 pub struct Scope {
-    locals: HashMap<String, ScopeRecord>,
+    frames: Vec<ScopeFrame>,
+}
+
+struct ScopeFrame {
+    scope_index: ScopeIndex,
+    scope: HashMap<String, ScopeRecord>,
+}
+
+impl ScopeFrame {
+    fn new(scope_index: ScopeIndex) -> Self {
+        Self {
+            scope_index,
+            scope: HashMap::new(),
+        }
+    }
 }
 
 impl Scope {
     pub fn new() -> Self {
         Self {
-            locals: HashMap::new(),
+            frames: vec![ScopeFrame::new(ScopeIndex::root())],
         }
     }
     pub fn identifier(&self, key: &str, ctx: ExprTarget) -> Compile<Expr> {
-        let record = self
-            .locals
-            .get(key)
-            .ok_or_else(|| UnknownIdentifier(key.to_string()))?;
+        let record = self.get(key)?;
         let block = Block::local(record.frame_offset, record.ty.size());
         Ok(ctx.lvalue(record.ty.clone(), block))
     }
     pub fn store_local(&mut self, key: String, ty: Ty, frame_offset: Word) {
-        self.locals.insert(key, ScopeRecord { frame_offset, ty });
+        self.insert(key, ScopeRecord { frame_offset, ty });
     }
     pub fn add_case_binding(&mut self, name: String, ty: Ty, block: Block) {
-        self.locals.insert(
+        self.insert(
             name,
             ScopeRecord {
                 frame_offset: block.frame_offset().expect("frame offset"),
                 ty,
             },
         );
+    }
+    pub fn push_scope(&mut self, memory: &Memory) {
+        self.frames.push(ScopeFrame::new(memory.begin_scope()));
+    }
+    pub fn pop_scope(&mut self, memory: &mut Memory) {
+        let last_frame = self.frames.pop().expect("scope frame");
+        memory.end_scope(last_frame.scope_index);
+    }
+    fn get(&self, key: &str) -> Compile<&ScopeRecord> {
+        for frame in self.frames.iter().rev() {
+            match frame.scope.get(key) {
+                Some(rec) => return Ok(rec),
+                None => {}
+            };
+        }
+        Err(UnknownIdentifier(key.to_string()))
+    }
+    fn insert(&mut self, key: String, value: ScopeRecord) {
+        let len = self.frames.len();
+        self.frames[len - 1].scope.insert(key, value);
     }
 }
 

@@ -96,15 +96,27 @@ impl Memory {
         }
         Block::stack(self.current_frame_offset, size)
     }
+    pub fn deref(&mut self, ptr_block: Block, dest: Dest, focus: Slice) -> Block {
+        assert_eq!(ptr_block.size(), 1);
+        self.write(IR::Mov, Dest::R0, Src::Block(ptr_block));
+        self.write(IR::Mov, dest, Src::R0Offset(focus))
+    }
     pub fn store_local(&mut self, key: String, expr: ResolvedExpr, scope: &mut Scope) {
         self.compact(expr.block);
         self.locals_offset = self.current_frame_offset;
         scope.store_local(key, expr.ty, self.locals_offset);
     }
-    pub fn deref(&mut self, ptr_block: Block, dest: Dest, focus: Slice) -> Block {
-        assert_eq!(ptr_block.size(), 1);
-        self.write(IR::Mov, Dest::R0, Src::Block(ptr_block));
-        self.write(IR::Mov, dest, Src::R0Offset(focus))
+    pub fn begin_scope(&self) -> ScopeIndex {
+        ScopeIndex {
+            frame_offset: self.current_frame_offset,
+            locals_offset: self.locals_offset,
+        }
+    }
+    pub fn end_scope(&mut self, scope_index: ScopeIndex) {
+        let to_drop = self.current_frame_offset - scope_index.frame_offset;
+        self.current_frame_offset = scope_index.frame_offset;
+        self.locals_offset = scope_index.locals_offset;
+        self.drop(to_drop);
     }
     // control flow
     pub fn begin_cond(&mut self, expr: Expr) -> CondIndex {
@@ -199,6 +211,21 @@ pub struct CondIndex {
 #[derive(Debug)]
 pub struct WhileIndex {
     index: usize,
+}
+
+#[derive(Debug)]
+pub struct ScopeIndex {
+    frame_offset: Word,
+    locals_offset: Word,
+}
+
+impl ScopeIndex {
+    pub fn root() -> Self {
+        ScopeIndex {
+            frame_offset: 0,
+            locals_offset: 0,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
