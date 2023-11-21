@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::memory::*;
 use crate::op::Op;
 use crate::record::*;
@@ -10,7 +12,7 @@ use crate::{Compile, CompileError::*};
 pub struct Expr {
     pub ty: Ty,
     kind: ExprKind,
-    ctx: ExprContext,
+    ctx: ExprTarget,
 }
 
 #[derive(Debug)]
@@ -36,7 +38,7 @@ impl Expr {
         Self {
             ty,
             kind: ExprKind::Resolved(block),
-            ctx: ExprContext::Block(block),
+            ctx: ExprTarget::Block(block),
         }
     }
     pub fn get_constant(&self) -> Option<Word> {
@@ -45,7 +47,7 @@ impl Expr {
             _ => None,
         }
     }
-    pub fn assign_ctx(self) -> Compile<ExprContext> {
+    pub fn assign_ctx(self) -> Compile<ExprTarget> {
         match self.kind {
             ExprKind::Reference {
                 deref_level,
@@ -53,9 +55,9 @@ impl Expr {
                 focus,
             } => {
                 if deref_level > 0 {
-                    Ok(ExprContext::RefBlock(next))
+                    Ok(ExprTarget::RefBlock(next))
                 } else {
-                    Ok(ExprContext::Block(next.focus(focus)))
+                    Ok(ExprTarget::Block(next.focus(focus)))
                 }
             }
             _ => Err(Expected("lvalue")),
@@ -152,7 +154,7 @@ impl Expr {
                 };
                 Self {
                     ty: out_ty,
-                    ctx: ExprContext::Block(block),
+                    ctx: ExprTarget::Block(block),
                     kind: ExprKind::Resolved(block),
                 }
             }
@@ -215,14 +217,52 @@ impl ResolvedExpr {
     }
 }
 
+pub struct Scope {
+    locals: HashMap<String, ScopeRecord>,
+}
+
+impl Scope {
+    pub fn new() -> Self {
+        Self {
+            locals: HashMap::new(),
+        }
+    }
+    pub fn identifier(&self, key: &str, ctx: ExprTarget) -> Compile<Expr> {
+        let record = self
+            .locals
+            .get(key)
+            .ok_or_else(|| UnknownIdentifier(key.to_string()))?;
+        let block = Block::local(record.frame_offset, record.ty.size());
+        Ok(ctx.lvalue(record.ty.clone(), block))
+    }
+    pub fn store_local(&mut self, key: String, ty: Ty, frame_offset: Word) {
+        self.locals.insert(key, ScopeRecord { frame_offset, ty });
+    }
+    pub fn add_case_binding(&mut self, name: String, ty: Ty, block: Block) {
+        self.locals.insert(
+            name,
+            ScopeRecord {
+                frame_offset: block.frame_offset().expect("frame offset"),
+                ty,
+            },
+        );
+    }
+}
+
 #[derive(Debug)]
-pub enum ExprContext {
+struct ScopeRecord {
+    frame_offset: Word,
+    ty: Ty,
+}
+
+#[derive(Debug)]
+pub enum ExprTarget {
     Stack,
     Block(Block),
     RefBlock(Block),
 }
 
-impl ExprContext {
+impl ExprTarget {
     pub fn constant(self, ty: Ty, value: Word) -> Expr {
         Expr {
             ty,

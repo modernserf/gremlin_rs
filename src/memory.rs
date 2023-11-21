@@ -1,11 +1,7 @@
-use std::collections::HashMap;
-
 use crate::expr::*;
 use crate::record::*;
 use crate::runtime::*;
 use crate::ty::*;
-use crate::Compile;
-use crate::CompileError::*;
 
 #[derive(Debug)]
 pub struct Memory {
@@ -111,7 +107,7 @@ impl Memory {
         self.write(IR::Mov, dest, Src::R0Offset(focus))
     }
     // control flow
-    pub fn begin_cond(&mut self, expr: Expr) -> CondRecord {
+    pub fn begin_cond(&mut self, expr: Expr) -> CondIndex {
         let res = expr.resolve(self);
         let ea = match res.block {
             Block::Stack(slice) => {
@@ -126,16 +122,16 @@ impl Memory {
         };
         let index = self.output.len();
         self.output.push(IR::BranchZero(EA::Immediate(-1), ea));
-        CondRecord { index }
+        CondIndex { index }
     }
-    pub fn begin_else(&mut self, if_rec: CondRecord) -> CondRecord {
+    pub fn begin_else(&mut self, if_rec: CondIndex) -> CondIndex {
         let else_index = self.output.len();
         self.output
             .push(IR::BranchZero(EA::Immediate(-1), EA::Immediate(0)));
         self.end_if(if_rec);
-        CondRecord { index: else_index }
+        CondIndex { index: else_index }
     }
-    pub fn end_if(&mut self, rec: CondRecord) {
+    pub fn end_if(&mut self, rec: CondIndex) {
         let original = &self.output[rec.index];
         let displacement = (self.output.len() - rec.index - 1) as Word;
         self.output[rec.index] = match original {
@@ -143,32 +139,32 @@ impl Memory {
             _ => unreachable!(),
         };
     }
-    pub fn begin_while(&mut self) -> WhileRecord {
-        WhileRecord {
+    pub fn begin_while(&mut self) -> WhileIndex {
+        WhileIndex {
             index: self.output.len(),
         }
     }
-    pub fn end_while(&mut self, while_rec: WhileRecord, cond: CondRecord) {
+    pub fn end_while(&mut self, while_rec: WhileIndex, cond: CondIndex) {
         let jump_back = (self.output.len() - while_rec.index + 1) as Word;
         self.output
             .push(IR::BranchZero(EA::Immediate(-jump_back), EA::Immediate(0)));
         self.end_if(cond);
     }
-    pub fn begin_match(&mut self, block: Block, size: usize) -> usize {
+    pub fn begin_match(&mut self, block: Block, size: usize) -> CaseIndex {
         self.output.push(IR::BranchZero(
             block.to_ea(self.current_frame_offset, 0),
             EA::Immediate(0),
         ));
-        let jump_table_addr = self.output.len();
+        let index = self.output.len();
         for _ in 0..size {
             self.output
                 .push(IR::BranchZero(EA::Immediate(-1), EA::Immediate(0)));
         }
-        jump_table_addr
+        CaseIndex { index }
     }
-    pub fn set_jump_target(&mut self, table_index: usize, offset: usize) {
-        let displacement = (self.output.len() - table_index - 1 - offset) as Word;
-        self.output[table_index + offset] =
+    pub fn set_jump_target(&mut self, rec: CaseIndex, offset: usize) {
+        let displacement = (self.output.len() - rec.index - 1 - offset) as Word;
+        self.output[rec.index + offset] =
             IR::BranchZero(EA::Immediate(displacement), EA::Immediate(0));
     }
     pub fn end_case(&mut self) -> usize {
@@ -177,15 +173,15 @@ impl Memory {
             .push(IR::BranchZero(EA::Immediate(-1), EA::Immediate(0)));
         index
     }
-    pub fn set_jump_end_targets(&mut self, table_index: usize, len: usize, case_ends: &[usize]) {
-        let displacement = (self.output.len() - table_index - 1) as Word;
+    pub fn set_jump_end_targets(&mut self, rec: CaseIndex, len: usize, case_ends: &[usize]) {
+        let displacement = (self.output.len() - rec.index - 1) as Word;
         for i in 0..len {
-            match &self.output[table_index + i] {
+            match &self.output[rec.index + i] {
                 IR::BranchZero(EA::Immediate(-1), _) => {}
                 IR::BranchZero(_, _) => continue,
                 _ => panic!("expected jump table instruction"),
             }
-            self.output[table_index + i] =
+            self.output[rec.index + i] =
                 IR::BranchZero(EA::Immediate(displacement), EA::Immediate(0));
         }
         for index in case_ends {
@@ -193,6 +189,21 @@ impl Memory {
             self.output[*index] = IR::BranchZero(EA::Immediate(displacement), EA::Immediate(0));
         }
     }
+}
+
+#[derive(Debug)]
+pub struct CondIndex {
+    index: usize,
+}
+
+#[derive(Debug)]
+pub struct WhileIndex {
+    index: usize,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct CaseIndex {
+    index: usize,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -237,13 +248,13 @@ pub enum Block {
 }
 
 impl Block {
-    fn stack(offset: Word, size: Word) -> Self {
+    pub fn stack(offset: Word, size: Word) -> Self {
         Self::Stack(Slice { offset, size })
     }
-    fn local(offset: Word, size: Word) -> Self {
+    pub fn local(offset: Word, size: Word) -> Self {
         Self::Local(Slice { offset, size })
     }
-    fn r0_offset(offset: Word, size: Word) -> Self {
+    pub fn r0_offset(offset: Word, size: Word) -> Self {
         Self::R0Offset(Slice { offset, size })
     }
     pub fn size(&self) -> Word {
@@ -259,6 +270,13 @@ impl Block {
             Self::Stack(slice) => Self::Stack(slice.shrink_top(new_size)),
             Self::Local(slice) => Self::Local(slice.shrink_top(new_size)),
             _ => unimplemented!(),
+        }
+    }
+    pub fn frame_offset(self) -> Option<Word> {
+        match self {
+            Self::Stack(slice) => Some(slice.offset),
+            Self::Local(slice) => Some(slice.offset),
+            _ => None,
         }
     }
     fn to_ea(self, current_frame_offset: Word, index: Word) -> EA {
@@ -312,56 +330,9 @@ impl Src {
     }
 }
 
-#[derive(Debug)]
-pub struct CondRecord {
-    index: usize,
-}
-
-#[derive(Debug)]
-pub struct WhileRecord {
-    index: usize,
-}
-
 pub enum Dest {
     Block(Block),
     RefBlock(Block, Word),
     Stack(Word),
     R0,
-}
-
-pub struct Scope {
-    locals: HashMap<String, ScopeRecord>,
-}
-
-impl Scope {
-    pub fn new() -> Self {
-        Self {
-            locals: HashMap::new(),
-        }
-    }
-    pub fn identifier(&self, key: &str, ctx: ExprContext) -> Compile<Expr> {
-        let record = self
-            .locals
-            .get(key)
-            .ok_or_else(|| UnknownIdentifier(key.to_string()))?;
-        let block = Block::local(record.frame_offset, record.ty.size());
-        Ok(ctx.lvalue(record.ty.clone(), block))
-    }
-    pub fn store_local(&mut self, key: String, ty: Ty, frame_offset: Word) {
-        self.locals.insert(key, ScopeRecord { frame_offset, ty });
-    }
-    pub fn add_case_binding(&mut self, name: String, ty: Ty, block: Block) {
-        let frame_offset = match block {
-            Block::Stack(slice) => slice.offset,
-            Block::Local(slice) => slice.offset,
-            _ => panic!("invalid block"),
-        };
-        self.locals.insert(name, ScopeRecord { frame_offset, ty });
-    }
-}
-
-#[derive(Debug)]
-struct ScopeRecord {
-    frame_offset: Word,
-    ty: Ty,
 }

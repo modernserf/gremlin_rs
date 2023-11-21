@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::expr::Scope;
 use crate::memory::*;
 use crate::runtime::Word;
 use crate::ty::*;
 use crate::{Compile, CompileError::*};
-
-pub type RcTyRecord = Rc<TyRecord>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TyRecord {
@@ -90,13 +89,13 @@ pub struct TyOneOfMember {
 
 #[derive(Debug)]
 pub struct MatchBuilder {
-    table_index: usize,
+    table_index: CaseIndex,
     record: Rc<TyRecord>,
     end_addrs: Vec<usize>,
     block: Block,
 }
 impl MatchBuilder {
-    pub fn new(record: Rc<TyRecord>, block: Block, table_index: usize) -> Self {
+    pub fn new(record: Rc<TyRecord>, block: Block, table_index: CaseIndex) -> Self {
         Self {
             record,
             block,

@@ -83,7 +83,7 @@ impl Compiler {
         }
     }
 
-    fn bitset_expr(&mut self, ty: Ty, ctx: ExprContext) -> Compile<Expr> {
+    fn bitset_expr(&mut self, ty: Ty, ctx: ExprTarget) -> Compile<Expr> {
         let mut value = 0;
         loop {
             let key = match self.lexer.type_ident_token()? {
@@ -101,13 +101,13 @@ impl Compiler {
         Ok(ctx.constant(ty.as_bitset()?, value))
     }
 
-    fn record_expr(&mut self, ty: Ty, ctx: ExprContext, case: Option<Word>) -> Compile<Expr> {
+    fn record_expr(&mut self, ty: Ty, ctx: ExprTarget, case: Option<Word>) -> Compile<Expr> {
         let block = ctx.allocate(ty.size(), &mut self.memory);
         let record = ty.get_record()?;
 
         if let Some(case_id) = case {
             let case_field = record.case_field.as_ref().ok_or(Expected("case field"))?;
-            let field_ctx = ExprContext::Block(block.record_field(case_field));
+            let field_ctx = ExprTarget::Block(block.record_field(case_field));
             field_ctx
                 .constant(Ty::int(), case_id)
                 .resolve(&mut self.memory);
@@ -120,7 +120,7 @@ impl Compiler {
             };
             self.lexer.expect_token(Token::Colon)?;
             let field = record.get(&field_name, case)?;
-            let field_ctx = ExprContext::Block(block.record_field(field));
+            let field_ctx = ExprTarget::Block(block.record_field(field));
             let expr = self.expect_expr(field_ctx)?.resolve(&mut self.memory);
             field.ty.check(&expr.ty)?;
 
@@ -131,7 +131,7 @@ impl Compiler {
         Ok(Expr::resolved(ty, block))
     }
 
-    fn oneof_member_expr(&mut self, name: &str, ctx: ExprContext) -> Compile<Expr> {
+    fn oneof_member_expr(&mut self, name: &str, ctx: ExprTarget) -> Compile<Expr> {
         let ty = self.ty_scope.get(name)?;
 
         self.lexer.expect_token(Token::Dot)?;
@@ -155,7 +155,7 @@ impl Compiler {
         }
     }
 
-    fn array_expr(&mut self, ctx: ExprContext) -> Compile<Expr> {
+    fn array_expr(&mut self, ctx: ExprTarget) -> Compile<Expr> {
         self.lexer.expect_token(Token::SqLeft)?;
         let item_ty = self.expect_type_expr()?;
         self.lexer.expect_token(Token::Colon)?;
@@ -168,7 +168,7 @@ impl Compiler {
 
         let mut i = 0;
         loop {
-            let cell_ctx = ExprContext::Block(block.array_index(&item_ty, i));
+            let cell_ctx = ExprTarget::Block(block.array_index(&item_ty, i));
             let expr = match self.expr(cell_ctx)? {
                 Some(p) => p.resolve(&mut self.memory),
                 None => break,
@@ -188,7 +188,7 @@ impl Compiler {
         Ok(Expr::resolved(ty, block))
     }
 
-    fn base_expr(&mut self, ctx: ExprContext) -> CompileOpt<Expr> {
+    fn base_expr(&mut self, ctx: ExprTarget) -> CompileOpt<Expr> {
         let res = match self.lexer.peek()? {
             Token::ParLeft => {
                 self.lexer.advance();
@@ -239,7 +239,7 @@ impl Compiler {
         Ok(Some(res))
     }
 
-    fn postfix_expr(&mut self, ctx: ExprContext) -> CompileOpt<Expr> {
+    fn postfix_expr(&mut self, ctx: ExprTarget) -> CompileOpt<Expr> {
         let mut left = match self.base_expr(ctx)? {
             Some(e) => e,
             None => return Ok(None),
@@ -255,12 +255,12 @@ impl Compiler {
                         // get pointer to left
                         let ptr = left.add_ref(&mut self.memory)?;
                         // add (index * size) to value of pointer
-                        let idx = self.expect_expr(ExprContext::Stack)?;
+                        let idx = self.expect_expr(ExprTarget::Stack)?;
 
                         let offset = idx.op(
                             &mut self.memory,
                             Op::Mul,
-                            ExprContext::Stack.constant(Ty::int(), item_ty.size()),
+                            ExprTarget::Stack.constant(Ty::int(), item_ty.size()),
                             Ty::int(),
                         );
                         let out_ty = ptr.ty.clone();
@@ -289,12 +289,12 @@ impl Compiler {
         }
     }
 
-    fn unary_op_expr(&mut self, ctx: ExprContext) -> CompileOpt<Expr> {
+    fn unary_op_expr(&mut self, ctx: ExprTarget) -> CompileOpt<Expr> {
         let out = match self.lexer.peek()? {
             Token::Minus => {
                 self.lexer.advance();
                 let left = ctx.constant(Ty::int(), 0);
-                let right = self.expect_unary_op_expr(ExprContext::Stack)?;
+                let right = self.expect_unary_op_expr(ExprTarget::Stack)?;
                 left.op(&mut self.memory, Op::Sub, right, Ty::int())
             }
             Token::Ampersand => {
@@ -312,11 +312,11 @@ impl Compiler {
         Ok(Some(out))
     }
 
-    fn expect_unary_op_expr(&mut self, ctx: ExprContext) -> Compile<Expr> {
+    fn expect_unary_op_expr(&mut self, ctx: ExprTarget) -> Compile<Expr> {
         self.unary_op_expr(ctx)?.ok_or(Expected("expr"))
     }
 
-    fn op_expr(&mut self, ctx: ExprContext) -> CompileOpt<Expr> {
+    fn op_expr(&mut self, ctx: ExprTarget) -> CompileOpt<Expr> {
         let left = match self.unary_op_expr(ctx)? {
             Some(expr) => expr,
             None => return Ok(None),
@@ -326,7 +326,7 @@ impl Compiler {
         loop {
             match self.lexer.op()? {
                 Some(op) => {
-                    let right = self.expect_unary_op_expr(ExprContext::Stack)?;
+                    let right = self.expect_unary_op_expr(ExprTarget::Stack)?;
                     op_expr.next(&mut self.memory, op, right)?;
                 }
                 // None => return Ok(Some(op_parser.unwind(&mut self.memory)?)),
@@ -335,7 +335,7 @@ impl Compiler {
         }
     }
 
-    fn assign_expr(&mut self, ctx: ExprContext) -> CompileOpt<Expr> {
+    fn assign_expr(&mut self, ctx: ExprTarget) -> CompileOpt<Expr> {
         let left = match self.op_expr(ctx)? {
             Some(x) => x,
             None => return Ok(None),
@@ -348,7 +348,7 @@ impl Compiler {
             .map(Some)
     }
 
-    fn as_expr(&mut self, ctx: ExprContext) -> CompileOpt<Expr> {
+    fn as_expr(&mut self, ctx: ExprTarget) -> CompileOpt<Expr> {
         let value = match self.assign_expr(ctx)? {
             Some(x) => x,
             None => return Ok(None),
@@ -360,11 +360,11 @@ impl Compiler {
         Ok(Some(value.cast_ty(ty)?))
     }
 
-    fn expr(&mut self, ctx: ExprContext) -> CompileOpt<Expr> {
+    fn expr(&mut self, ctx: ExprTarget) -> CompileOpt<Expr> {
         self.as_expr(ctx)
     }
 
-    fn expect_expr(&mut self, ctx: ExprContext) -> Compile<Expr> {
+    fn expect_expr(&mut self, ctx: ExprTarget) -> Compile<Expr> {
         self.expr(ctx)?.ok_or(Expected("expr"))
     }
 
@@ -476,8 +476,8 @@ impl Compiler {
         Ok(())
     }
 
-    fn if_cond(&mut self) -> Compile<CondRecord> {
-        let cond = self.expect_expr(ExprContext::Stack)?;
+    fn if_cond(&mut self) -> Compile<CondIndex> {
+        let cond = self.expect_expr(ExprTarget::Stack)?;
         Ty::bool().check(&cond.ty)?;
         Ok(self.memory.begin_cond(cond))
     }
@@ -533,7 +533,7 @@ impl Compiler {
     }
 
     fn match_stmt(&mut self) -> Compile<()> {
-        let target = self.expect_expr(ExprContext::Stack)?;
+        let target = self.expect_expr(ExprTarget::Stack)?;
         self.lexer.expect_token(Token::Then)?;
         let mut match_builder = target.begin_match(&mut self.memory)?;
         loop {
@@ -574,7 +574,7 @@ impl Compiler {
         };
         self.lexer.expect_token(Token::ColonEq)?;
         let expr = self
-            .expect_expr(ExprContext::Stack)?
+            .expect_expr(ExprTarget::Stack)?
             .resolve(&mut self.memory);
         match bind_ty {
             Some(b) => b.check(&expr.ty)?,
@@ -607,7 +607,7 @@ impl Compiler {
                 self.while_stmt()?;
             }
             _ => {
-                match self.expr(ExprContext::Stack)? {
+                match self.expr(ExprTarget::Stack)? {
                     Some(expr) => {
                         let res = expr.resolve(&mut self.memory);
                         self.memory.compact(res.block);
