@@ -1,14 +1,18 @@
+mod expr;
 mod lexer;
 mod memory;
 mod op;
 mod runtime;
+mod structs;
 mod ty;
 
+use expr::*;
 use lexer::*;
 use memory::*;
 use op::*;
 use runtime::*;
 use std::collections::HashMap;
+use structs::*;
 use ty::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1,4 +1,5 @@
-use crate::memory::{Expr, Memory};
+use crate::expr::Expr;
+use crate::memory::Memory;
 use crate::runtime::{IROp, Word, IR};
 use crate::ty::*;
 use crate::Compile;

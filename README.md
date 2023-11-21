@@ -2,17 +2,6 @@
 
 A low level programming language
 
-next up:
-
-- forward context
-
-refactors:
-
-- ref unary op expr should be own ast node
-- use constructor fns
-- compile errors start with blank source_info & add when propagating up
-- clean up handling of semicolons
-
 # homermobile zone
 
 need to figure out what exactly the deal with syntax is, choose level of affectedness that is odd to look at but easy to type
@@ -188,6 +177,13 @@ from "package" use {gleh}
 Gremlin
 
 I'm writing another programming language. The one I worked on last year was "Goblin", an homage to 90s scripting languages. This one is called "Gremlin", and its a low-level systems language for home computers of the late 1980s.
+
+Here are the parameters for the project:
+
+- static types
+- semi-manual memory management
+- single pass compiler
+- some OOP-like features but an avoidance of "classes" or "objects"
 
 To this end, it features a relatively simple static type system & manual memory management. The language can be compiled in a single pass, and individual modules can be compiled separately. There are parameterized types, but function parameters with generic types must be word-sized (ie primitives or pointers). OOP is largely avoided in favor of explicit dictionary-passing.
 
