@@ -21,7 +21,7 @@ pub enum Token {
     Loop,
     Match,
     OneOf,
-    Struct,
+    Record,
     Then,
     Type,
     Volatile,
@@ -157,7 +157,7 @@ impl Lexer {
             }
             'm' => self.keyword("match", Token::Match),
             'o' => self.keyword("oneof", Token::OneOf),
-            's' => self.keyword("struct", Token::Struct),
+            'r' => self.keyword("record", Token::Record),
             't' => {
                 self.adv_char();
                 match self.peek_char() {

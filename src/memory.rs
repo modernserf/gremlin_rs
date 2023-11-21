@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::expr::*;
+use crate::record::*;
 use crate::runtime::*;
-use crate::structs::*;
 use crate::ty::*;
 use crate::Compile;
 use crate::CompileError::*;
@@ -222,7 +222,7 @@ pub struct Slice {
 }
 
 impl Slice {
-    pub fn from_struct_field(field: &StructField) -> Self {
+    pub fn from_struct_field(field: &RecordField) -> Self {
         Self {
             offset: field.offset,
             size: field.ty.size(),
@@ -300,7 +300,7 @@ impl Block {
             _ => unimplemented!(),
         }
     }
-    pub fn struct_field(&self, field: &StructField) -> Block {
+    pub fn struct_field(&self, field: &RecordField) -> Block {
         self.focus(Slice::from_struct_field(field))
     }
     pub fn array_index(&self, item_ty: &Ty, index: Word) -> Block {

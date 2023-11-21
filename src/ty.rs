@@ -27,7 +27,7 @@ impl Ty {
             ref_level: 0,
         }
     }
-    pub fn struct_(data: TyStruct) -> Self {
+    pub fn struct_(data: TyRecord) -> Self {
         Self {
             kind: TyKind::Struct(Rc::new(data)),
             ref_level: 0,
@@ -108,13 +108,13 @@ impl Ty {
             _ => Err(Expected("struct case")),
         }
     }
-    pub fn struct_field(&self, field_name: &str, case: StructCase) -> Compile<&StructField> {
+    pub fn struct_field(&self, field_name: &str, case: RecordCase) -> Compile<&RecordField> {
         match &self.kind {
             TyKind::Struct(fs) => fs.get(field_name, case),
             _ => Err(Expected("struct")),
         }
     }
-    pub fn struct_cases(&self) -> Compile<(&StructField, &HashMap<String, i32>)> {
+    pub fn struct_cases(&self) -> Compile<(&RecordField, &HashMap<String, i32>)> {
         match &self.kind {
             TyKind::Struct(fs) => {
                 let case_field = fs
@@ -153,7 +153,7 @@ enum TyKind {
     Void,
     Int,
     Bool,
-    Struct(Rc<TyStruct>),
+    Struct(Rc<TyRecord>),
     OneOf(Rc<TyOneOf>),
     BitSet(Rc<TyOneOf>),
     Array(Rc<TyArray>),

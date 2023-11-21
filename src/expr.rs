@@ -1,7 +1,7 @@
 use crate::memory::*;
 use crate::op::Op;
+use crate::record::*;
 use crate::runtime::*;
-use crate::structs::*;
 use crate::ty::*;
 
 use crate::{Compile, CompileError::*};

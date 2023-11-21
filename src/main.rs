@@ -2,17 +2,17 @@ mod expr;
 mod lexer;
 mod memory;
 mod op;
+mod record;
 mod runtime;
-mod structs;
 mod ty;
 
 use expr::*;
 use lexer::*;
 use memory::*;
 use op::*;
+use record::*;
 use runtime::*;
 use std::collections::HashMap;
-use structs::*;
 use ty::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,12 +99,12 @@ impl Compiler {
         Ok(ctx.constant(ty.as_bitset()?, value))
     }
 
-    fn struct_expr(&mut self, ty: Ty, ctx: ExprContext, case: Option<Word>) -> Compile<Expr> {
-        let struct_block = ctx.allocate(ty.size(), &mut self.memory);
+    fn record_expr(&mut self, ty: Ty, ctx: ExprContext, case: Option<Word>) -> Compile<Expr> {
+        let record = ctx.allocate(ty.size(), &mut self.memory);
 
         if let Some(case_id) = case {
             let (case_field, _) = ty.struct_cases()?;
-            let field_ctx = ExprContext::Block(struct_block.struct_field(case_field));
+            let field_ctx = ExprContext::Block(record.struct_field(case_field));
             field_ctx
                 .constant(Ty::int(), case_id)
                 .resolve(&mut self.memory);
@@ -117,7 +117,7 @@ impl Compiler {
             };
             self.lexer.expect_token(Token::Colon)?;
             let field = ty.struct_field(&field_name, case)?;
-            let field_ctx = ExprContext::Block(struct_block.struct_field(field));
+            let field_ctx = ExprContext::Block(record.struct_field(field));
             let expr = self.expect_expr(field_ctx)?.resolve(&mut self.memory);
             field.ty.check(&expr.ty)?;
 
@@ -125,7 +125,7 @@ impl Compiler {
                 break;
             }
         }
-        Ok(Expr::resolved(ty, struct_block))
+        Ok(Expr::resolved(ty, record))
     }
 
     fn oneof_member_expr(&mut self, name: &str, ctx: ExprContext) -> Compile<Expr> {
@@ -141,7 +141,7 @@ impl Compiler {
             Token::CurlyLeft => {
                 self.lexer.advance();
                 let case = ty.struct_case(&key)?;
-                let out = self.struct_expr(ty, ctx, Some(case))?;
+                let out = self.record_expr(ty, ctx, Some(case))?;
                 self.lexer.expect_token(Token::CurlyRight)?;
                 Ok(out)
             }
@@ -202,7 +202,7 @@ impl Compiler {
                         let ty = self.ty_scope.get(&name)?;
                         let out = match self.lexer.peek()? {
                             Token::TypeIdentifier(_) => self.bitset_expr(ty, ctx)?,
-                            Token::Identifier(_) => self.struct_expr(ty, ctx, None)?,
+                            Token::Identifier(_) => self.record_expr(ty, ctx, None)?,
                             _ => unimplemented!(),
                         };
                         self.lexer.expect_token(Token::CurlyRight)?;
@@ -375,7 +375,7 @@ impl Compiler {
         self.lexer.type_ident_token()
     }
 
-    fn struct_items(&mut self, fields: &mut TyStruct, case: Option<Word>) -> Compile<()> {
+    fn struct_items(&mut self, fields: &mut TyRecord, case: Option<Word>) -> Compile<()> {
         self.lexer.expect_token(Token::CurlyLeft)?;
         loop {
             if self.lexer.token(Token::Case)?.is_some() {
@@ -407,7 +407,7 @@ impl Compiler {
     }
 
     fn struct_ty(&mut self) -> Compile<Ty> {
-        let mut fields = TyStruct::new(self.ty_scope.new_type_id());
+        let mut fields = TyRecord::new(self.ty_scope.new_type_id());
 
         self.struct_items(&mut fields, None)?;
 
@@ -447,7 +447,7 @@ impl Compiler {
                 self.lexer.advance();
                 self.ty_scope.get(&ident).map(Some)
             }
-            Token::Struct => {
+            Token::Record => {
                 self.lexer.advance();
                 self.struct_ty().map(Some)
             }
@@ -940,10 +940,10 @@ mod test {
     }
 
     #[test]
-    fn struct_() {
+    fn record_() {
         expect_ir_result(
             "
-            type Point := struct { x: Int, y: Int };
+            type Point := record { x: Int, y: Int };
             let p := Point { x: 123, y: 456 };
             (volatile p).x
         ",
@@ -965,7 +965,7 @@ mod test {
 
         expect_ir_result(
             "
-            type Point := struct { x: Int, y: Int };
+            type Point := record { x: Int, y: Int };
             let p := Point { x: 123, y: 456 };
             (volatile p).y
         ",
@@ -986,7 +986,7 @@ mod test {
 
         expect_ir_result(
             "
-            type Point := struct { x: Int, y: Int };
+            type Point := record { x: Int, y: Int };
             let p := Point { x: 123, y: 456 };
             p.x
         ",
@@ -1003,10 +1003,10 @@ mod test {
     }
 
     #[test]
-    fn struct_assignment() {
+    fn record_assignment() {
         expect_ir(
             "
-            type Point := struct { x: Int, y: Int };
+            type Point := record { x: Int, y: Int };
             let p := Point { x: 123, y: 456 };
             p.y := 789;
         ",
@@ -1020,10 +1020,10 @@ mod test {
     }
 
     #[test]
-    fn pointer_to_struct_field() {
+    fn pointer_to_record_field() {
         expect_ir_result(
             "
-            type Point := struct { x: Int, y: Int };
+            type Point := record { x: Int, y: Int };
             let p := Point { x: 1, y: 2 };
             let ptr := &p.x;
             p.x := 5;
@@ -1049,7 +1049,7 @@ mod test {
 
         expect_ir_result(
             "
-            type Point := struct { x: Int, y: Int };
+            type Point := record { x: Int, y: Int };
             let p := Point { x: 1, y: 2 };
             let ptr := &p.x;
             p.x := 5;
@@ -1073,10 +1073,10 @@ mod test {
     }
 
     #[test]
-    fn deref_struct_pointer_field() {
+    fn deref_record_pointer_field() {
         expect_ir_result(
             "
-            type Point := struct { x: Int, y: Int };
+            type Point := record { x: Int, y: Int };
             let p := Point { x: 1, y: 2 };
             let ptr := &p;
             ptr[].y
@@ -1181,8 +1181,8 @@ mod test {
     fn variants() {
         expect_result(
             "
-                type Point := struct { x: Int, y: Int };
-                type Shape := struct {
+                type Point := record { x: Int, y: Int };
+                type Shape := record {
                     fill: Bool,
                     case Rect {
                         top_left: Point,
@@ -1368,7 +1368,7 @@ mod test {
     fn match_stmt() {
         expect_ir_result(
             "
-            type Option := struct {
+            type Option := record {
                 case Some {
                     value: Int
                 }
@@ -1419,7 +1419,7 @@ mod test {
 
         expect_ir_result(
             "
-            type Option := struct {
+            type Option := record {
                 case Some {
                     value: Int
                 }

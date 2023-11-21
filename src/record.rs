@@ -6,20 +6,20 @@ use crate::runtime::Word;
 use crate::ty::*;
 use crate::{Compile, CompileError::*};
 
-pub type RcTyStruct = Rc<TyStruct>;
+pub type RcTyRecord = Rc<TyRecord>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TyStruct {
+pub struct TyRecord {
     id: usize,
     pub size: Word,
-    pub fields: HashMap<(StructCase, String), StructField>,
+    pub fields: HashMap<(RecordCase, String), RecordField>,
     pub cases: HashMap<String, Word>,
-    pub case_field: Option<StructField>,
+    pub case_field: Option<RecordField>,
 }
 
-pub type StructCase = Option<Word>;
+pub type RecordCase = Option<Word>;
 
-impl TyStruct {
+impl TyRecord {
     pub fn new(id: usize) -> Self {
         Self {
             id,
@@ -33,7 +33,7 @@ impl TyStruct {
         let id = self.cases.len() as Word;
         // insert a field for the case discriminator itself
         if self.case_field.is_none() {
-            self.case_field = Some(StructField {
+            self.case_field = Some(RecordField {
                 ty: Ty::int(),
                 offset: self.size,
                 case: None,
@@ -48,7 +48,7 @@ impl TyStruct {
         Ok(id)
     }
     // TODO: cases use shared space
-    pub fn insert(&mut self, k: String, ty: Ty, case: StructCase) -> Compile<()> {
+    pub fn insert(&mut self, k: String, ty: Ty, case: RecordCase) -> Compile<()> {
         let key = (case, k);
         if self.fields.contains_key(&key) {
             return Err(DuplicateField);
@@ -56,7 +56,7 @@ impl TyStruct {
         let size = ty.size();
         self.fields.insert(
             key,
-            StructField {
+            RecordField {
                 ty,
                 offset: self.size,
                 case: None,
@@ -65,7 +65,7 @@ impl TyStruct {
         self.size += size;
         Ok(())
     }
-    pub fn get(&self, k: &str, case: StructCase) -> Compile<&StructField> {
+    pub fn get(&self, k: &str, case: RecordCase) -> Compile<&RecordField> {
         self.fields
             .get(&(case, k.to_string())) // fixme
             .or_else(|| self.fields.get(&(None, k.to_string())))
@@ -77,7 +77,7 @@ impl TyStruct {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StructField {
+pub struct RecordField {
     pub ty: Ty,
     pub offset: Word,
     pub case: Option<Word>,
