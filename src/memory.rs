@@ -7,37 +7,6 @@ use crate::ty::*;
 use crate::Compile;
 use crate::CompileError::*;
 
-pub struct Scope {
-    locals: HashMap<String, ScopeRecord>,
-}
-
-impl Scope {
-    pub fn new() -> Self {
-        Self {
-            locals: HashMap::new(),
-        }
-    }
-    pub fn identifier(&self, key: &str, ctx: ExprContext) -> Compile<Expr> {
-        let record = self
-            .locals
-            .get(key)
-            .ok_or_else(|| UnknownIdentifier(key.to_string()))?;
-        let block = Block::local(record.frame_offset, record.ty.size());
-        Ok(ctx.lvalue(record.ty.clone(), block))
-    }
-    pub fn store_local(&mut self, key: String, ty: Ty, frame_offset: Word) {
-        self.locals.insert(key, ScopeRecord { frame_offset, ty });
-    }
-    pub fn add_case_binding(&mut self, name: String, ty: Ty, block: Block) {
-        let frame_offset = match block {
-            Block::Stack(slice) => slice.offset,
-            Block::Local(slice) => slice.offset,
-            _ => panic!("invalid block"),
-        };
-        self.locals.insert(name, ScopeRecord { frame_offset, ty });
-    }
-}
-
 #[derive(Debug)]
 pub struct Memory {
     locals_offset: Word,
@@ -55,18 +24,6 @@ impl Memory {
     }
     pub fn done(self) -> Vec<IR> {
         self.output
-    }
-    pub fn allocate(&mut self, size: Word) -> Block {
-        self.current_frame_offset += size;
-        if size > 0 {
-            self.output.push(IR::Sub(EA::SP, EA::Immediate(size)));
-        }
-        Block::stack(self.current_frame_offset, size)
-    }
-    pub fn store_local(&mut self, key: String, expr: ResolvedExpr, scope: &mut Scope) {
-        self.compact(expr.block);
-        self.locals_offset = self.current_frame_offset;
-        scope.store_local(key, expr.ty, self.locals_offset);
     }
     pub fn write(&mut self, op: IROp, dest: Dest, src: Src) -> Block {
         match dest {
@@ -106,43 +63,54 @@ impl Memory {
         }
         dest
     }
+    fn shift(&mut self, block: Block, to_shift: Word) {
+        if to_shift == 0 {
+            return;
+        }
+        let stack_space = block.stack_space();
+        for i in 0..stack_space.size {
+            // copy high to low
+            let base_stack_offset = self.current_frame_offset - stack_space.offset - i;
+            let ea_src = EA::StackOffset(base_stack_offset);
+            let ea_dest = EA::StackOffset(base_stack_offset + to_shift);
 
+            self.output.push(IR::Mov(ea_dest, ea_src));
+        }
+    }
+    fn drop(&mut self, to_remove: Word) {
+        if to_remove > 0 {
+            self.output.push(IR::Add(EA::SP, EA::Immediate(to_remove)));
+        }
+    }
     pub fn compact(&mut self, block: Block) {
         let stack_space = block.stack_space();
         if stack_space.size == 0 {
             return;
         }
         let to_shift = stack_space.offset - stack_space.size - self.locals_offset;
-        if to_shift > 0 {
-            for i in 0..stack_space.size {
-                // copy high to low
-                let base_stack_offset = self.current_frame_offset - stack_space.offset - i;
-                let ea_src = EA::StackOffset(base_stack_offset);
-                let ea_dest = EA::StackOffset(base_stack_offset + to_shift);
-
-                self.output.push(IR::Mov(ea_dest, ea_src));
-            }
-        }
-
+        self.shift(block, to_shift);
         let to_remove = self.current_frame_offset - stack_space.offset + to_shift;
-        if to_remove > 0 {
-            self.output.push(IR::Add(EA::SP, EA::Immediate(to_remove)));
-        }
+        self.drop(to_remove);
         self.current_frame_offset = stack_space.offset;
     }
-    pub fn deref(
-        &mut self,
-        ptr_block: Block,
-        dest_size: Word,
-        ctx: ExprContext,
-        focus: Option<Slice>,
-    ) -> Block {
-        let focus = focus.unwrap_or(Slice::with_size(dest_size));
+    pub fn allocate(&mut self, size: Word) -> Block {
+        self.current_frame_offset += size;
+        if size > 0 {
+            self.output.push(IR::Sub(EA::SP, EA::Immediate(size)));
+        }
+        Block::stack(self.current_frame_offset, size)
+    }
+    pub fn store_local(&mut self, key: String, expr: ResolvedExpr, scope: &mut Scope) {
+        self.compact(expr.block);
+        self.locals_offset = self.current_frame_offset;
+        scope.store_local(key, expr.ty, self.locals_offset);
+    }
+    pub fn deref(&mut self, ptr_block: Block, dest: Dest, focus: Slice) -> Block {
         assert_eq!(ptr_block.size(), 1);
         self.write(IR::Mov, Dest::R0, Src::Block(ptr_block));
-        self.write(IR::Mov, ctx.to_dest(dest_size), Src::R0Offset(focus))
+        self.write(IR::Mov, dest, Src::R0Offset(focus))
     }
-
+    // control flow
     pub fn begin_cond(&mut self, expr: Expr) -> CondRecord {
         let res = expr.resolve(self);
         let ea = match res.block {
@@ -160,7 +128,6 @@ impl Memory {
         self.output.push(IR::BranchZero(EA::Immediate(-1), ea));
         CondRecord { index }
     }
-
     pub fn begin_else(&mut self, if_rec: CondRecord) -> CondRecord {
         let else_index = self.output.len();
         self.output
@@ -168,7 +135,6 @@ impl Memory {
         self.end_if(if_rec);
         CondRecord { index: else_index }
     }
-
     pub fn end_if(&mut self, rec: CondRecord) {
         let original = &self.output[rec.index];
         let displacement = (self.output.len() - rec.index - 1) as Word;
@@ -177,27 +143,24 @@ impl Memory {
             _ => unreachable!(),
         };
     }
-
     pub fn begin_while(&mut self) -> WhileRecord {
         WhileRecord {
             index: self.output.len(),
         }
     }
-
     pub fn end_while(&mut self, while_rec: WhileRecord, cond: CondRecord) {
         let jump_back = (self.output.len() - while_rec.index + 1) as Word;
         self.output
             .push(IR::BranchZero(EA::Immediate(-jump_back), EA::Immediate(0)));
         self.end_if(cond);
     }
-
     pub fn begin_match(&mut self, block: Block, size: usize) -> usize {
         self.output.push(IR::BranchZero(
             block.to_ea(self.current_frame_offset, 0),
             EA::Immediate(0),
         ));
         let jump_table_addr = self.output.len();
-        for i in 0..size {
+        for _ in 0..size {
             self.output
                 .push(IR::BranchZero(EA::Immediate(-1), EA::Immediate(0)));
         }
@@ -242,8 +205,7 @@ impl Slice {
     pub fn with_size(size: Word) -> Self {
         Self { offset: 0, size }
     }
-
-    pub fn from_struct_field(field: &RecordField) -> Self {
+    pub fn from_record_field(field: &RecordField) -> Self {
         Self {
             offset: field.offset,
             size: field.ty.size(),
@@ -284,7 +246,6 @@ impl Block {
     fn r0_offset(offset: Word, size: Word) -> Self {
         Self::R0Offset(Slice { offset, size })
     }
-
     pub fn size(&self) -> Word {
         match &self {
             Self::Stack(slice) => slice.size,
@@ -321,8 +282,8 @@ impl Block {
             _ => unimplemented!(),
         }
     }
-    pub fn struct_field(&self, field: &RecordField) -> Block {
-        self.focus(Slice::from_struct_field(field))
+    pub fn record_field(&self, field: &RecordField) -> Block {
+        self.focus(Slice::from_record_field(field))
     }
     pub fn array_index(&self, item_ty: &Ty, index: Word) -> Block {
         self.focus(Slice {
@@ -332,11 +293,6 @@ impl Block {
     }
 }
 
-#[derive(Debug)]
-struct ScopeRecord {
-    frame_offset: Word,
-    ty: Ty,
-}
 #[derive(Debug)]
 pub enum Src {
     Block(Block),
@@ -371,4 +327,41 @@ pub enum Dest {
     RefBlock(Block, Word),
     Stack(Word),
     R0,
+}
+
+pub struct Scope {
+    locals: HashMap<String, ScopeRecord>,
+}
+
+impl Scope {
+    pub fn new() -> Self {
+        Self {
+            locals: HashMap::new(),
+        }
+    }
+    pub fn identifier(&self, key: &str, ctx: ExprContext) -> Compile<Expr> {
+        let record = self
+            .locals
+            .get(key)
+            .ok_or_else(|| UnknownIdentifier(key.to_string()))?;
+        let block = Block::local(record.frame_offset, record.ty.size());
+        Ok(ctx.lvalue(record.ty.clone(), block))
+    }
+    pub fn store_local(&mut self, key: String, ty: Ty, frame_offset: Word) {
+        self.locals.insert(key, ScopeRecord { frame_offset, ty });
+    }
+    pub fn add_case_binding(&mut self, name: String, ty: Ty, block: Block) {
+        let frame_offset = match block {
+            Block::Stack(slice) => slice.offset,
+            Block::Local(slice) => slice.offset,
+            _ => panic!("invalid block"),
+        };
+        self.locals.insert(name, ScopeRecord { frame_offset, ty });
+    }
+}
+
+#[derive(Debug)]
+struct ScopeRecord {
+    frame_offset: Word,
+    ty: Ty,
 }

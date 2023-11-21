@@ -75,7 +75,7 @@ impl Expr {
         match self.kind {
             ExprKind::Resolved(block) => {
                 let size = deref_ty.size();
-                let out = memory.deref(block, size, self.ctx, None);
+                let out = memory.deref(block, self.ctx.to_dest(size), Slice::with_size(size));
                 Ok(Self::resolved(deref_ty, out))
             }
             ExprKind::Reference {
@@ -101,8 +101,8 @@ impl Expr {
             ctx: self.ctx,
         })
     }
-    pub fn struct_field(self, field_name: &str) -> Compile<Self> {
-        let field = self.ty.struct_field(field_name, None)?;
+    pub fn record_field(self, field_name: &str) -> Compile<Self> {
+        let field = self.ty.record_field(field_name, None)?;
         match self.kind {
             ExprKind::Constant(_) => unimplemented!(),
             ExprKind::Resolved(block) => Ok(Self {
@@ -110,7 +110,7 @@ impl Expr {
                 kind: ExprKind::Reference {
                     deref_level: 0,
                     next: block,
-                    focus: Slice::from_struct_field(field),
+                    focus: Slice::from_record_field(field),
                 },
                 ctx: self.ctx.shrink_to(field.ty.size()),
             }),
@@ -121,7 +121,7 @@ impl Expr {
                 kind: ExprKind::Reference {
                     deref_level,
                     next,
-                    focus: Slice::from_struct_field(field),
+                    focus: Slice::from_record_field(field),
                 },
                 ctx: self.ctx.shrink_to(field.ty.size()),
             }),
@@ -167,8 +167,8 @@ impl Expr {
     }
     pub fn begin_match(self, memory: &mut Memory) -> Compile<MatchBuilder> {
         let res = self.resolve(memory);
-        let (case_field, map) = res.ty.struct_cases()?;
-        let case_value = res.block.struct_field(case_field);
+        let (case_field, map) = res.ty.record_cases()?;
+        let case_value = res.block.record_field(case_field);
         let jump_table = memory.begin_match(case_value, map.len());
         let cases = map.clone();
         Ok(MatchBuilder::new(res.ty, res.block, jump_table, cases))
@@ -192,7 +192,7 @@ impl Expr {
                         memory.write(IR::Mov, self.ctx.to_dest(src.size()), Src::Block(src));
                     ResolvedExpr { ty: self.ty, block }
                 } else if deref_level == 1 {
-                    let block = memory.deref(next, self.ty.size(), self.ctx, Some(focus));
+                    let block = memory.deref(next, self.ctx.to_dest(self.ty.size()), focus);
                     ResolvedExpr { ty: self.ty, block }
                 } else {
                     unimplemented!()

@@ -112,7 +112,7 @@ impl MatchBuilder {
 
         Ok(MatchCaseBuilder::new(self.ty.clone(), case_id, self.block))
     }
-    pub fn end_case(&mut self, case: MatchCaseBuilder, memory: &mut Memory) {
+    pub fn end_case(&mut self, memory: &mut Memory) {
         self.end_addrs.push(memory.end_case());
     }
     pub fn resolve(self, memory: &mut Memory) {
@@ -137,8 +137,8 @@ impl MatchCaseBuilder {
     }
     // TODO: create a new scope for each match case
     pub fn add_binding(&self, binding: String, scope: &mut Scope) -> Compile<()> {
-        let field = self.ty.struct_field(&binding, Some(self.case_id))?;
-        let block = self.parent_block.struct_field(field);
+        let field = self.ty.record_field(&binding, Some(self.case_id))?;
+        let block = self.parent_block.record_field(field);
         scope.add_case_binding(binding, field.ty.clone(), block);
         Ok(())
     }

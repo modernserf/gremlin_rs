@@ -105,8 +105,8 @@ impl Compiler {
         let record = ctx.allocate(ty.size(), &mut self.memory);
 
         if let Some(case_id) = case {
-            let (case_field, _) = ty.struct_cases()?;
-            let field_ctx = ExprContext::Block(record.struct_field(case_field));
+            let (case_field, _) = ty.record_cases()?;
+            let field_ctx = ExprContext::Block(record.record_field(case_field));
             field_ctx
                 .constant(Ty::int(), case_id)
                 .resolve(&mut self.memory);
@@ -118,8 +118,8 @@ impl Compiler {
                 None => break,
             };
             self.lexer.expect_token(Token::Colon)?;
-            let field = ty.struct_field(&field_name, case)?;
-            let field_ctx = ExprContext::Block(record.struct_field(field));
+            let field = ty.record_field(&field_name, case)?;
+            let field_ctx = ExprContext::Block(record.record_field(field));
             let expr = self.expect_expr(field_ctx)?.resolve(&mut self.memory);
             field.ty.check(&expr.ty)?;
 
@@ -142,7 +142,7 @@ impl Compiler {
         match self.lexer.peek()? {
             Token::CurlyLeft => {
                 self.lexer.advance();
-                let case = ty.struct_case(&key)?;
+                let case = ty.record_case(&key)?;
                 let out = self.record_expr(ty, ctx, Some(case))?;
                 self.lexer.expect_token(Token::CurlyRight)?;
                 Ok(out)
@@ -274,7 +274,7 @@ impl Compiler {
                     left = match self.lexer.peek()? {
                         Token::Identifier(field_name) => {
                             self.lexer.advance();
-                            left.struct_field(&field_name)?
+                            left.record_field(&field_name)?
                         }
                         Token::TypeIdentifier(field_name) => {
                             self.lexer.advance();
@@ -377,7 +377,7 @@ impl Compiler {
         self.lexer.type_ident_token()
     }
 
-    fn struct_items(&mut self, fields: &mut TyRecord, case: Option<Word>) -> Compile<()> {
+    fn record_items(&mut self, fields: &mut TyRecord, case: Option<Word>) -> Compile<()> {
         self.lexer.expect_token(Token::CurlyLeft)?;
         loop {
             if self.lexer.token(Token::Case)?.is_some() {
@@ -387,7 +387,7 @@ impl Compiler {
                     .ok_or(Expected("case identifier"))?;
 
                 let case_id = fields.insert_case(case_name)?;
-                self.struct_items(fields, Some(case_id))?;
+                self.record_items(fields, Some(case_id))?;
                 self.lexer.token(Token::Comma)?;
                 continue;
             }
@@ -408,12 +408,12 @@ impl Compiler {
         Ok(())
     }
 
-    fn struct_ty(&mut self) -> Compile<Ty> {
+    fn record_ty(&mut self) -> Compile<Ty> {
         let mut fields = TyRecord::new(self.ty_scope.new_type_id());
 
-        self.struct_items(&mut fields, None)?;
+        self.record_items(&mut fields, None)?;
 
-        Ok(Ty::struct_(fields))
+        Ok(Ty::record(fields))
     }
 
     fn oneof_ty(&mut self) -> Compile<Ty> {
@@ -451,7 +451,7 @@ impl Compiler {
             }
             Token::Record => {
                 self.lexer.advance();
-                self.struct_ty().map(Some)
+                self.record_ty().map(Some)
             }
             Token::OneOf => {
                 self.lexer.advance();
@@ -546,7 +546,7 @@ impl Compiler {
             let mut case = match_builder.add_case(&tag, &mut self.memory)?;
             self.match_bindings(&mut case)?;
             self.block()?;
-            match_builder.end_case(case, &mut self.memory);
+            match_builder.end_case(&mut self.memory);
         }
         self.lexer.expect_token(Token::End)?;
         match_builder.resolve(&mut self.memory);

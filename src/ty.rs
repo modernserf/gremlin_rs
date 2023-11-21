@@ -27,7 +27,7 @@ impl Ty {
             ref_level: 0,
         }
     }
-    pub fn struct_(data: TyRecord) -> Self {
+    pub fn record(data: TyRecord) -> Self {
         Self {
             kind: TyKind::Struct(Rc::new(data)),
             ref_level: 0,
@@ -102,19 +102,19 @@ impl Ty {
             _ => Err(Expected("indexable type")),
         }
     }
-    pub fn struct_case(&self, case_name: &str) -> Compile<Word> {
+    pub fn record_case(&self, case_name: &str) -> Compile<Word> {
         match &self.kind {
             TyKind::Struct(fs) => fs.get_case(case_name),
             _ => Err(Expected("struct case")),
         }
     }
-    pub fn struct_field(&self, field_name: &str, case: RecordCase) -> Compile<&RecordField> {
+    pub fn record_field(&self, field_name: &str, case: RecordCase) -> Compile<&RecordField> {
         match &self.kind {
             TyKind::Struct(fs) => fs.get(field_name, case),
             _ => Err(Expected("struct")),
         }
     }
-    pub fn struct_cases(&self) -> Compile<(&RecordField, &HashMap<String, i32>)> {
+    pub fn record_cases(&self) -> Compile<(&RecordField, &HashMap<String, i32>)> {
         match &self.kind {
             TyKind::Struct(fs) => {
                 let case_field = fs
