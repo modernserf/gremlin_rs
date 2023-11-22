@@ -474,6 +474,7 @@ impl Compiler {
         self.lexer.expect_token(Token::ColonEq)?;
         let te = self.expect_type_expr()?;
         self.ty_scope.assign(tb, te);
+        self.lexer.expect_token(Token::Semicolon)?;
         Ok(())
     }
 
@@ -585,6 +586,7 @@ impl Compiler {
             None => {}
         };
         self.memory.store_local(binding, expr, &mut self.scope);
+        self.lexer.expect_token(Token::Semicolon)?;
         Ok(())
     }
 
@@ -615,6 +617,7 @@ impl Compiler {
                     Some(expr) => {
                         let res = expr.resolve(&mut self.memory);
                         self.memory.compact(res.block);
+                        self.lexer.expect_token(Token::Semicolon)?;
                     }
                     None => return Ok(None),
                 };
@@ -630,13 +633,9 @@ impl Compiler {
         Ok(())
     }
 
-    // TODO: more idiomatic semicolon rules
     fn block(&mut self) -> Compile<()> {
         loop {
             if self.stmt()?.is_none() {
-                return Ok(());
-            }
-            if self.lexer.token(Token::Semicolon)?.is_none() {
                 return Ok(());
             }
         }
@@ -757,14 +756,14 @@ mod test {
 
     #[test]
     fn integers() {
-        expect_ir_result("123", vec![Mov(PushStack, Immediate(123))], 123);
+        expect_ir_result("123;", vec![Mov(PushStack, Immediate(123))], 123);
     }
 
     #[test]
     fn whitespace() {
         expect_ir(
             "
-            123
+            123;
 
             ",
             vec![Mov(PushStack, Immediate(123))],
@@ -774,7 +773,7 @@ mod test {
     #[test]
     fn comments() {
         expect_ir(
-            "123 # This is a comment",
+            "123; # This is a comment",
             vec![Mov(PushStack, Immediate(123))],
         )
     }
@@ -786,8 +785,8 @@ mod test {
 
     #[test]
     fn bools() {
-        expect_ir("true", vec![Mov(PushStack, Immediate(1))]);
-        expect_ir("false", vec![Mov(PushStack, Immediate(0))]);
+        expect_ir("true;", vec![Mov(PushStack, Immediate(1))]);
+        expect_ir("false;", vec![Mov(PushStack, Immediate(0))]);
     }
 
     #[test]
@@ -796,7 +795,7 @@ mod test {
             "
                 let x := 1;
                 let y := 2;
-                x
+                x;
             ",
             vec![
                 Mov(PushStack, Immediate(1)),
@@ -830,7 +829,7 @@ mod test {
             let x := 1;
             let y := 3;
             x := y;
-            x
+            x;
         ",
             vec![
                 Mov(PushStack, Immediate(1)),
@@ -848,7 +847,7 @@ mod test {
             "
             let x := 1;
             let y := 2;
-            x + 3 + y
+            x + 3 + y;
         ",
             vec![
                 Mov(PushStack, Immediate(1)),        // [x: 1]
@@ -863,14 +862,14 @@ mod test {
 
     #[test]
     fn typechecked_arithmetic() {
-        expect_err("1 + true", ExpectedType(Ty::int(), Ty::bool()));
-        expect_err("true + 1", ExpectedType(Ty::int(), Ty::bool()));
+        expect_err("1 + true;", ExpectedType(Ty::int(), Ty::bool()));
+        expect_err("true + 1;", ExpectedType(Ty::int(), Ty::bool()));
     }
 
     #[test]
     fn parens() {
         expect_ir_result(
-            "volatile 3 * (volatile 4 + volatile 5)",
+            "volatile 3 * (volatile 4 + volatile 5);",
             vec![
                 Mov(PushStack, Immediate(3)),
                 Mov(PushStack, Immediate(4)),
@@ -885,13 +884,13 @@ mod test {
 
     #[test]
     fn constant_folding() {
-        expect_ir_result("3 * (4 + 5)", vec![Mov(PushStack, Immediate(27))], 27);
+        expect_ir_result("3 * (4 + 5);", vec![Mov(PushStack, Immediate(27))], 27);
     }
 
     #[test]
     fn precedence() {
         expect_ir_result(
-            "volatile 4 + volatile 5 * volatile 3",
+            "volatile 4 + volatile 5 * volatile 3;",
             vec![
                 Mov(PushStack, Immediate(4)),
                 Mov(PushStack, Immediate(5)),
@@ -902,15 +901,15 @@ mod test {
             ],
             19,
         );
-        expect_ir_result("4 + 5 * 3", vec![Mov(PushStack, Immediate(19))], 19);
+        expect_ir_result("4 + 5 * 3;", vec![Mov(PushStack, Immediate(19))], 19);
     }
 
     #[test]
     fn negation() {
-        expect_ir_result("-3", vec![Mov(PushStack, Immediate(-3))], -3);
+        expect_ir_result("-3;", vec![Mov(PushStack, Immediate(-3))], -3);
 
         expect_ir_result(
-            "let a := 3; -a",
+            "let a := 3; -a;",
             vec![
                 Mov(PushStack, Immediate(3)),
                 Mov(PushStack, Immediate(0)),
@@ -920,7 +919,7 @@ mod test {
         );
 
         expect_ir_result(
-            "-(volatile 3)",
+            "-(volatile 3);",
             vec![
                 Mov(PushStack, Immediate(3)),
                 Mov(PushStack, Immediate(0)),
@@ -938,7 +937,7 @@ mod test {
             "
             let x := 1;
             let ptr := &x;
-            (volatile ptr)[]
+            (volatile ptr)[];
         ",
             vec![
                 // let x := 1;
@@ -958,7 +957,7 @@ mod test {
             "
             let x := 1;
             let ptr := &x;
-            ptr[]
+            ptr[];
         ",
             vec![
                 // let x := 1;
@@ -980,7 +979,7 @@ mod test {
             let x := 1;
             let ptr := &x;
             ptr[] := 2;
-            x
+            x;
         ",
             vec![
                 // let x := 1;
@@ -1000,7 +999,7 @@ mod test {
     #[test]
     fn type_casting() {
         expect_ir_result(
-            "(volatile true as Int) +  2",
+            "(volatile true as Int) +  2;",
             vec![
                 Mov(PushStack, Immediate(1)),
                 Add(StackOffset(0), Immediate(2)),
@@ -1014,7 +1013,7 @@ mod test {
         expect_ir(
             "
                 type Word := Int;
-                let a : Word := 3
+                let a : Word := 3;
             ",
             vec![Mov(PushStack, Immediate(3))],
         )
@@ -1026,7 +1025,7 @@ mod test {
             "
             type Point := record { x: Int, y: Int };
             let p := Point { x: 123, y: 456 };
-            (volatile p).x
+            (volatile p).x;
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
@@ -1048,7 +1047,7 @@ mod test {
             "
             type Point := record { x: Int, y: Int };
             let p := Point { x: 123, y: 456 };
-            (volatile p).y
+            (volatile p).y;
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
@@ -1069,7 +1068,7 @@ mod test {
             "
             type Point := record { x: Int, y: Int };
             let p := Point { x: 123, y: 456 };
-            p.x
+            p.x;
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
@@ -1108,7 +1107,7 @@ mod test {
             let p := Point { x: 1, y: 2 };
             let ptr := &p.x;
             p.x := 5;
-            (volatile ptr)[]
+            (volatile ptr)[];
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
@@ -1134,7 +1133,7 @@ mod test {
             let p := Point { x: 1, y: 2 };
             let ptr := &p.x;
             p.x := 5;
-            ptr[]
+            ptr[];
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
@@ -1160,7 +1159,7 @@ mod test {
             type Point := record { x: Int, y: Int };
             let p := Point { x: 1, y: 2 };
             let ptr := &p;
-            ptr[].y
+            ptr[].y;
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
@@ -1182,7 +1181,7 @@ mod test {
         expect_ir_result(
             "
             type TrafficLight := oneof {Red, Yellow, Green};
-            TrafficLight.Yellow
+            TrafficLight.Yellow;
         ",
             vec![Mov(PushStack, Immediate(1))],
             1,
@@ -1195,7 +1194,7 @@ mod test {
             "
             type Flags := oneof {Carry, Overflow, Zero, Negative, Extend};
             let flags := Flags{Carry, Zero};
-            flags.Zero
+            flags.Zero;
         ",
             vec![
                 Mov(PushStack, Immediate(0b101)),
@@ -1212,7 +1211,7 @@ mod test {
         expect_ir_result(
             "
                 let xs := array[Int: 4]{10, 20, 30, 40};
-                xs[volatile 1]
+                xs[volatile 1];
             ",
             vec![
                 // let xs := array[Int: 4]{10, 20, 30, 40};
@@ -1238,7 +1237,7 @@ mod test {
         expect_ir_result(
             "
                 let xs := array[Int: 4]{10, 20, 30, 40};
-                xs[1]
+                xs[1];
             ",
             vec![
                 // let xs := array[Int: 4]{10, 20, 30, 40};
@@ -1281,7 +1280,7 @@ mod test {
                     radius: 3
                 };
 
-                disc.fill
+                disc.fill;
             ",
             vec![],
             1,
@@ -1295,8 +1294,8 @@ mod test {
             let i := 1;
             if false then
                 i := 3;
-            end;
-            i
+            end
+            i;
         ",
             vec![
                 // let i := 1;
@@ -1317,8 +1316,8 @@ mod test {
             let i := 1;
             if true then
                 i := 3;
-            end;
-            i
+            end
+            i;
         ",
             vec![],
             3,
@@ -1334,8 +1333,8 @@ mod test {
                 i := 3;
             else
                 i := 4;
-            end;
-            i
+            end
+            i;
         ",
             vec![
                 // let i := 0
@@ -1363,8 +1362,8 @@ mod test {
                 i := 3;
             else
                 i := 4;
-            end;
-            i
+            end
+            i;
         ",
             vec![],
             4,
@@ -1382,8 +1381,8 @@ mod test {
                 i := 4;
             else 
                 i := 5;
-            end;
-            i
+            end
+            i;
         ",
             vec![
                 // let i := 0;
@@ -1420,8 +1419,8 @@ mod test {
             let count := 0;
             while count != 10 loop
                 count := count + 1;
-            end;
-            count
+            end
+            count;
         ",
             vec![
                 // let count := 0;
@@ -1464,9 +1463,9 @@ mod test {
                 result := value;
             case None{}:
                 result := 10;
-            end;
+            end
 
-            result
+            result;
         ",
             vec![
                 // let result := 0;
@@ -1515,9 +1514,9 @@ mod test {
                 result := value;
             case None{}:
                 result := 10;
-            end;
+            end
 
-            result
+            result;
         ",
             vec![
                 // let result := 0;
@@ -1557,8 +1556,8 @@ mod test {
             if true then
                 let x := 2;
                 x := 3;
-            end;
-            x
+            end
+            x;
         ",
             vec![
                 // let x:= 1
@@ -1589,7 +1588,7 @@ mod test {
                     value: Int
                 }
                 case None {}
-            }
+            };
 
             sub main() do
                 let x := Option.Some{value: 3};
