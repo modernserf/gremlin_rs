@@ -34,6 +34,7 @@ use CompileError::*;
 pub type Compile<T> = Result<T, CompileError>;
 pub type CompileOpt<T> = Result<Option<T>, CompileError>;
 
+// TODO: either use block scope or forbid in blocks
 struct TyScope {
     data: HashMap<String, Ty>,
     next_type_id: usize,
@@ -641,7 +642,74 @@ impl Compiler {
         }
     }
 
+    fn sub_params(&mut self) -> Compile<()> {
+        self.lexer.expect_token(Token::ParLeft)?;
+        loop {
+            let binding = match self.binding()? {
+                Some(b) => b,
+                None => break,
+            };
+            self.lexer.expect_token(Token::Colon)?;
+            let ty = self.type_expr()?.ok_or(Expected("type"))?;
+            // TODO: do something with param
+
+            if self.lexer.token(Token::Comma)?.is_none() {
+                break;
+            }
+        }
+        self.lexer.expect_token(Token::ParRight)?;
+
+        let return_ty = if self.lexer.token(Token::Arrow)?.is_some() {
+            self.type_expr()?.ok_or(Expected("return type"))?
+        } else {
+            Ty::void()
+        };
+
+        Ok(())
+    }
+
+    fn sub(&mut self) -> Compile<()> {
+        let name = self.lexer.ident_token()?.ok_or(Expected("name"))?;
+        self.sub_params()?;
+        self.lexer.expect_token(Token::Do)?;
+        self.scoped_block()?;
+        self.lexer.expect_token(Token::End)?;
+
+        Ok(())
+    }
+
+    fn module_stmt(&mut self) -> CompileOpt<()> {
+        match self.lexer.peek()? {
+            Token::Type => {
+                self.lexer.advance();
+                self.type_def_stmt()?;
+                Ok(Some(()))
+            }
+            Token::Sub => {
+                self.lexer.advance();
+                self.sub()?;
+                Ok(Some(()))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn module(&mut self) -> Compile<()> {
+        loop {
+            if self.module_stmt()?.is_none() {
+                return Ok(());
+            }
+        }
+    }
+
     pub fn program(input: &str) -> Compile<Vec<IR>> {
+        let mut parse = Self::new(input);
+        parse.module()?;
+        parse.lexer.expect_token(Token::EndOfInput)?;
+        Ok(parse.memory.done())
+    }
+
+    pub fn script(input: &str) -> Compile<Vec<IR>> {
         let mut parse = Self::new(input);
         parse.block()?;
         parse.lexer.expect_token(Token::EndOfInput)?;
@@ -650,7 +718,7 @@ impl Compiler {
 }
 
 fn main() {
-    let ir = Compiler::program("").expect("compile");
+    let ir = Compiler::script("").expect("compile");
     Runtime::eval(&ir);
 }
 
@@ -660,21 +728,21 @@ mod test {
     use super::{EA::*, IR::*};
 
     fn expect_ir(code: &str, ir: Vec<IR>) {
-        assert_eq!(Compiler::program(code), Ok(ir));
+        assert_eq!(Compiler::script(code), Ok(ir));
     }
     fn expect_result(code: &str, _ir: Vec<IR>, value: Word) {
-        let ir = Compiler::program(code).expect("compile");
+        let ir = Compiler::script(code).expect("compile");
         let res = Runtime::eval(&ir);
         assert_eq!(res, value);
     }
     fn expect_ir_result(code: &str, ir: Vec<IR>, result: Word) {
-        let actual_ir = Compiler::program(code).expect("compile");
+        let actual_ir = Compiler::script(code).expect("compile");
         assert_eq!(actual_ir, ir);
         let actual_result: i32 = Runtime::eval(&actual_ir);
         assert_eq!(actual_result, result);
     }
     fn expect_err(code: &str, err: CompileError) {
-        assert_eq!(Compiler::program(code), Err(err))
+        assert_eq!(Compiler::script(code), Err(err))
     }
     #[allow(dead_code)]
     fn run_ir(ir: Vec<IR>) {
@@ -1510,5 +1578,24 @@ mod test {
             ],
             1,
         );
+    }
+
+    #[test]
+    fn subroutine() {
+        assert!(Compiler::program(
+            "
+            type Option := record {
+                case Some {
+                    value: Int
+                }
+                case None {}
+            }
+
+            sub main() do
+                let x := Option.Some{value: 3};
+            end
+        "
+        )
+        .is_ok());
     }
 }

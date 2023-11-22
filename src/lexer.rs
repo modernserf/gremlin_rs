@@ -22,12 +22,14 @@ pub enum Token {
     Match,
     OneOf,
     Record,
+    Sub,
     Then,
     Type,
     Volatile,
     While,
     // punctuation
     Ampersand,
+    Arrow,
     Colon,
     ColonEq,
     Comma,
@@ -158,6 +160,7 @@ impl Lexer {
             'm' => self.keyword("match", Token::Match),
             'o' => self.keyword("oneof", Token::OneOf),
             'r' => self.keyword("record", Token::Record),
+            's' => self.keyword("sub", Token::Sub),
             't' => {
                 self.adv_char();
                 match self.peek_char() {
@@ -172,7 +175,13 @@ impl Lexer {
             ',' => self.punc(Token::Comma),
             '.' => self.punc(Token::Dot),
             '+' => self.punc(Token::Plus),
-            '-' => self.punc(Token::Minus),
+            '-' => {
+                self.adv_char();
+                match self.peek_char() {
+                    '>' => self.punc(Token::Arrow),
+                    _ => Ok(Token::Minus),
+                }
+            }
             '*' => self.punc(Token::Star),
             '&' => self.punc(Token::Ampersand),
             '=' => self.punc(Token::Equal),
