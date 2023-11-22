@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::memory::*;
 use crate::op::Op;
 use crate::runtime::*;
@@ -29,6 +27,8 @@ enum ExprKind {
         // segment of referent that we want (e.g. a particular struct field within a struct)
         focus: Slice,
     },
+    // a subroutine
+    Sub(SubIndex),
 }
 
 impl Expr {
@@ -52,6 +52,12 @@ impl Expr {
                 focus: Slice::with_size(block.size()),
                 next: block,
             },
+        }
+    }
+    pub fn sub(ty: Ty, sub_index: SubIndex) -> Expr {
+        Self {
+            ty,
+            kind: ExprKind::Sub(sub_index),
         }
     }
     pub fn get_constant(&self) -> Option<Word> {
@@ -107,6 +113,7 @@ impl Expr {
                 },
                 // ctx: self.ctx.shrink_to(field.ty.size()),
             }),
+            ExprKind::Sub(_) => unreachable!(),
         }
     }
     //
@@ -157,6 +164,7 @@ impl Expr {
                 assert!(deref_level == 0);
                 memory.write(op.ir(), dest, Src::Block(next.focus(focus)))
             }
+            ExprKind::Sub(_) => unreachable!(),
         };
     }
     pub fn bitset_field(
@@ -197,6 +205,7 @@ impl Expr {
                     unimplemented!()
                 }
             }
+            ExprKind::Sub(_) => unimplemented!(),
         }
     }
 }
@@ -211,75 +220,6 @@ impl ResolvedExpr {
     pub fn to_expr(self) -> Expr {
         Expr::resolved(self.ty, self.block)
     }
-}
-
-pub struct Scope {
-    frames: Vec<ScopeFrame>,
-}
-
-struct ScopeFrame {
-    scope_index: ScopeIndex,
-    scope: HashMap<String, ScopeRecord>,
-}
-
-impl ScopeFrame {
-    fn new(scope_index: ScopeIndex) -> Self {
-        Self {
-            scope_index,
-            scope: HashMap::new(),
-        }
-    }
-}
-
-impl Scope {
-    pub fn new() -> Self {
-        Self {
-            frames: vec![ScopeFrame::new(ScopeIndex::root())],
-        }
-    }
-    pub fn identifier(&self, key: &str) -> Compile<Expr> {
-        let record = self.get(key)?;
-        let block = Block::local(record.frame_offset, record.ty.size());
-        Ok(Expr::lvalue(record.ty.clone(), block))
-    }
-    pub fn store_local(&mut self, key: String, ty: Ty, frame_offset: Word) {
-        self.insert(key, ScopeRecord { frame_offset, ty });
-    }
-    pub fn add_case_binding(&mut self, name: String, ty: Ty, block: Block) {
-        self.insert(
-            name,
-            ScopeRecord {
-                frame_offset: block.frame_offset().expect("frame offset"),
-                ty,
-            },
-        );
-    }
-    pub fn push_scope(&mut self, memory: &Memory) {
-        self.frames.push(ScopeFrame::new(memory.begin_scope()));
-    }
-    pub fn pop_scope(&mut self, memory: &mut Memory) {
-        let last_frame = self.frames.pop().expect("scope frame");
-        memory.end_scope(last_frame.scope_index);
-    }
-    fn get(&self, key: &str) -> Compile<&ScopeRecord> {
-        for frame in self.frames.iter().rev() {
-            match frame.scope.get(key) {
-                Some(rec) => return Ok(rec),
-                None => {}
-            };
-        }
-        Err(UnknownIdentifier(key.to_string()))
-    }
-    fn insert(&mut self, key: String, value: ScopeRecord) {
-        let len = self.frames.len();
-        self.frames[len - 1].scope.insert(key, value);
-    }
-}
-
-#[derive(Debug)]
-struct ScopeRecord {
-    frame_offset: Word,
-    ty: Ty,
 }
 
 #[derive(Debug)]

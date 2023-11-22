@@ -1,6 +1,10 @@
+use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::*;
+use crate::record::*;
+use crate::runtime::*;
+use crate::subroutine::*;
+use crate::{Compile, CompileError::*};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ty {
@@ -48,6 +52,12 @@ impl Ty {
             ref_level: 0,
         }
     }
+    pub fn sub(data: TySub) -> Self {
+        Self {
+            kind: TyKind::Sub(Rc::new(data)),
+            ref_level: 0,
+        }
+    }
     pub fn add_ref(&self) -> Self {
         Self {
             kind: self.kind.clone(),
@@ -91,6 +101,7 @@ impl Ty {
             // TODO: large bitsets
             TyKind::BitSet(_) => 1,
             TyKind::Array(a) => a.ty.size() * a.capacity,
+            TyKind::Sub(_) => 1,
         }
     }
     pub fn index_ty(&self, index: &Ty) -> Compile<&Ty> {
@@ -137,6 +148,7 @@ enum TyKind {
     OneOf(Rc<TyOneOf>),
     BitSet(Rc<TyOneOf>),
     Array(Rc<TyArray>),
+    Sub(Rc<TySub>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

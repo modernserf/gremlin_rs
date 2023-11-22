@@ -1,13 +1,18 @@
+use std::collections::HashMap;
+
 use crate::expr::*;
 use crate::record::*;
 use crate::runtime::*;
 use crate::ty::*;
+use crate::{Compile, CompileError::*};
 
 #[derive(Debug)]
 pub struct Memory {
+    output: Vec<IR>,
+    // TODO: these really belong to scope
+    // (or, perhaps, to a parent object that manages both scope & outputz)
     locals_offset: Word,
     current_frame_offset: Word,
-    output: Vec<IR>,
 }
 
 impl Memory {
@@ -20,6 +25,16 @@ impl Memory {
     }
     pub fn done(self) -> Vec<IR> {
         self.output
+    }
+    pub fn done_program(self, main_sub: SubIndex) -> CompileResult {
+        CompileResult {
+            code: self.output,
+            entry_point: main_sub.index,
+        }
+    }
+
+    pub fn debug_stack(&mut self) {
+        self.output.push(IR::DebugStack)
     }
     pub fn write(&mut self, op: IROp, dest: Dest, src: Src) -> Block {
         match dest {
@@ -105,6 +120,12 @@ impl Memory {
         self.compact(expr.block);
         self.locals_offset = self.current_frame_offset;
         scope.store_local(key, expr.ty, self.locals_offset);
+    }
+    pub fn return_sub(&mut self) {
+        self.drop(self.current_frame_offset);
+        self.current_frame_offset = 0;
+        self.locals_offset = 0;
+        self.output.push(IR::Return);
     }
     pub fn begin_scope(&self) -> ScopeIndex {
         ScopeIndex {
@@ -201,6 +222,11 @@ impl Memory {
             self.output[*index] = IR::BranchZero(EA::Immediate(displacement), EA::Immediate(0));
         }
     }
+    pub fn sub(&self) -> SubIndex {
+        SubIndex {
+            index: self.output.len(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -210,6 +236,11 @@ pub struct CondIndex {
 
 #[derive(Debug)]
 pub struct WhileIndex {
+    index: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SubIndex {
     index: usize,
 }
 
@@ -362,4 +393,92 @@ pub enum Dest {
     RefBlock(Block, Word),
     Stack(Word),
     R0,
+}
+
+pub struct Scope {
+    module: HashMap<String, ModuleRecord>,
+    frames: Vec<ScopeFrame>,
+}
+
+struct ScopeFrame {
+    scope_index: ScopeIndex,
+    scope: HashMap<String, ScopeRecord>,
+}
+
+impl ScopeFrame {
+    fn new(scope_index: ScopeIndex) -> Self {
+        Self {
+            scope_index,
+            scope: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ScopeRecord {
+    frame_offset: Word,
+    ty: Ty,
+}
+
+struct ModuleRecord {
+    ty: Ty,
+    sub_index: SubIndex,
+}
+
+impl Scope {
+    pub fn new() -> Self {
+        Self {
+            module: HashMap::new(),
+            frames: vec![ScopeFrame::new(ScopeIndex::root())],
+        }
+    }
+    pub fn identifier(&self, key: &str) -> Compile<Expr> {
+        if let Some(record) = self.get_local(key) {
+            let block = Block::local(record.frame_offset, record.ty.size());
+            return Ok(Expr::lvalue(record.ty.clone(), block));
+        }
+        if let Some(record) = self.module.get(key) {
+            return Ok(Expr::sub(record.ty.clone(), record.sub_index));
+        }
+
+        Err(UnknownIdentifier(key.to_string()))
+    }
+    pub fn get_entry_point(self) -> Compile<SubIndex> {
+        Ok(self.module.get("main").ok_or(Expected("main"))?.sub_index)
+    }
+    pub fn store_local(&mut self, key: String, ty: Ty, frame_offset: Word) {
+        self.insert(key, ScopeRecord { frame_offset, ty });
+    }
+    pub fn store_sub(&mut self, key: String, ty: Ty, sub_index: SubIndex) {
+        self.module.insert(key, ModuleRecord { ty, sub_index });
+    }
+    pub fn add_case_binding(&mut self, name: String, ty: Ty, block: Block) {
+        self.insert(
+            name,
+            ScopeRecord {
+                frame_offset: block.frame_offset().expect("frame offset"),
+                ty,
+            },
+        );
+    }
+    pub fn push_scope(&mut self, memory: &Memory) {
+        self.frames.push(ScopeFrame::new(memory.begin_scope()));
+    }
+    pub fn pop_scope(&mut self, memory: &mut Memory) {
+        let last_frame = self.frames.pop().expect("scope frame");
+        memory.end_scope(last_frame.scope_index);
+    }
+    fn get_local(&self, key: &str) -> Option<&ScopeRecord> {
+        for frame in self.frames.iter().rev() {
+            match frame.scope.get(key) {
+                Some(rec) => return Some(rec),
+                None => {}
+            };
+        }
+        None
+    }
+    fn insert(&mut self, key: String, value: ScopeRecord) {
+        let len = self.frames.len();
+        self.frames[len - 1].scope.insert(key, value);
+    }
 }

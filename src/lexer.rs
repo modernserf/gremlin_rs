@@ -13,6 +13,7 @@ pub enum Token {
     Array,
     As,
     Case,
+    Debug,
     Do,
     Else,
     End,
@@ -22,6 +23,7 @@ pub enum Token {
     Match,
     OneOf,
     Record,
+    Return,
     Sub,
     Then,
     Type,
@@ -140,7 +142,13 @@ impl Lexer {
                 }
             }
             'c' => self.keyword("case", Token::Case),
-            'd' => self.keyword("do", Token::Do),
+            'd' => {
+                self.adv_char();
+                match self.peek_char() {
+                    'e' => self.keyword_idx("debug", 1, Token::Debug),
+                    _ => self.keyword_idx("do", 1, Token::Do),
+                }
+            }
             'e' => {
                 self.adv_char();
                 match self.peek_char() {
@@ -159,7 +167,19 @@ impl Lexer {
             }
             'm' => self.keyword("match", Token::Match),
             'o' => self.keyword("oneof", Token::OneOf),
-            'r' => self.keyword("record", Token::Record),
+            'r' => {
+                self.adv_char();
+                match self.peek_char() {
+                    'e' => {
+                        self.adv_char();
+                        match self.peek_char() {
+                            'c' => self.keyword_idx("record", 2, Token::Record),
+                            _ => self.keyword_idx("return", 2, Token::Return),
+                        }
+                    }
+                    _ => self.identifier("r").map(Token::Identifier),
+                }
+            }
             's' => self.keyword("sub", Token::Sub),
             't' => {
                 self.adv_char();

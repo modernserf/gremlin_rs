@@ -35,7 +35,15 @@ pub enum IR {
     BitTest(IRDest, IRSrc),
     DebugStack,
     BranchZero(IRDest, IRSrc),
+    Call(Word),
+    Return,
     Halt,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompileResult {
+    pub code: Vec<IR>,
+    pub entry_point: usize,
 }
 
 pub struct Runtime {
@@ -46,10 +54,18 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    #[allow(dead_code)]
     pub fn eval(program: &[IR]) -> Word {
         let mut runtime = Self::new(128);
         runtime.run_program(program);
         runtime.memory[runtime.sp as usize]
+    }
+    pub fn eval_result(mut result: CompileResult) {
+        let mut runtime = Self::new(128);
+        runtime.ip = result.code.len();
+        result.code.push(IR::Call(result.entry_point as Word));
+        result.code.push(IR::Halt);
+        runtime.run_program(&result.code);
     }
     fn new(memory_size: Word) -> Self {
         Self {
@@ -137,9 +153,21 @@ impl Runtime {
                     self.ip = (self.ip as Word + displacement) as usize
                 }
             }
+            IR::Call(addr) => {
+                // push return address
+                self.sp -= 1;
+                self.memory[self.sp as usize] = self.ip as Word + 1;
+                self.ip = *addr as usize;
+            }
+            IR::Return => {
+                // pop return address
+                let addr = self.memory[self.sp as usize];
+                self.sp += 1;
+                self.ip = addr as usize;
+            }
 
             IR::DebugStack => {
-                dbg!(&self.memory[(self.sp as usize)..]);
+                println!("->{:?}", &self.memory[(self.sp as usize)..]);
             }
             IR::Halt => {}
         }
