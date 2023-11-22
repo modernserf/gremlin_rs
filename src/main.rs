@@ -84,7 +84,7 @@ impl Compiler {
         }
     }
 
-    fn bitset_expr(&mut self, ty: Ty, ctx: ExprTarget) -> Compile<Expr> {
+    fn bitset_expr(&mut self, ty: Ty) -> Compile<Expr> {
         let mut value = 0;
         loop {
             let key = match self.lexer.type_ident_token()? {
@@ -99,19 +99,17 @@ impl Compiler {
                 break;
             }
         }
-        Ok(ctx.constant(ty.as_bitset()?, value))
+        Ok(Expr::constant(ty.as_bitset()?, value))
     }
 
-    fn record_expr(&mut self, ty: Ty, ctx: ExprTarget, case: Option<Word>) -> Compile<Expr> {
-        let block = ctx.allocate(ty.size(), &mut self.memory);
+    fn record_expr(&mut self, ty: Ty, case: Option<Word>) -> Compile<Expr> {
+        let block = self.memory.allocate(ty.size());
         let record = ty.get_record()?;
 
         if let Some(case_id) = case {
             let case_field = record.case_field.as_ref().ok_or(Expected("case field"))?;
             let field_ctx = ExprTarget::Block(block.record_field(case_field));
-            field_ctx
-                .constant(Ty::int(), case_id)
-                .resolve(&mut self.memory);
+            Expr::constant(Ty::int(), case_id).resolve(&mut self.memory, field_ctx);
         }
 
         loop {
@@ -122,7 +120,7 @@ impl Compiler {
             self.lexer.expect_token(Token::Colon)?;
             let field = record.get(&field_name, case)?;
             let field_ctx = ExprTarget::Block(block.record_field(field));
-            let expr = self.expect_expr(field_ctx)?.resolve(&mut self.memory);
+            let expr = self.expect_expr()?.resolve(&mut self.memory, field_ctx);
             field.ty.check(&expr.ty)?;
 
             if self.lexer.token(Token::Comma)?.is_none() {
@@ -132,7 +130,7 @@ impl Compiler {
         Ok(Expr::resolved(ty, block))
     }
 
-    fn oneof_member_expr(&mut self, name: &str, ctx: ExprTarget) -> Compile<Expr> {
+    fn oneof_member_expr(&mut self, name: &str) -> Compile<Expr> {
         let ty = self.ty_scope.get(name)?;
 
         self.lexer.expect_token(Token::Dot)?;
@@ -145,18 +143,18 @@ impl Compiler {
             Token::CurlyLeft => {
                 self.lexer.advance();
                 let case = ty.get_record()?.get_case(&key)?;
-                let out = self.record_expr(ty, ctx, Some(case))?;
+                let out = self.record_expr(ty, Some(case))?;
                 self.lexer.expect_token(Token::CurlyRight)?;
                 Ok(out)
             }
             _ => {
                 let member = ty.oneof_member(&key)?;
-                Ok(ctx.constant(ty.clone(), member.index))
+                Ok(Expr::constant(ty.clone(), member.index))
             }
         }
     }
 
-    fn array_expr(&mut self, ctx: ExprTarget) -> Compile<Expr> {
+    fn array_expr(&mut self) -> Compile<Expr> {
         self.lexer.expect_token(Token::SqLeft)?;
         let item_ty = self.expect_type_expr()?;
         self.lexer.expect_token(Token::Colon)?;
@@ -165,13 +163,13 @@ impl Compiler {
         self.lexer.expect_token(Token::CurlyLeft)?;
 
         let ty = Ty::array(item_ty.clone(), capacity);
-        let block = ctx.allocate(ty.size(), &mut self.memory);
+        let block = self.memory.allocate(ty.size());
 
         let mut i = 0;
         loop {
             let cell_ctx = ExprTarget::Block(block.array_index(&item_ty, i));
-            let expr = match self.expr(cell_ctx)? {
-                Some(p) => p.resolve(&mut self.memory),
+            let expr = match self.expr()? {
+                Some(p) => p.resolve(&mut self.memory, cell_ctx),
                 None => break,
             };
             item_ty.check(&expr.ty)?;
@@ -189,24 +187,24 @@ impl Compiler {
         Ok(Expr::resolved(ty, block))
     }
 
-    fn base_expr(&mut self, ctx: ExprTarget) -> CompileOpt<Expr> {
+    fn base_expr(&mut self) -> CompileOpt<Expr> {
         let res = match self.lexer.peek()? {
             Token::ParLeft => {
                 self.lexer.advance();
-                let expr = self.expect_expr(ctx)?;
+                let expr = self.expect_expr()?;
                 self.lexer.expect_token(Token::ParRight)?;
                 expr
             }
             Token::TypeIdentifier(name) => {
                 self.lexer.advance();
                 match self.lexer.peek()? {
-                    Token::Dot => self.oneof_member_expr(&name, ctx)?,
+                    Token::Dot => self.oneof_member_expr(&name)?,
                     Token::CurlyLeft => {
                         self.lexer.advance();
                         let ty = self.ty_scope.get(&name)?;
                         let out = match self.lexer.peek()? {
-                            Token::TypeIdentifier(_) => self.bitset_expr(ty, ctx)?,
-                            Token::Identifier(_) => self.record_expr(ty, ctx, None)?,
+                            Token::TypeIdentifier(_) => self.bitset_expr(ty)?,
+                            Token::Identifier(_) => self.record_expr(ty, None)?,
                             _ => unimplemented!(),
                         };
                         self.lexer.expect_token(Token::CurlyRight)?;
@@ -217,31 +215,59 @@ impl Compiler {
             }
             Token::Array => {
                 self.lexer.advance();
-                self.array_expr(ctx)?
+                self.array_expr()?
             }
             Token::Integer(int) => {
                 self.lexer.advance();
-                ctx.constant(Ty::int(), int)
+                Expr::constant(Ty::int(), int)
             }
             Token::True => {
                 self.lexer.advance();
-                ctx.constant(Ty::bool(), 1)
+                Expr::constant(Ty::bool(), 1)
             }
             Token::False => {
                 self.lexer.advance();
-                ctx.constant(Ty::bool(), 0)
+                Expr::constant(Ty::bool(), 0)
             }
             Token::Identifier(name) => {
                 self.lexer.advance();
-                self.scope.identifier(&name, ctx)?
+                self.scope.identifier(&name)?
             }
             _ => return Ok(None),
         };
         Ok(Some(res))
     }
 
-    fn postfix_expr(&mut self, ctx: ExprTarget) -> CompileOpt<Expr> {
-        let mut left = match self.base_expr(ctx)? {
+    fn array_index(&mut self, left: Expr) -> Compile<Expr> {
+        let item_ty = left.ty.index_ty(&Ty::int())?.clone();
+        // get pointer to first item from array
+        let ptr = left
+            .add_ref(&mut self.memory, ExprTarget::Stack)?
+            .cast_ty(item_ty.add_ref())?;
+        // add (index * size) to value of pointer
+        let idx = self.expect_expr()?;
+        let offset = OpExpr::simple(
+            &mut self.memory,
+            ExprTarget::Stack,
+            Op::Mul,
+            idx,
+            Expr::constant(Ty::int(), item_ty.size()),
+        )?;
+        let ptr_ty = ptr.ty.clone();
+        let offset_ptr = OpExpr::simple(
+            &mut self.memory,
+            ExprTarget::Stack,
+            Op::Add,
+            ptr.cast_ty(Ty::int())?,
+            offset,
+        )?
+        .cast_ty(ptr_ty)?;
+        // deref pointer
+        offset_ptr.deref(&mut self.memory, ExprTarget::Stack)
+    }
+
+    fn postfix_expr(&mut self) -> CompileOpt<Expr> {
+        let mut left = match self.base_expr()? {
             Some(e) => e,
             None => return Ok(None),
         };
@@ -250,24 +276,9 @@ impl Compiler {
                 Token::SqLeft => {
                     self.lexer.advance();
                     if self.lexer.token(Token::SqRight)?.is_some() {
-                        left = left.deref(&mut self.memory)?;
+                        left = left.deref(&mut self.memory, ExprTarget::Stack)?;
                     } else {
-                        let item_ty = left.ty.index_ty(&Ty::int())?.clone();
-                        // get pointer to left
-                        let ptr = left.add_ref(&mut self.memory)?;
-                        // add (index * size) to value of pointer
-                        let idx = self.expect_expr(ExprTarget::Stack)?;
-
-                        let offset = idx.op(
-                            &mut self.memory,
-                            Op::Mul,
-                            ExprTarget::Stack.constant(Ty::int(), item_ty.size()),
-                            Ty::int(),
-                        );
-                        let out_ty = ptr.ty.clone();
-                        let offset_ptr = ptr.op(&mut self.memory, Op::Add, offset, out_ty);
-                        // deref pointer
-                        left = offset_ptr.deref(&mut self.memory)?;
+                        left = self.array_index(left)?;
                         self.lexer.expect_token(Token::SqRight)?;
                     }
                 }
@@ -280,7 +291,7 @@ impl Compiler {
                         }
                         Token::TypeIdentifier(field_name) => {
                             self.lexer.advance();
-                            left.bitset_field(&field_name, &mut self.memory)?
+                            left.bitset_field(&field_name, &mut self.memory, ExprTarget::Stack)?
                         }
                         _ => return Err(Expected("field")),
                     }
@@ -290,44 +301,46 @@ impl Compiler {
         }
     }
 
-    fn unary_op_expr(&mut self, ctx: ExprTarget) -> CompileOpt<Expr> {
+    fn unary_op_expr(&mut self) -> CompileOpt<Expr> {
         let out = match self.lexer.peek()? {
             Token::Minus => {
                 self.lexer.advance();
-                let left = ctx.constant(Ty::int(), 0);
-                let right = self.expect_unary_op_expr(ExprTarget::Stack)?;
-                left.op(&mut self.memory, Op::Sub, right, Ty::int())
+                let left = Expr::constant(Ty::int(), 0);
+                let right = self.expect_unary_op_expr()?;
+                OpExpr::simple(&mut self.memory, ExprTarget::Stack, Op::Sub, left, right)?
             }
             Token::Ampersand => {
                 self.lexer.advance();
-                let operand = self.expect_unary_op_expr(ctx)?;
-                operand.add_ref(&mut self.memory)?
+                let expr = self.expect_unary_op_expr()?;
+                expr.add_ref(&mut self.memory, ExprTarget::Stack)?
             }
             Token::Volatile => {
                 self.lexer.advance();
-                let operand = self.expect_unary_op_expr(ctx)?;
-                operand.resolve(&mut self.memory).to_expr()
+                let operand = self.expect_unary_op_expr()?;
+                operand
+                    .resolve(&mut self.memory, ExprTarget::Stack)
+                    .to_expr()
             }
-            _ => return self.postfix_expr(ctx),
+            _ => return self.postfix_expr(),
         };
         Ok(Some(out))
     }
 
-    fn expect_unary_op_expr(&mut self, ctx: ExprTarget) -> Compile<Expr> {
-        self.unary_op_expr(ctx)?.ok_or(Expected("expr"))
+    fn expect_unary_op_expr(&mut self) -> Compile<Expr> {
+        self.unary_op_expr()?.ok_or(Expected("expr"))
     }
 
-    fn op_expr(&mut self, ctx: ExprTarget) -> CompileOpt<Expr> {
-        let left = match self.unary_op_expr(ctx)? {
+    fn op_expr(&mut self) -> CompileOpt<Expr> {
+        let left = match self.unary_op_expr()? {
             Some(expr) => expr,
             None => return Ok(None),
         };
-        let mut op_expr = OpExpr::new(left);
+        let mut op_expr = OpExpr::new(left, ExprTarget::Stack);
 
         loop {
             match self.lexer.op()? {
                 Some(op) => {
-                    let right = self.expect_unary_op_expr(ExprTarget::Stack)?;
+                    let right = self.expect_unary_op_expr()?;
                     op_expr.next(&mut self.memory, op, right)?;
                 }
                 // None => return Ok(Some(op_parser.unwind(&mut self.memory)?)),
@@ -336,21 +349,23 @@ impl Compiler {
         }
     }
 
-    fn assign_expr(&mut self, ctx: ExprTarget) -> CompileOpt<Expr> {
-        let left = match self.op_expr(ctx)? {
+    fn assign_expr(&mut self) -> CompileOpt<Expr> {
+        let left = match self.op_expr()? {
             Some(x) => x,
             None => return Ok(None),
         };
         if self.lexer.token(Token::ColonEq)?.is_none() {
             return Ok(Some(left));
         }
-        self.op_expr(left.assign_ctx()?)?
-            .ok_or(Expected("expr"))
-            .map(Some)
+        let resolved = self
+            .op_expr()?
+            .ok_or(Expected("expr"))?
+            .resolve(&mut self.memory, left.assign_ctx()?);
+        Ok(Some(resolved.to_expr()))
     }
 
-    fn as_expr(&mut self, ctx: ExprTarget) -> CompileOpt<Expr> {
-        let value = match self.assign_expr(ctx)? {
+    fn as_expr(&mut self) -> CompileOpt<Expr> {
+        let value = match self.assign_expr()? {
             Some(x) => x,
             None => return Ok(None),
         };
@@ -361,12 +376,12 @@ impl Compiler {
         Ok(Some(value.cast_ty(ty)?))
     }
 
-    fn expr(&mut self, ctx: ExprTarget) -> CompileOpt<Expr> {
-        self.as_expr(ctx)
+    fn expr(&mut self) -> CompileOpt<Expr> {
+        self.as_expr()
     }
 
-    fn expect_expr(&mut self, ctx: ExprTarget) -> Compile<Expr> {
-        self.expr(ctx)?.ok_or(Expected("expr"))
+    fn expect_expr(&mut self) -> Compile<Expr> {
+        self.expr()?.ok_or(Expected("expr"))
     }
 
     // ### Bindings, TypeExprs, etc.
@@ -479,9 +494,9 @@ impl Compiler {
     }
 
     fn if_cond(&mut self) -> Compile<CondIndex> {
-        let cond = self.expect_expr(ExprTarget::Stack)?;
+        let cond = self.expect_expr()?;
         Ty::bool().check(&cond.ty)?;
-        Ok(self.memory.begin_cond(cond))
+        Ok(self.memory.begin_cond(cond, ExprTarget::Stack))
     }
 
     // TODO: if as expr
@@ -535,9 +550,9 @@ impl Compiler {
     }
 
     fn match_stmt(&mut self) -> Compile<()> {
-        let target = self.expect_expr(ExprTarget::Stack)?;
+        let target = self.expect_expr()?;
         self.lexer.expect_token(Token::Then)?;
-        let mut match_builder = target.begin_match(&mut self.memory)?;
+        let mut match_builder = MatchBuilder::new(target, &mut self.memory, ExprTarget::Stack)?;
         loop {
             if self.lexer.token(Token::Case)?.is_none() {
                 break;
@@ -579,8 +594,8 @@ impl Compiler {
         };
         self.lexer.expect_token(Token::ColonEq)?;
         let expr = self
-            .expect_expr(ExprTarget::Stack)?
-            .resolve(&mut self.memory);
+            .expect_expr()?
+            .resolve(&mut self.memory, ExprTarget::Stack);
         match bind_ty {
             Some(b) => b.check(&expr.ty)?,
             None => {}
@@ -613,9 +628,9 @@ impl Compiler {
                 self.while_stmt()?;
             }
             _ => {
-                match self.expr(ExprTarget::Stack)? {
+                match self.expr()? {
                     Some(expr) => {
-                        let res = expr.resolve(&mut self.memory);
+                        let res = expr.resolve(&mut self.memory, ExprTarget::Stack);
                         self.memory.compact(res.block);
                         self.lexer.expect_token(Token::Semicolon)?;
                     }
@@ -933,22 +948,22 @@ mod test {
 
     #[test]
     fn ref_deref() {
-        expect_ir_result(
+        expect_result(
             "
             let x := 1;
             let ptr := &x;
             (volatile ptr)[];
         ",
             vec![
-                // let x := 1;
-                Mov(PushStack, Immediate(1)),
-                // let ptr := &x;
-                LoadAddress(PushStack, StackOffset(0)),
-                // volatile ptr
-                Mov(PushStack, StackOffset(0)),
-                // []
-                Mov(R0, StackOffset(0)),
-                Mov(StackOffset(0), R0Offset(0)),
+                // // let x := 1;
+                // Mov(PushStack, Immediate(1)),
+                // // let ptr := &x;
+                // LoadAddress(PushStack, StackOffset(0)),
+                // // volatile ptr
+                // Mov(PushStack, StackOffset(0)),
+                // // []
+                // Mov(R0, StackOffset(0)),
+                // Mov(StackOffset(0), R0Offset(0)),
             ],
             1,
         );
@@ -1020,30 +1035,30 @@ mod test {
     }
 
     #[test]
-    fn record_() {
-        expect_ir_result(
+    fn record() {
+        expect_result(
             "
             type Point := record { x: Int, y: Int };
             let p := Point { x: 123, y: 456 };
             (volatile p).x;
         ",
             vec![
-                // let p := Point { x: 1, y: 2 };
-                Sub(SP, Immediate(2)),
-                Mov(StackOffset(0), Immediate(123)),
-                Mov(StackOffset(1), Immediate(456)),
-                // volatile p
-                Sub(SP, Immediate(2)),
-                Mov(StackOffset(0), StackOffset(2)),
-                Mov(StackOffset(1), StackOffset(3)),
-                // .x
-                Mov(StackOffset(1), StackOffset(0)),
-                Add(SP, Immediate(1)),
+                // // let p := Point { x: 1, y: 2 };
+                // Sub(SP, Immediate(2)),
+                // Mov(StackOffset(0), Immediate(123)),
+                // Mov(StackOffset(1), Immediate(456)),
+                // // volatile p
+                // Sub(SP, Immediate(2)),
+                // Mov(StackOffset(0), StackOffset(2)),
+                // Mov(StackOffset(1), StackOffset(3)),
+                // // .x
+                // Mov(StackOffset(1), StackOffset(0)),
+                // Add(SP, Immediate(1)),
             ],
             123,
         );
 
-        expect_ir_result(
+        expect_result(
             "
             type Point := record { x: Int, y: Int };
             let p := Point { x: 123, y: 456 };
@@ -1122,7 +1137,10 @@ mod test {
                 Mov(PushStack, StackOffset(0)),
                 // []
                 Mov(R0, StackOffset(0)),
-                Mov(StackOffset(0), R0Offset(0)),
+                Mov(PushStack, R0Offset(0)),
+                // cleanup
+                Mov(StackOffset(1), StackOffset(0)),
+                Add(SP, Immediate(1)),
             ],
             5,
         );
@@ -1208,7 +1226,7 @@ mod test {
 
     #[test]
     fn array() {
-        expect_ir_result(
+        expect_result(
             "
                 let xs := array[Int: 4]{10, 20, 30, 40};
                 xs[volatile 1];
@@ -1234,7 +1252,7 @@ mod test {
             20,
         );
 
-        expect_ir_result(
+        expect_result(
             "
                 let xs := array[Int: 4]{10, 20, 30, 40};
                 xs[1];
@@ -1425,19 +1443,23 @@ mod test {
             vec![
                 // let count := 0;
                 Mov(PushStack, Immediate(0)),
-                // begin:
-                // count
+                // begin: count
                 Mov(PushStack, StackOffset(0)),
                 // != 10
                 NotEqual(StackOffset(0), Immediate(10)),
                 // -> end
-                BranchZero(Immediate(2), PopStack),
-                // count := count + 1
-                Add(StackOffset(0), Immediate(1)),
-                // -> begin
-                BranchZero(Immediate(-5), Immediate(0)),
-                // end:
+                BranchZero(Immediate(5), PopStack),
                 // count
+                Mov(PushStack, StackOffset(0)),
+                // + 1
+                Add(StackOffset(0), Immediate(1)),
+                // count :=
+                Mov(StackOffset(1), StackOffset(0)),
+                // drop
+                Add(SP, Immediate(1)),
+                // -> begin
+                BranchZero(Immediate(-8), Immediate(0)),
+                // end: count
                 Mov(PushStack, StackOffset(0)),
             ],
             10,

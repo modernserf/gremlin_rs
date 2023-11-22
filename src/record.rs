@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::expr::Scope;
+use crate::expr::*;
 use crate::memory::*;
 use crate::runtime::Word;
 use crate::ty::*;
@@ -89,23 +89,28 @@ pub struct TyOneOfMember {
 
 #[derive(Debug)]
 pub struct MatchBuilder {
-    table_index: CaseIndex,
+    case_index: CaseIndex,
     record: Rc<TyRecord>,
     end_addrs: Vec<usize>,
     block: Block,
 }
 impl MatchBuilder {
-    pub fn new(record: Rc<TyRecord>, block: Block, table_index: CaseIndex) -> Self {
-        Self {
+    pub fn new(expr: Expr, memory: &mut Memory, target: ExprTarget) -> Compile<Self> {
+        let res = expr.resolve(memory, target);
+        let record = res.ty.get_record()?;
+        let case_field = record.case_field.as_ref().ok_or(Expected("case field"))?;
+        let case_value = res.block.record_field(&case_field);
+        let case_index = memory.begin_match(case_value, record.cases.len());
+        Ok(Self {
             record,
-            block,
-            table_index,
+            block: res.block,
+            case_index,
             end_addrs: Vec::new(),
-        }
+        })
     }
     pub fn add_case(&self, tag: &str, memory: &mut Memory) -> Compile<MatchCaseBuilder> {
         let case_id = *self.record.cases.get(tag).ok_or(Expected("case"))?;
-        memory.set_jump_target(self.table_index, case_id as usize);
+        memory.set_jump_target(self.case_index, case_id as usize);
 
         Ok(MatchCaseBuilder::new(
             self.record.clone(),
@@ -117,7 +122,7 @@ impl MatchBuilder {
         self.end_addrs.push(memory.end_case());
     }
     pub fn resolve(self, memory: &mut Memory) {
-        memory.set_jump_end_targets(self.table_index, self.record.cases.len(), &self.end_addrs)
+        memory.set_jump_end_targets(self.case_index, self.record.cases.len(), &self.end_addrs)
     }
 }
 

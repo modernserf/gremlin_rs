@@ -119,8 +119,8 @@ impl Memory {
         self.drop(to_drop);
     }
     // control flow
-    pub fn begin_cond(&mut self, expr: Expr) -> CondIndex {
-        let res = expr.resolve(self);
+    pub fn begin_cond(&mut self, expr: Expr, target: ExprTarget) -> CondIndex {
+        let res = expr.resolve(self, target);
         let ea = match res.block {
             Block::Stack(slice) => {
                 assert!(

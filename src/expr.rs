@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use crate::memory::*;
 use crate::op::Op;
-use crate::record::*;
 use crate::runtime::*;
 use crate::ty::*;
 
@@ -12,11 +11,10 @@ use crate::{Compile, CompileError::*};
 pub struct Expr {
     pub ty: Ty,
     kind: ExprKind,
-    ctx: ExprTarget,
+    // ctx: ExprTarget,
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 enum ExprKind {
     // a value in memory
     Resolved(Block),
@@ -38,7 +36,22 @@ impl Expr {
         Self {
             ty,
             kind: ExprKind::Resolved(block),
-            ctx: ExprTarget::Block(block),
+        }
+    }
+    pub fn constant(ty: Ty, value: Word) -> Self {
+        Self {
+            ty,
+            kind: ExprKind::Constant(value),
+        }
+    }
+    pub fn lvalue(ty: Ty, block: Block) -> Expr {
+        Self {
+            ty,
+            kind: ExprKind::Reference {
+                deref_level: 0,
+                focus: Slice::with_size(block.size()),
+                next: block,
+            },
         }
     }
     pub fn get_constant(&self) -> Option<Word> {
@@ -63,44 +76,10 @@ impl Expr {
             _ => Err(Expected("lvalue")),
         }
     }
-    pub fn add_ref(self, memory: &mut Memory) -> Compile<Expr> {
-        match self.kind {
-            ExprKind::Reference { next, .. } => {
-                let out = memory.write(IR::LoadAddress, self.ctx.to_dest(1), Src::Block(next));
-                Ok(Self::resolved(self.ty.add_ref(), out))
-            }
-            _ => Err(InvalidRef),
-        }
-    }
-    pub fn deref(self, memory: &mut Memory) -> Compile<Expr> {
-        let deref_ty = self.ty.deref()?;
-        match self.kind {
-            ExprKind::Resolved(block) => {
-                let size = deref_ty.size();
-                let out = memory.deref(block, self.ctx.to_dest(size), Slice::with_size(size));
-                Ok(Self::resolved(deref_ty, out))
-            }
-            ExprKind::Reference {
-                deref_level,
-                next,
-                focus,
-            } => Ok(Self {
-                ty: deref_ty,
-                ctx: self.ctx,
-                kind: ExprKind::Reference {
-                    deref_level: deref_level + 1,
-                    next,
-                    focus,
-                },
-            }),
-            _ => unreachable!(),
-        }
-    }
     pub fn cast_ty(self, ty: Ty) -> Compile<Self> {
         Ok(Self {
             ty: self.ty.cast(ty)?,
             kind: self.kind,
-            ctx: self.ctx,
         })
     }
     pub fn record_field(self, field_name: &str) -> Compile<Self> {
@@ -115,7 +94,7 @@ impl Expr {
                     next: block,
                     focus: Slice::from_record_field(field),
                 },
-                ctx: self.ctx.shrink_to(field.ty.size()),
+                // ctx: self.ctx.shrink_to(field.ty.size()),
             }),
             ExprKind::Reference {
                 deref_level, next, ..
@@ -126,62 +105,81 @@ impl Expr {
                     next,
                     focus: Slice::from_record_field(field),
                 },
-                ctx: self.ctx.shrink_to(field.ty.size()),
+                // ctx: self.ctx.shrink_to(field.ty.size()),
             }),
         }
     }
-    pub fn op(self, memory: &mut Memory, op: Op, other: Expr, out_ty: Ty) -> Expr {
-        match (&self.get_constant(), &other.get_constant()) {
-            (Some(l), Some(r)) => {
-                let value = op.inline(*l, *r);
-                self.ctx.constant(out_ty, value)
+    //
+    pub fn add_ref(self, memory: &mut Memory, target: ExprTarget) -> Compile<Expr> {
+        match self.kind {
+            ExprKind::Reference { next, .. } => {
+                let out = target.write_ref(memory, next);
+                Ok(Self::resolved(self.ty.add_ref(), out))
             }
-            _ => {
-                let left = self.resolve(memory);
-                let dest = Dest::Block(left.block);
-                let block = match other.kind {
-                    ExprKind::Resolved(block) => memory.write(op.ir(), dest, Src::Block(block)),
-                    ExprKind::Constant(value) => memory.write(op.ir(), dest, Src::Immediate(value)),
-                    ExprKind::Reference {
-                        deref_level,
-                        next,
-                        focus,
-                    } => {
-                        // TODO
-                        assert!(deref_level == 0);
-                        memory.write(op.ir(), dest, Src::Block(next.focus(focus)))
-                    }
-                };
-                Self {
-                    ty: out_ty,
-                    ctx: ExprTarget::Block(block),
-                    kind: ExprKind::Resolved(block),
-                }
-            }
+            _ => Err(InvalidRef),
         }
     }
-    pub fn bitset_field(self, field_name: &str, memory: &mut Memory) -> Compile<Expr> {
+    pub fn deref(self, memory: &mut Memory, target: ExprTarget) -> Compile<Expr> {
+        let deref_ty = self.ty.deref()?;
+        match self.kind {
+            ExprKind::Resolved(block) => {
+                let out =
+                    target.write_deref(memory, block, &deref_ty, Slice::with_size(deref_ty.size()));
+                Ok(Self::resolved(deref_ty, out))
+            }
+            ExprKind::Reference {
+                deref_level,
+                next,
+                focus,
+            } => Ok(Self {
+                ty: deref_ty,
+                // ctx: self.ctx,
+                kind: ExprKind::Reference {
+                    deref_level: deref_level + 1,
+                    next,
+                    focus,
+                },
+            }),
+            _ => unreachable!(),
+        }
+    }
+    pub fn op_rhs(self, memory: &mut Memory, op: Op, dest_block: Block) {
+        let dest = Dest::Block(dest_block);
+        match self.kind {
+            ExprKind::Resolved(block) => memory.write(op.ir(), dest, Src::Block(block)),
+            ExprKind::Constant(value) => memory.write(op.ir(), dest, Src::Immediate(value)),
+            ExprKind::Reference {
+                deref_level,
+                next,
+                focus,
+            } => {
+                // TODO
+                assert!(deref_level == 0);
+                memory.write(op.ir(), dest, Src::Block(next.focus(focus)))
+            }
+        };
+    }
+    pub fn bitset_field(
+        self,
+        field_name: &str,
+        memory: &mut Memory,
+        target: ExprTarget,
+    ) -> Compile<Expr> {
         let field = self.ty.oneof_member(field_name)?.clone();
-        let dest = Dest::Block(self.resolve(memory).block);
+        let dest = Dest::Block(self.resolve(memory, target).block);
         let out = memory.write(IR::BitTest, dest, Src::Immediate(field.index));
         let ty = Ty::bool();
         memory.write(IR::Mov, Dest::Block(out), Src::R0);
         Ok(Expr::resolved(ty, out))
     }
-    pub fn begin_match(self, memory: &mut Memory) -> Compile<MatchBuilder> {
-        let res = self.resolve(memory);
-        let record = res.ty.get_record()?;
-        let case_field = record.case_field.as_ref().ok_or(Expected("case field"))?;
-        let case_value = res.block.record_field(&case_field);
-        let jump_table = memory.begin_match(case_value, record.cases.len());
-        Ok(MatchBuilder::new(record, res.block, jump_table))
-    }
-
-    pub fn resolve(self, memory: &mut Memory) -> ResolvedExpr {
+    pub fn resolve(self, memory: &mut Memory, target: ExprTarget) -> ResolvedExpr {
         match self.kind {
-            ExprKind::Resolved(block) => ResolvedExpr { ty: self.ty, block },
+            ExprKind::Resolved(block) => {
+                let block = target.maybe_move_block(memory, block);
+                ResolvedExpr { ty: self.ty, block }
+            }
             ExprKind::Constant(value) => {
-                let block = memory.write(IR::Mov, self.ctx.to_dest(1), Src::Immediate(value));
+                let block = target.write_const(memory, value);
                 ResolvedExpr { ty: self.ty, block }
             }
             ExprKind::Reference {
@@ -190,12 +188,10 @@ impl Expr {
                 focus,
             } => {
                 if deref_level == 0 {
-                    let src = next.focus(focus);
-                    let block =
-                        memory.write(IR::Mov, self.ctx.to_dest(src.size()), Src::Block(src));
+                    let block = target.write_block(memory, next.focus(focus));
                     ResolvedExpr { ty: self.ty, block }
                 } else if deref_level == 1 {
-                    let block = memory.deref(next, self.ctx.to_dest(self.ty.size()), focus);
+                    let block = target.write_deref(memory, next, &self.ty, focus);
                     ResolvedExpr { ty: self.ty, block }
                 } else {
                     unimplemented!()
@@ -241,10 +237,10 @@ impl Scope {
             frames: vec![ScopeFrame::new(ScopeIndex::root())],
         }
     }
-    pub fn identifier(&self, key: &str, ctx: ExprTarget) -> Compile<Expr> {
+    pub fn identifier(&self, key: &str) -> Compile<Expr> {
         let record = self.get(key)?;
         let block = Block::local(record.frame_offset, record.ty.size());
-        Ok(ctx.lvalue(record.ty.clone(), block))
+        Ok(Expr::lvalue(record.ty.clone(), block))
     }
     pub fn store_local(&mut self, key: String, ty: Ty, frame_offset: Word) {
         self.insert(key, ScopeRecord { frame_offset, ty });
@@ -294,49 +290,30 @@ pub enum ExprTarget {
 }
 
 impl ExprTarget {
-    pub fn constant(self, ty: Ty, value: Word) -> Expr {
-        Expr {
-            ty,
-            ctx: self,
-            kind: ExprKind::Constant(value),
-        }
-    }
-    pub fn lvalue(self, ty: Ty, block: Block) -> Expr {
-        Expr {
-            ty,
-            ctx: self,
-            kind: ExprKind::Reference {
-                deref_level: 0,
-                focus: Slice::with_size(block.size()),
-                next: block,
-            },
-        }
-    }
-    pub fn to_dest(self, size: Word) -> Dest {
+    fn to_dest(self, size: Word) -> Dest {
         match self {
             Self::Stack => Dest::Stack(size),
             Self::Block(block) => Dest::Block(block),
             Self::RefBlock(block) => Dest::RefBlock(block, size),
         }
     }
-    pub fn allocate(self, size: Word, mem: &mut Memory) -> Block {
-        match self {
-            Self::Stack => mem.allocate(size),
-            Self::Block(block) => {
-                if block.size() == size {
-                    block
-                } else {
-                    unimplemented!("allocate in wrong size block")
-                }
-            }
-            Self::RefBlock(_) => unimplemented!(),
-        }
+    fn write_const(self, memory: &mut Memory, value: Word) -> Block {
+        memory.write(IR::Mov, self.to_dest(1), Src::Immediate(value))
     }
-    fn shrink_to(self, size: Word) -> Self {
+    fn write_block(self, memory: &mut Memory, block: Block) -> Block {
+        memory.write(IR::Mov, self.to_dest(block.size()), Src::Block(block))
+    }
+    fn write_ref(self, memory: &mut Memory, block: Block) -> Block {
+        memory.write(IR::LoadAddress, self.to_dest(1), Src::Block(block))
+    }
+    fn write_deref(self, memory: &mut Memory, block: Block, deref_ty: &Ty, focus: Slice) -> Block {
+        let size = deref_ty.size();
+        memory.deref(block, self.to_dest(size), focus)
+    }
+    fn maybe_move_block(self, memory: &mut Memory, block: Block) -> Block {
         match self {
-            Self::Block(block) => Self::Block(block.shrink_to(size)),
-            Self::Stack => Self::Stack,
-            _ => unimplemented!(),
+            Self::Stack => block,
+            _ => self.write_block(memory, block),
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::expr::Expr;
+use crate::expr::{Expr, ExprTarget};
 use crate::memory::Memory;
 use crate::runtime::{IROp, Word, IR};
 use crate::ty::*;
@@ -24,18 +24,31 @@ use crate::Compile;
 pub struct OpExpr {
     op_stack: Vec<Op>,
     operands: Vec<Expr>,
+    target: ExprTarget,
 }
 
 impl OpExpr {
-    pub fn new(left: Expr) -> Self {
+    pub fn new(left: Expr, target: ExprTarget) -> Self {
         Self {
             op_stack: Vec::new(),
             operands: vec![left],
+            target,
         }
+    }
+    pub fn simple(
+        memory: &mut Memory,
+        target: ExprTarget,
+        op: Op,
+        left: Expr,
+        right: Expr,
+    ) -> Compile<Expr> {
+        let mut expr = Self::new(left, target);
+        expr.next(memory, op, right)?;
+        expr.unwind(memory)
     }
     pub fn unwind(&mut self, memory: &mut Memory) -> Compile<Expr> {
         while let Some(op) = self.op_stack.pop() {
-            self.apply(memory, op)?;
+            self.apply_stack(memory, op)?;
         }
         Ok(self.operands.pop().expect("op result"))
     }
@@ -46,7 +59,7 @@ impl OpExpr {
                     self.op_stack.push(last_op);
                     self.op_stack.push(op);
                 } else {
-                    self.apply(memory, last_op)?;
+                    self.apply_stack(memory, last_op)?;
                     self.op_stack.push(op);
                 }
             }
@@ -57,14 +70,26 @@ impl OpExpr {
         self.operands.push(right);
         Ok(())
     }
-    fn apply(&mut self, memory: &mut Memory, op: Op) -> Compile<()> {
+    fn apply_stack(&mut self, memory: &mut Memory, op: Op) -> Compile<()> {
         let right = self.operands.pop().expect("rhs");
         let left = self.operands.pop().expect("lhs");
-
-        let out_ty = op.check_ty(&left.ty, &right.ty)?;
-        let res = left.op(memory, op, right, out_ty);
-        self.operands.push(res);
+        let result = self.apply_1(memory, op, left, right)?;
+        self.operands.push(result);
         Ok(())
+    }
+    fn apply_1(&mut self, memory: &mut Memory, op: Op, left: Expr, right: Expr) -> Compile<Expr> {
+        let out_ty = op.check_ty(&left.ty, &right.ty)?;
+        match (&left.get_constant(), &right.get_constant()) {
+            (Some(l), Some(r)) => {
+                let value = op.inline(*l, *r);
+                Ok(Expr::constant(out_ty, value))
+            }
+            _ => {
+                let left = left.resolve(memory, ExprTarget::Stack);
+                right.op_rhs(memory, op, left.block);
+                Ok(Expr::resolved(out_ty, left.block))
+            }
+        }
     }
 }
 
