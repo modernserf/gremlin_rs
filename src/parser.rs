@@ -1,3 +1,4 @@
+use crate::compiler::*;
 use crate::expr::*;
 use crate::lexer::*;
 use crate::memory::*;
@@ -6,12 +7,10 @@ use crate::record::*;
 use crate::runtime::*;
 use crate::subroutine::*;
 use crate::ty::*;
-use crate::{Compile, CompileError::*, CompileOpt, TyScope};
+use crate::{Compile, CompileError::*, CompileOpt};
 
 pub struct Parser {
-    memory: Memory,
-    scope: Scope,
-    ty_scope: TyScope,
+    compiler: Compiler,
     lexer: Lexer,
 }
 
@@ -20,21 +19,19 @@ impl Parser {
         let mut parse = Self::new(input);
         parse.module()?;
         parse.lexer.expect_token(Token::EndOfInput)?;
-        Ok(parse.memory.done_program(parse.scope.get_entry_point()?))
+        parse.compiler.resolve()
     }
     #[allow(dead_code)]
     pub fn script(input: &str) -> Compile<Vec<IR>> {
         let mut parse = Self::new(input);
         parse.block()?;
         parse.lexer.expect_token(Token::EndOfInput)?;
-        Ok(parse.memory.done())
+        Ok(parse.compiler.done())
     }
     fn new(input: &str) -> Self {
         Self {
             lexer: Lexer::new(input),
-            scope: Scope::new(),
-            ty_scope: TyScope::new(),
-            memory: Memory::new(),
+            compiler: Compiler::new(),
         }
     }
 
@@ -57,13 +54,14 @@ impl Parser {
     }
 
     fn record_expr(&mut self, ty: Ty, case: Option<Word>) -> Compile<Expr> {
-        let block = self.memory.allocate(ty.size());
+        let block = self.compiler.allocate(&ty);
         let record = ty.get_record()?;
 
         if let Some(case_id) = case {
             let case_field = record.case_field.as_ref().ok_or(Expected("case field"))?;
             let field_ctx = ExprTarget::Block(block.record_field(case_field));
-            Expr::constant(Ty::int(), case_id).resolve(&mut self.memory, field_ctx);
+            self.compiler
+                .resolve_expr(Expr::constant(Ty::int(), case_id), field_ctx);
         }
 
         loop {
@@ -74,8 +72,9 @@ impl Parser {
             self.lexer.expect_token(Token::Colon)?;
             let field = record.get(&field_name, case)?;
             let field_ctx = ExprTarget::Block(block.record_field(field));
-            let expr = self.expect_expr()?.resolve(&mut self.memory, field_ctx);
-            field.ty.check(&expr.ty)?;
+            let expr = self.expect_expr()?;
+            let resolved = self.compiler.resolve_expr(expr, field_ctx);
+            field.ty.check(&resolved.ty)?;
 
             if self.lexer.token(Token::Comma)?.is_none() {
                 break;
@@ -85,7 +84,7 @@ impl Parser {
     }
 
     fn oneof_member_expr(&mut self, name: &str) -> Compile<Expr> {
-        let ty = self.ty_scope.get(name)?;
+        let ty = self.compiler.get_ty(name)?;
 
         self.lexer.expect_token(Token::Dot)?;
         let key = self
@@ -117,13 +116,13 @@ impl Parser {
         self.lexer.expect_token(Token::CurlyLeft)?;
 
         let ty = Ty::array(item_ty.clone(), capacity);
-        let block = self.memory.allocate(ty.size());
+        let block = self.compiler.allocate(&ty);
 
         let mut i = 0;
         loop {
             let cell_ctx = ExprTarget::Block(block.array_index(&item_ty, i));
             let expr = match self.expr()? {
-                Some(p) => p.resolve(&mut self.memory, cell_ctx),
+                Some(p) => self.compiler.resolve_expr(p, cell_ctx),
                 None => break,
             };
             item_ty.check(&expr.ty)?;
@@ -155,7 +154,7 @@ impl Parser {
                     Token::Dot => self.oneof_member_expr(&name)?,
                     Token::CurlyLeft => {
                         self.lexer.advance();
-                        let ty = self.ty_scope.get(&name)?;
+                        let ty = self.compiler.get_ty(&name)?;
                         let out = match self.lexer.peek()? {
                             Token::TypeIdentifier(_) => self.bitset_expr(ty)?,
                             Token::Identifier(_) => self.record_expr(ty, None)?,
@@ -185,39 +184,19 @@ impl Parser {
             }
             Token::Identifier(name) => {
                 self.lexer.advance();
-                self.scope.identifier(&name)?
+                self.compiler.get_expr(&name)?
             }
             _ => return Ok(None),
         };
         Ok(Some(res))
     }
 
-    fn array_index(&mut self, left: Expr) -> Compile<Expr> {
-        let item_ty = left.ty.index_ty(&Ty::int())?.clone();
-        // get pointer to first item from array
-        let ptr = left
-            .add_ref(&mut self.memory, ExprTarget::Stack)?
-            .cast_ty(item_ty.add_ref())?;
-        // add (index * size) to value of pointer
+    fn array_index(&mut self, array: Expr) -> Compile<Expr> {
+        let item_ty = array.ty.index_ty(&Ty::int())?.clone();
+        let array_ptr = self.compiler.array_ptr(array, &item_ty)?;
         let idx = self.expect_expr()?;
-        let offset = OpExpr::simple(
-            &mut self.memory,
-            ExprTarget::Stack,
-            Op::Mul,
-            idx,
-            Expr::constant(Ty::int(), item_ty.size()),
-        )?;
-        let ptr_ty = ptr.ty.clone();
-        let offset_ptr = OpExpr::simple(
-            &mut self.memory,
-            ExprTarget::Stack,
-            Op::Add,
-            ptr.cast_ty(Ty::int())?,
-            offset,
-        )?
-        .cast_ty(ptr_ty)?;
-        // deref pointer
-        offset_ptr.deref(&mut self.memory, ExprTarget::Stack)
+        self.compiler
+            .add_index_to_array_ptr(array_ptr, idx, &item_ty)
     }
 
     fn postfix_expr(&mut self) -> CompileOpt<Expr> {
@@ -230,7 +209,7 @@ impl Parser {
                 Token::SqLeft => {
                     self.lexer.advance();
                     if self.lexer.token(Token::SqRight)?.is_some() {
-                        left = left.deref(&mut self.memory, ExprTarget::Stack)?;
+                        left = self.compiler.deref_expr(left)?
                     } else {
                         left = self.array_index(left)?;
                         self.lexer.expect_token(Token::SqRight)?;
@@ -245,7 +224,7 @@ impl Parser {
                         }
                         Token::TypeIdentifier(field_name) => {
                             self.lexer.advance();
-                            left.bitset_field(&field_name, &mut self.memory, ExprTarget::Stack)?
+                            self.compiler.bitset_field(left, &field_name)?
                         }
                         _ => return Err(Expected("field")),
                     }
@@ -259,20 +238,19 @@ impl Parser {
         let out = match self.lexer.peek()? {
             Token::Minus => {
                 self.lexer.advance();
-                let left = Expr::constant(Ty::int(), 0);
-                let right = self.expect_unary_op_expr()?;
-                OpExpr::simple(&mut self.memory, ExprTarget::Stack, Op::Sub, left, right)?
+                let expr = self.expect_unary_op_expr()?;
+                self.compiler.negate_expr(expr)?
             }
             Token::Ampersand => {
                 self.lexer.advance();
                 let expr = self.expect_unary_op_expr()?;
-                expr.add_ref(&mut self.memory, ExprTarget::Stack)?
+                self.compiler.add_ref_expr(expr)?
             }
             Token::Volatile => {
                 self.lexer.advance();
                 let operand = self.expect_unary_op_expr()?;
-                operand
-                    .resolve(&mut self.memory, ExprTarget::Stack)
+                self.compiler
+                    .resolve_expr(operand, ExprTarget::Stack)
                     .to_expr()
             }
             _ => return self.postfix_expr(),
@@ -295,10 +273,9 @@ impl Parser {
             match self.lexer.op()? {
                 Some(op) => {
                     let right = self.expect_unary_op_expr()?;
-                    op_expr.next(&mut self.memory, op, right)?;
+                    self.compiler.op_next(&mut op_expr, op, right)?;
                 }
-                // None => return Ok(Some(op_parser.unwind(&mut self.memory)?)),
-                None => return op_expr.unwind(&mut self.memory).map(Some),
+                None => return self.compiler.op_unwind(op_expr).map(Some),
             }
         }
     }
@@ -311,10 +288,8 @@ impl Parser {
         if self.lexer.token(Token::ColonEq)?.is_none() {
             return Ok(Some(left));
         }
-        let resolved = self
-            .op_expr()?
-            .ok_or(Expected("expr"))?
-            .resolve(&mut self.memory, left.assign_ctx()?);
+        let expr = self.op_expr()?.ok_or(Expected("expr"))?;
+        let resolved = self.compiler.resolve_expr(expr, left.assign_ctx()?);
         Ok(Some(resolved.to_expr()))
     }
 
@@ -380,16 +355,13 @@ impl Parser {
     }
 
     fn record_ty(&mut self) -> Compile<Ty> {
-        let mut fields = TyRecord::new(self.ty_scope.new_type_id());
-
+        let mut fields = self.compiler.new_record_ty();
         self.record_items(&mut fields, None)?;
-
         Ok(Ty::record(fields))
     }
 
     fn oneof_ty(&mut self) -> Compile<Ty> {
-        let mut data = TyOneOf::new(self.ty_scope.new_type_id());
-
+        let mut data = self.compiler.new_oneof_ty();
         self.lexer.expect_token(Token::CurlyLeft)?;
         let mut i = 0;
         loop {
@@ -418,7 +390,7 @@ impl Parser {
         match self.lexer.peek()? {
             Token::TypeIdentifier(ident) => {
                 self.lexer.advance();
-                self.ty_scope.get(&ident).map(Some)
+                self.compiler.get_ty(&ident).map(Some)
             }
             Token::Record => {
                 self.lexer.advance();
@@ -442,15 +414,14 @@ impl Parser {
         let tb = self.type_binding()?.ok_or(Expected("type binding"))?;
         self.lexer.expect_token(Token::ColonEq)?;
         let te = self.expect_type_expr()?;
-        self.ty_scope.assign(tb, te);
+        self.compiler.assign_ty(tb, te);
         self.lexer.expect_token(Token::Semicolon)?;
         Ok(())
     }
 
     fn if_cond(&mut self) -> Compile<CondIndex> {
-        let cond = self.expect_expr()?;
-        Ty::bool().check(&cond.ty)?;
-        Ok(self.memory.begin_cond(cond, ExprTarget::Stack))
+        let expr = self.expect_expr()?;
+        self.compiler.begin_cond(expr)
     }
 
     // TODO: if as expr
@@ -458,27 +429,33 @@ impl Parser {
         let mut elses = Vec::new();
         let mut if_rec = self.if_cond()?;
         self.lexer.expect_token(Token::Then)?;
-        self.scoped_block()?;
+        self.compiler.push_scope();
+        self.block()?;
+        self.compiler.pop_scope();
         loop {
             if self.lexer.token(Token::Else)?.is_none() {
                 break;
             }
 
             if self.lexer.token(Token::If)?.is_some() {
-                elses.push(self.memory.begin_else(if_rec));
+                elses.push(self.compiler.begin_else(if_rec));
                 if_rec = self.if_cond()?;
                 self.lexer.expect_token(Token::Then)?;
-                self.scoped_block()?;
+                self.compiler.push_scope();
+                self.block()?;
+                self.compiler.pop_scope();
             } else {
-                if_rec = self.memory.begin_else(if_rec);
-                self.scoped_block()?;
+                if_rec = self.compiler.begin_else(if_rec);
+                self.compiler.push_scope();
+                self.block()?;
+                self.compiler.pop_scope();
                 break;
             }
         }
         self.lexer.expect_token(Token::End)?;
-        self.memory.end_if(if_rec);
+        self.compiler.end_if(if_rec);
         for rec in elses {
-            self.memory.end_if(rec);
+            self.compiler.end_if(rec);
         }
         Ok(())
     }
@@ -493,7 +470,7 @@ impl Parser {
                 Some(b) => b,
                 None => break,
             };
-            case.add_binding(binding, &mut self.scope)?;
+            self.compiler.add_case_binding(case, binding)?;
             if self.lexer.token(Token::Comma)?.is_none() {
                 break;
             }
@@ -506,7 +483,8 @@ impl Parser {
     fn match_stmt(&mut self) -> Compile<()> {
         let target = self.expect_expr()?;
         self.lexer.expect_token(Token::Then)?;
-        let mut match_builder = MatchBuilder::new(target, &mut self.memory, ExprTarget::Stack)?;
+        let mut match_builder = self.compiler.begin_match(target)?;
+
         loop {
             if self.lexer.token(Token::Case)?.is_none() {
                 break;
@@ -515,26 +493,27 @@ impl Parser {
                 .lexer
                 .type_ident_token()?
                 .ok_or(Expected("match case"))?;
-            let mut case = match_builder.add_case(&tag, &mut self.memory)?;
-
-            self.scope.push_scope(&self.memory);
+            let mut case = self.compiler.begin_match_case(&mut match_builder, &tag)?;
+            self.compiler.push_scope();
             self.match_bindings(&mut case)?;
             self.block()?;
-            match_builder.end_case(&mut self.memory);
-            self.scope.pop_scope(&mut self.memory);
+            self.compiler.pop_scope();
+            self.compiler.end_match_case(&mut match_builder);
         }
         self.lexer.expect_token(Token::End)?;
-        match_builder.resolve(&mut self.memory);
+        self.compiler.end_match(match_builder);
         Ok(())
     }
 
     fn while_stmt(&mut self) -> Compile<()> {
-        let while_idx = self.memory.begin_while();
+        let while_idx = self.compiler.begin_while();
         let cond = self.if_cond()?;
         self.lexer.expect_token(Token::Loop)?;
-        self.scoped_block()?;
+        self.compiler.push_scope();
+        self.block()?;
+        self.compiler.pop_scope();
         self.lexer.expect_token(Token::End)?;
-        self.memory.end_while(while_idx, cond);
+        self.compiler.end_while(while_idx, cond);
         Ok(())
     }
 
@@ -547,14 +526,14 @@ impl Parser {
             None
         };
         self.lexer.expect_token(Token::ColonEq)?;
-        let expr = self
-            .expect_expr()?
-            .resolve(&mut self.memory, ExprTarget::Stack);
+
+        let expr = self.expect_expr()?;
+        let resolved = self.compiler.resolve_expr(expr, ExprTarget::Stack);
         match bind_ty {
-            Some(b) => b.check(&expr.ty)?,
+            Some(b) => b.check(&resolved.ty)?,
             None => {}
         };
-        self.memory.store_local(binding, expr, &mut self.scope);
+        self.compiler.assign_expr(binding, resolved);
         self.lexer.expect_token(Token::Semicolon)?;
         Ok(())
     }
@@ -582,7 +561,7 @@ impl Parser {
             }
             Token::Debug => {
                 self.lexer.advance();
-                self.memory.debug_stack();
+                self.compiler.debug_stack();
                 self.lexer.expect_token(Token::Semicolon)?;
             }
             Token::Return => {
@@ -591,14 +570,14 @@ impl Parser {
                     todo!("return expr")
                 }
                 self.lexer.expect_token(Token::Semicolon)?;
-                self.memory.return_sub();
+                self.compiler.return_sub();
             }
 
             _ => {
                 match self.expr()? {
                     Some(expr) => {
-                        let res = expr.resolve(&mut self.memory, ExprTarget::Stack);
-                        self.memory.compact(res.block);
+                        let res = self.compiler.resolve_expr(expr, ExprTarget::Stack);
+                        self.compiler.compact(res.block);
                         self.lexer.expect_token(Token::Semicolon)?;
                     }
                     None => return Ok(None),
@@ -606,13 +585,6 @@ impl Parser {
             }
         };
         Ok(Some(()))
-    }
-
-    fn scoped_block(&mut self) -> Compile<()> {
-        self.scope.push_scope(&self.memory);
-        self.block()?;
-        self.scope.pop_scope(&mut self.memory);
-        Ok(())
     }
 
     fn block(&mut self) -> Compile<()> {
@@ -653,9 +625,9 @@ impl Parser {
         let mut builder = SubBuilder::new(name);
         self.sub_params(&mut builder)?;
         self.lexer.expect_token(Token::Do)?;
-        builder.push_sub_scope(&mut self.memory, &mut self.scope);
+        self.compiler.push_sub_scope(builder);
         self.block()?;
-        self.scope.pop_scope(&mut self.memory);
+        self.compiler.pop_scope();
         self.lexer.expect_token(Token::End)?;
         Ok(())
     }

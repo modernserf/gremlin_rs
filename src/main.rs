@@ -1,3 +1,4 @@
+mod compiler;
 mod expr;
 mod lexer;
 mod memory;
@@ -34,39 +35,6 @@ use CompileError::*;
 
 pub type Compile<T> = Result<T, CompileError>;
 pub type CompileOpt<T> = Result<Option<T>, CompileError>;
-
-// TODO: either use block scope or forbid in blocks
-struct TyScope {
-    data: HashMap<String, Ty>,
-    next_type_id: usize,
-}
-
-impl TyScope {
-    fn new() -> Self {
-        Self {
-            data: HashMap::from_iter(
-                vec![("Int", Ty::int()), ("Bool", Ty::bool())]
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v)),
-            ),
-            next_type_id: 1,
-        }
-    }
-    fn get(&self, key: &str) -> Compile<Ty> {
-        self.data
-            .get(key)
-            .cloned()
-            .ok_or_else(|| UnknownTypeIdentifier(key.to_string()))
-    }
-    fn assign(&mut self, key: String, record: Ty) {
-        self.data.insert(key, record);
-    }
-    fn new_type_id(&mut self) -> usize {
-        let id = self.next_type_id;
-        self.next_type_id += 1;
-        id
-    }
-}
 
 fn main() {
     let result = Parser::program("").expect("compile");

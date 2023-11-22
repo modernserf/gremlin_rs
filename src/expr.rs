@@ -44,7 +44,7 @@ impl Expr {
             kind: ExprKind::Constant(value),
         }
     }
-    pub fn lvalue(ty: Ty, block: Block) -> Expr {
+    pub fn lvalue(ty: Ty, block: Block) -> Self {
         Self {
             ty,
             kind: ExprKind::Reference {
@@ -54,7 +54,7 @@ impl Expr {
             },
         }
     }
-    pub fn sub(ty: Ty, sub_index: SubIndex) -> Expr {
+    pub fn sub(ty: Ty, sub_index: SubIndex) -> Self {
         Self {
             ty,
             kind: ExprKind::Sub(sub_index),
@@ -117,7 +117,7 @@ impl Expr {
         }
     }
     //
-    pub fn add_ref(self, memory: &mut Memory, target: ExprTarget) -> Compile<Expr> {
+    pub fn add_ref(self, memory: &mut Memory, target: ExprTarget) -> Compile<Self> {
         match self.kind {
             ExprKind::Reference { next, .. } => {
                 let out = target.write_ref(memory, next);
@@ -126,7 +126,7 @@ impl Expr {
             _ => Err(InvalidRef),
         }
     }
-    pub fn deref(self, memory: &mut Memory, target: ExprTarget) -> Compile<Expr> {
+    pub fn deref(self, memory: &mut Memory, target: ExprTarget) -> Compile<Self> {
         let deref_ty = self.ty.deref()?;
         match self.kind {
             ExprKind::Resolved(block) => {

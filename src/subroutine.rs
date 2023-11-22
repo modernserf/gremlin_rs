@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+use crate::compiler::*;
 use crate::memory::*;
 use crate::runtime::Word;
 use crate::ty::*;
@@ -58,17 +59,17 @@ impl SubBuilder {
     pub fn returns(&mut self, ty: Ty) {
         self.return_type = ty;
     }
-    pub fn push_sub_scope(self, memory: &mut Memory, scope: &mut Scope) {
+    pub fn push_sub_scope(self, compiler: &mut Compiler) {
         let params = self.params.iter().map(|(_, ty)| ty.clone()).collect();
         let ty_sub = TySub::new(params, self.return_type);
         // frame offset is negative for args & return slot
         let mut frame_offset = ty_sub.return_frame_offset();
-        scope.store_sub(self.name, Ty::sub(ty_sub), memory.sub());
-        scope.push_scope(memory);
+        compiler.store_sub(self.name, Ty::sub(ty_sub));
+        compiler.push_scope();
 
         for (key, ty) in self.params {
             let size = ty.size();
-            scope.store_local(key, ty, frame_offset);
+            compiler.sub_param(key, frame_offset, ty);
             frame_offset += size;
         }
 

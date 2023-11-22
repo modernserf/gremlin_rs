@@ -128,9 +128,9 @@ impl MatchBuilder {
 
 #[derive(Debug)]
 pub struct MatchCaseBuilder {
-    record: Rc<TyRecord>,
-    case_id: Word,
-    parent_block: Block,
+    pub record: Rc<TyRecord>,
+    pub case_id: Word,
+    pub parent_block: Block,
 }
 
 impl MatchCaseBuilder {
@@ -140,12 +140,5 @@ impl MatchCaseBuilder {
             case_id,
             parent_block,
         }
-    }
-    // TODO: create a new scope for each match case
-    pub fn add_binding(&self, binding: String, scope: &mut Scope) -> Compile<()> {
-        let field = self.record.get(&binding, Some(self.case_id))?;
-        let block = self.parent_block.record_field(field);
-        scope.add_case_binding(binding, field.ty.clone(), block);
-        Ok(())
     }
 }
