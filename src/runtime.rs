@@ -45,6 +45,7 @@ pub enum IR {
     BranchZero(IRDest, IRSrc),
     Call(Word),
     Return,
+    Panic,
     Halt,
 }
 
@@ -176,6 +177,10 @@ impl Runtime {
 
             IR::DebugStack => {
                 println!("->{:?}", &self.memory[(self.sp as usize)..]);
+            }
+            IR::Panic => {
+                println!("->{:?}", &self.memory[(self.sp as usize)..]);
+                panic!("runtime panic");
             }
             IR::Halt => {}
         }

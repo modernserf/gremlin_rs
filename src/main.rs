@@ -69,8 +69,8 @@ mod test {
 
     fn expect_program(code: &str, ir: Vec<IR>) {
         let result = Parser::program(code).expect("compile");
-        assert_eq!(result.code, ir);
         Runtime::eval_result(result.clone());
+        assert_eq!(result.code, ir);
     }
 
     #[test]
@@ -948,8 +948,9 @@ mod test {
 
             sub main() do
                 let result := add(1, 2);
-                debug;
-                return;
+                if result != 3 then
+                    panic;
+                end
             end
 
         ",
@@ -972,8 +973,12 @@ mod test {
                 // )
                 Call(0),                            // [right, left, ret: 3, addr]
                 Add(Register(Stack), Immediate(2)), // [ret: 3, addr]
-                // debug
-                DebugStack,
+                // result
+                Mov(PreDec(Stack), Offset(Stack, 0)),
+                // if _ != 3
+                NotEqual(Offset(Stack, 0), Immediate(3)),
+                BranchZero(Immediate(1), PostInc(Stack)),
+                Panic,
                 // return
                 Add(Register(Stack), Immediate(1)), // [addr]
                 Return,

@@ -5,6 +5,7 @@ use crate::record::*;
 use crate::runtime::*;
 use crate::subroutine::*;
 use crate::ty::*;
+use crate::CompileError;
 use crate::{Compile, CompileError::*};
 use std::collections::HashMap;
 enum ModuleOrSub {
@@ -145,6 +146,10 @@ impl Compiler {
         self.memory.return_sub();
         Ok(())
     }
+    pub fn return_sub_default(&mut self) -> Compile<()> {
+        self.memory.return_sub();
+        Ok(())
+    }
     pub fn end_sub(&mut self) -> Compile<()> {
         let old_module = std::mem::replace(&mut self.module_or_sub, ModuleOrSub::Module);
         match old_module {
@@ -274,6 +279,9 @@ impl Compiler {
     pub fn end_match(&mut self, builder: MatchBuilder) {
         builder.resolve(&mut self.memory);
     }
+    pub fn panic(&mut self) {
+        self.memory.panic();
+    }
 }
 
 struct ScopeFrame {
@@ -338,12 +346,12 @@ impl SubContext {
         self.did_return = true;
         self.return_expr.ty.check(ty)
     }
-    pub fn resolve(self, compiler: &mut Compiler) -> Compile<()> {
+    pub fn resolve(&self, compiler: &mut Compiler) -> Compile<()> {
         if self.did_return {
             return Ok(());
         };
         if self.return_expr.ty == Ty::void() {
-            compiler.return_sub(None);
+            compiler.return_sub_default()?;
             return Ok(());
         };
         return Err(Expected("return"));

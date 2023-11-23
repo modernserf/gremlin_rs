@@ -230,6 +230,9 @@ impl Memory {
             index: self.output.len() as Word,
         }
     }
+    pub fn panic(&mut self) {
+        self.output.push(IR::Panic);
+    }
 }
 
 #[derive(Debug)]

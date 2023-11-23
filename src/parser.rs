@@ -588,6 +588,11 @@ impl Parser {
                 self.compiler.return_sub(maybe_expr)?;
                 self.lexer.expect_token(Token::Semicolon)?;
             }
+            Token::Panic => {
+                self.lexer.advance();
+                self.compiler.panic();
+                self.lexer.expect_token(Token::Semicolon)?;
+            }
 
             _ => {
                 match self.expr()? {

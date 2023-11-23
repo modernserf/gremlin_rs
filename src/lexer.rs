@@ -22,6 +22,7 @@ pub enum Token {
     Loop,
     Match,
     OneOf,
+    Panic,
     Record,
     Return,
     Sub,
@@ -167,6 +168,7 @@ impl Lexer {
             }
             'm' => self.keyword("match", Token::Match),
             'o' => self.keyword("oneof", Token::OneOf),
+            'p' => self.keyword("panic", Token::Panic),
             'r' => {
                 self.adv_char();
                 match self.peek_char() {
