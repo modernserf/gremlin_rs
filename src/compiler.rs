@@ -33,7 +33,7 @@ impl Compiler {
             module_scope: HashMap::new(),
             ty_scope: TyScope::new(),
             memory: Memory::new(),
-            module_or_sub: ModuleOrSub::Sub(SubContext::new()),
+            module_or_sub: ModuleOrSub::Module,
         }
     }
     pub fn done(self) -> Vec<IR> {
@@ -81,19 +81,46 @@ impl Compiler {
             },
         );
     }
-    pub fn store_sub(&mut self, key: String, ty: Ty) {
+    pub fn script_scope(&mut self) {
+        self.module_or_sub = ModuleOrSub::Sub(SubContext::new(ResolvedExpr::void()))
+    }
+    pub fn begin_sub(&mut self, builder: SubBuilder) {
+        builder.push_sub_scope(self);
+    }
+    pub fn enter_sub(&mut self, key: String, ty: Ty, return_expr: ResolvedExpr) {
         let sub_index = self.memory.sub();
         self.module_scope
             .insert(key, ModuleRecord { ty, sub_index });
+        self.module_or_sub = ModuleOrSub::Sub(SubContext::new(return_expr));
     }
     pub fn sub_param(&mut self, name: String, frame_offset: Word, ty: Ty) {
         self.module_or_sub
             .sub()
             .insert(name, ScopeRecord { frame_offset, ty });
     }
-    pub fn push_sub_scope(&mut self, builder: SubBuilder) {
-        builder.push_sub_scope(self);
+    pub fn return_sub(&mut self, expr: Option<Expr>) -> Compile<()> {
+        let sub = self.module_or_sub.sub();
+        match expr {
+            Some(expr) => {
+                sub.check_return(&expr.ty)?;
+                expr.resolve(&mut self.memory, ExprTarget::Block(sub.return_expr.block));
+            }
+            None => {
+                sub.check_return(&Ty::void())?;
+            }
+        };
+        self.memory.return_sub();
+        Ok(())
     }
+    pub fn end_sub(&mut self) -> Compile<()> {
+        let old_module = std::mem::replace(&mut self.module_or_sub, ModuleOrSub::Module);
+        match old_module {
+            ModuleOrSub::Sub(t) => t.resolve(self)?,
+            _ => unimplemented!(),
+        };
+        Ok(())
+    }
+
     pub fn push_scope(&mut self) {
         self.module_or_sub.sub().push_scope(&self.memory);
     }
@@ -182,9 +209,6 @@ impl Compiler {
     pub fn debug_stack(&mut self) {
         self.memory.debug_stack()
     }
-    pub fn return_sub(&mut self) {
-        self.memory.return_sub()
-    }
     pub fn compact(&mut self, block: Block) {
         self.memory.compact(block)
     }
@@ -247,12 +271,16 @@ struct ModuleRecord {
 
 struct SubContext {
     scope: Vec<ScopeFrame>,
+    return_expr: ResolvedExpr,
+    did_return: bool,
 }
 
 impl SubContext {
-    fn new() -> Self {
+    fn new(return_expr: ResolvedExpr) -> Self {
         Self {
             scope: vec![ScopeFrame::new(ScopeIndex::root())],
+            return_expr,
+            did_return: false,
         }
     }
     fn get_local(&self, key: &str) -> Option<&ScopeRecord> {
@@ -273,6 +301,20 @@ impl SubContext {
     }
     pub fn pop_scope(&mut self) -> ScopeFrame {
         self.scope.pop().expect("scope frame")
+    }
+    pub fn check_return(&mut self, ty: &Ty) -> Compile<()> {
+        self.did_return = true;
+        self.return_expr.ty.check(ty)
+    }
+    pub fn resolve(self, compiler: &mut Compiler) -> Compile<()> {
+        if self.did_return {
+            return Ok(());
+        };
+        if self.return_expr.ty == Ty::void() {
+            compiler.return_sub(None);
+            return Ok(());
+        };
+        return Err(Expected("return"));
     }
 }
 

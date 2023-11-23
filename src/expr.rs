@@ -217,6 +217,12 @@ pub struct ResolvedExpr {
 }
 
 impl ResolvedExpr {
+    pub fn void() -> Self {
+        ResolvedExpr {
+            ty: Ty::void(),
+            block: Block::Local(Slice::with_size(0)),
+        }
+    }
     pub fn to_expr(self) -> Expr {
         Expr::resolved(self.ty, self.block)
     }

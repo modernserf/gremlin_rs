@@ -24,6 +24,7 @@ impl Parser {
     #[allow(dead_code)]
     pub fn script(input: &str) -> Compile<Vec<IR>> {
         let mut parse = Self::new(input);
+        parse.compiler.script_scope();
         parse.block()?;
         parse.lexer.expect_token(Token::EndOfInput)?;
         Ok(parse.compiler.done())
@@ -566,11 +567,9 @@ impl Parser {
             }
             Token::Return => {
                 self.lexer.advance();
-                if let Some(_expr) = self.expr()? {
-                    todo!("return expr")
-                }
+                let maybe_expr = self.expr()?;
+                self.compiler.return_sub(maybe_expr)?;
                 self.lexer.expect_token(Token::Semicolon)?;
-                self.compiler.return_sub();
             }
 
             _ => {
@@ -625,9 +624,9 @@ impl Parser {
         let mut builder = SubBuilder::new(name);
         self.sub_params(&mut builder)?;
         self.lexer.expect_token(Token::Do)?;
-        self.compiler.push_sub_scope(builder);
+        self.compiler.begin_sub(builder);
         self.block()?;
-        self.compiler.pop_scope();
+        self.compiler.end_sub()?;
         self.lexer.expect_token(Token::End)?;
         Ok(())
     }

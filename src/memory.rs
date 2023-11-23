@@ -5,7 +5,7 @@ use crate::ty::*;
 
 #[derive(Debug)]
 pub struct Memory {
-    pub output: Vec<IR>,
+    output: Vec<IR>,
     // TODO: these really belong to scope
     // (or, perhaps, to a parent object that manages both scope & outputz)
     pub locals_offset: Word,

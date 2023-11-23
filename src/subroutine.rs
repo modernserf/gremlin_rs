@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use crate::compiler::*;
+use crate::expr::ResolvedExpr;
 use crate::memory::*;
 use crate::runtime::Word;
 use crate::ty::*;
@@ -61,11 +62,14 @@ impl SubBuilder {
     }
     pub fn push_sub_scope(self, compiler: &mut Compiler) {
         let params = self.params.iter().map(|(_, ty)| ty.clone()).collect();
-        let ty_sub = TySub::new(params, self.return_type);
+        let ty_sub = TySub::new(params, self.return_type.clone());
         // frame offset is negative for args & return slot
         let mut frame_offset = ty_sub.return_frame_offset();
-        compiler.store_sub(self.name, Ty::sub(ty_sub));
-        compiler.push_scope();
+        let return_expr = ResolvedExpr {
+            block: Block::stack(frame_offset, self.return_type.size()),
+            ty: self.return_type,
+        };
+        compiler.enter_sub(self.name, Ty::sub(ty_sub), return_expr);
 
         for (key, ty) in self.params {
             let size = ty.size();
