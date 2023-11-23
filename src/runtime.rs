@@ -1,19 +1,27 @@
 pub type Word = i32;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Register {
+    Stack,
+    Data,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum EA {
+    // #123
     Immediate(Word),
-    // registers
-    R0,
-    SP,
-    // registers with offset
-    StackOffset(Word),
-    R0Offset(Word),
-    // (SP + R0 + offset)
-    Indexed(Word),
-    // stack ops
-    PushStack,
-    PopStack,
+    // D0
+    Register(Register),
+    // $ff00
+    Absolute(Word),
+    // n(SP)
+    Offset(Register, Word),
+    // n(SP, D0)
+    Index(Register, Register, Word),
+    // (SP)+
+    PostInc(Register),
+    // -(SP)
+    PreDec(Register),
 }
 
 type IRDest = EA;
@@ -175,33 +183,56 @@ impl Runtime {
     fn get_src(&mut self, src: EA) -> Word {
         match src {
             EA::Immediate(value) => value,
-            EA::R0 => self.r0,
-            EA::R0Offset(offset) => self.memory[(self.r0 + offset) as usize],
-            EA::StackOffset(offset) => self.memory[(self.sp + offset) as usize],
-            EA::PopStack => {
-                let value = self.memory[self.sp as usize];
-                self.sp += 1;
-                value
+            EA::Register(register) => *self.get_register(register),
+
+            EA::Absolute(addr) => self.memory[addr as usize],
+            EA::Offset(register, offset) => {
+                let addr = *self.get_register(register) + offset;
+                self.memory[addr as usize]
             }
-            EA::Indexed(offset) => self.memory[(self.r0 + self.sp + offset) as usize],
+
+            EA::Index(l, r, offset) => {
+                let addr = *self.get_register(l) + *self.get_register(r) + offset;
+                self.memory[addr as usize]
+            }
+
+            EA::PostInc(register) => {
+                let addr = *self.get_register(register);
+                let result = self.memory[addr as usize];
+                *self.get_register(register) += 1;
+                result
+            }
+            EA::PreDec(register) => {
+                *self.get_register(register) -= 1;
+                let addr = *self.get_register(register);
+                self.memory[addr as usize]
+            }
             _ => unimplemented!(),
         }
     }
-    fn get_effective_address(&self, src: EA) -> Word {
+    fn get_register(&mut self, register: Register) -> &mut Word {
+        match register {
+            Register::Data => &mut self.r0,
+            Register::Stack => &mut self.sp,
+        }
+    }
+    fn get_effective_address(&mut self, src: EA) -> Word {
         match src {
-            EA::StackOffset(offset) => self.sp + offset,
+            EA::Offset(register, offset) => *self.get_register(register) + offset,
             _ => unimplemented!(),
         }
     }
     fn get_dest(&mut self, dest: EA) -> &mut Word {
         match dest {
-            EA::R0 => &mut self.r0,
-            EA::R0Offset(offset) => &mut self.memory[(self.r0 + offset) as usize],
-            EA::SP => &mut self.sp,
-            EA::StackOffset(offset) => &mut self.memory[(self.sp + offset) as usize],
-            EA::PushStack => {
-                self.sp -= 1;
-                &mut self.memory[self.sp as usize]
+            EA::Register(register) => self.get_register(register),
+            EA::Offset(register, offset) => {
+                let addr = *self.get_register(register) + offset;
+                &mut self.memory[addr as usize]
+            }
+            EA::PreDec(register) => {
+                *self.get_register(register) -= 1;
+                let addr = *self.get_register(register);
+                &mut self.memory[addr as usize]
             }
             _ => unimplemented!(),
         }
@@ -209,7 +240,10 @@ impl Runtime {
     fn get_branch_dest(&mut self, dest: EA) -> Word {
         match dest {
             EA::Immediate(value) => value,
-            EA::StackOffset(offset) => self.memory[(self.sp + offset) as usize],
+            EA::Offset(register, offset) => {
+                let addr = *self.get_register(register) + offset;
+                self.memory[addr as usize]
+            }
             _ => unimplemented!(),
         }
     }

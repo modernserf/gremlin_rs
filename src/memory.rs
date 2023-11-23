@@ -41,15 +41,17 @@ impl Memory {
                     self.write_to_block(op, block, src)
                 } else {
                     let ea_src = src.to_ea(self.current_frame_offset, 0);
-                    self.output.push(op(EA::PushStack, ea_src));
+                    self.output.push(op(EA::PreDec(Register::Stack), ea_src));
                     self.current_frame_offset += 1;
                     Block::stack(self.current_frame_offset, 1)
                 }
             }
             Dest::Block(block) => self.write_to_block(op, block, src),
             Dest::R0 => {
-                self.output
-                    .push(op(EA::R0, src.to_ea(self.current_frame_offset, 0)));
+                self.output.push(op(
+                    EA::Register(Register::Data),
+                    src.to_ea(self.current_frame_offset, 0),
+                ));
                 Block::R0
             }
             Dest::RefBlock(ptr_block, size) => {
@@ -79,15 +81,18 @@ impl Memory {
         for i in 0..stack_space.size {
             // copy high to low
             let base_stack_offset = self.current_frame_offset - stack_space.offset - i;
-            let ea_src = EA::StackOffset(base_stack_offset);
-            let ea_dest = EA::StackOffset(base_stack_offset + to_shift);
+            let ea_src = EA::Offset(Register::Stack, base_stack_offset);
+            let ea_dest = EA::Offset(Register::Stack, base_stack_offset + to_shift);
 
             self.output.push(IR::Mov(ea_dest, ea_src));
         }
     }
     fn drop(&mut self, to_remove: Word) {
         if to_remove > 0 {
-            self.output.push(IR::Add(EA::SP, EA::Immediate(to_remove)));
+            self.output.push(IR::Add(
+                EA::Register(Register::Stack),
+                EA::Immediate(to_remove),
+            ));
         }
     }
     pub fn compact(&mut self, block: Block) {
@@ -104,7 +109,8 @@ impl Memory {
     pub fn allocate(&mut self, size: Word) -> Block {
         self.current_frame_offset += size;
         if size > 0 {
-            self.output.push(IR::Sub(EA::SP, EA::Immediate(size)));
+            self.output
+                .push(IR::Sub(EA::Register(Register::Stack), EA::Immediate(size)));
         }
         Block::stack(self.current_frame_offset, size)
     }
@@ -141,7 +147,7 @@ impl Memory {
                     "must be top of stack"
                 );
                 self.current_frame_offset -= 1;
-                EA::PopStack
+                EA::PostInc(Register::Stack)
             }
             block => block.to_ea(self.current_frame_offset, 0),
         };
@@ -331,10 +337,14 @@ impl Block {
     }
     fn to_ea(self, current_frame_offset: Word, index: Word) -> EA {
         match &self {
-            Self::Local(slice) => EA::StackOffset(current_frame_offset - slice.offset + index),
-            Self::Stack(slice) => EA::StackOffset(current_frame_offset - slice.offset + index),
-            Self::R0 => EA::R0,
-            Self::R0Offset(slice) => EA::R0Offset(slice.offset),
+            Self::Local(slice) => {
+                EA::Offset(Register::Stack, current_frame_offset - slice.offset + index)
+            }
+            Self::Stack(slice) => {
+                EA::Offset(Register::Stack, current_frame_offset - slice.offset + index)
+            }
+            Self::R0 => EA::Register(Register::Data),
+            Self::R0Offset(slice) => EA::Offset(Register::Data, slice.offset),
         }
     }
     fn stack_space(self) -> Slice {
@@ -374,8 +384,8 @@ impl Src {
         match &self {
             Self::Immediate(value) => EA::Immediate(*value),
             Self::Block(block) => block.to_ea(current_frame_offset, index),
-            Self::R0Offset(slice) => EA::R0Offset(slice.offset + index),
-            Self::R0 => EA::R0,
+            Self::R0Offset(slice) => EA::Offset(Register::Data, slice.offset + index),
+            Self::R0 => EA::Register(Register::Data),
         }
     }
 }

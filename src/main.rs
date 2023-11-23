@@ -9,8 +9,6 @@ mod runtime;
 mod subroutine;
 mod ty;
 
-use std::collections::HashMap;
-
 use crate::lexer::*;
 use crate::op::*;
 use crate::parser::*;
@@ -44,7 +42,7 @@ fn main() {
 #[cfg(test)]
 mod test {
     use super::*;
-    use super::{EA::*, IR::*};
+    use super::{Register::*, EA::*, IR::*};
 
     fn expect_ir(code: &str, ir: Vec<IR>) {
         assert_eq!(Parser::script(code), Ok(ir));
@@ -82,7 +80,7 @@ mod test {
 
     #[test]
     fn integers() {
-        expect_ir_result("123;", vec![Mov(PushStack, Immediate(123))], 123);
+        expect_ir_result("123;", vec![Mov(PreDec(Stack), Immediate(123))], 123);
     }
 
     #[test]
@@ -92,7 +90,7 @@ mod test {
             123;
 
             ",
-            vec![Mov(PushStack, Immediate(123))],
+            vec![Mov(PreDec(Stack), Immediate(123))],
         )
     }
 
@@ -100,7 +98,7 @@ mod test {
     fn comments() {
         expect_ir(
             "123; # This is a comment",
-            vec![Mov(PushStack, Immediate(123))],
+            vec![Mov(PreDec(Stack), Immediate(123))],
         )
     }
 
@@ -111,8 +109,8 @@ mod test {
 
     #[test]
     fn bools() {
-        expect_ir("true;", vec![Mov(PushStack, Immediate(1))]);
-        expect_ir("false;", vec![Mov(PushStack, Immediate(0))]);
+        expect_ir("true;", vec![Mov(PreDec(Stack), Immediate(1))]);
+        expect_ir("false;", vec![Mov(PreDec(Stack), Immediate(0))]);
     }
 
     #[test]
@@ -124,9 +122,9 @@ mod test {
                 x;
             ",
             vec![
-                Mov(PushStack, Immediate(1)),
-                Mov(PushStack, Immediate(2)),
-                Mov(PushStack, StackOffset(1)),
+                Mov(PreDec(Stack), Immediate(1)),
+                Mov(PreDec(Stack), Immediate(2)),
+                Mov(PreDec(Stack), Offset(Stack, 1)),
             ],
             1,
         );
@@ -138,7 +136,7 @@ mod test {
             "
                 let x : Int := 1;
             ",
-            vec![Mov(PushStack, Immediate(1))],
+            vec![Mov(PreDec(Stack), Immediate(1))],
         );
         expect_err(
             "
@@ -158,10 +156,10 @@ mod test {
             x;
         ",
             vec![
-                Mov(PushStack, Immediate(1)),
-                Mov(PushStack, Immediate(3)),
-                Mov(StackOffset(1), StackOffset(0)),
-                Mov(PushStack, StackOffset(1)),
+                Mov(PreDec(Stack), Immediate(1)),
+                Mov(PreDec(Stack), Immediate(3)),
+                Mov(Offset(Stack, 1), Offset(Stack, 0)),
+                Mov(PreDec(Stack), Offset(Stack, 1)),
             ],
             3,
         );
@@ -176,11 +174,11 @@ mod test {
             x + 3 + y;
         ",
             vec![
-                Mov(PushStack, Immediate(1)),        // [x: 1]
-                Mov(PushStack, Immediate(2)),        // [y: 2, x: 1]
-                Mov(PushStack, StackOffset(1)),      // [1, y: 2, x: 1]
-                Add(StackOffset(0), Immediate(3)),   // [4, y: 2, x: 1]
-                Add(StackOffset(0), StackOffset(1)), // [6, y: 2, x: 1]
+                Mov(PreDec(Stack), Immediate(1)),        // [x: 1]
+                Mov(PreDec(Stack), Immediate(2)),        // [y: 2, x: 1]
+                Mov(PreDec(Stack), Offset(Stack, 1)),    // [1, y: 2, x: 1]
+                Add(Offset(Stack, 0), Immediate(3)),     // [4, y: 2, x: 1]
+                Add(Offset(Stack, 0), Offset(Stack, 1)), // [6, y: 2, x: 1]
             ],
             6,
         );
@@ -197,12 +195,12 @@ mod test {
         expect_ir_result(
             "volatile 3 * (volatile 4 + volatile 5);",
             vec![
-                Mov(PushStack, Immediate(3)),
-                Mov(PushStack, Immediate(4)),
-                Mov(PushStack, Immediate(5)),
-                Add(StackOffset(1), StackOffset(0)),
-                Mult(StackOffset(2), StackOffset(1)),
-                Add(SP, Immediate(2)),
+                Mov(PreDec(Stack), Immediate(3)),
+                Mov(PreDec(Stack), Immediate(4)),
+                Mov(PreDec(Stack), Immediate(5)),
+                Add(Offset(Stack, 1), Offset(Stack, 0)),
+                Mult(Offset(Stack, 2), Offset(Stack, 1)),
+                Add(Register(Stack), Immediate(2)),
             ],
             27,
         );
@@ -210,7 +208,7 @@ mod test {
 
     #[test]
     fn constant_folding() {
-        expect_ir_result("3 * (4 + 5);", vec![Mov(PushStack, Immediate(27))], 27);
+        expect_ir_result("3 * (4 + 5);", vec![Mov(PreDec(Stack), Immediate(27))], 27);
     }
 
     #[test]
@@ -218,28 +216,28 @@ mod test {
         expect_ir_result(
             "volatile 4 + volatile 5 * volatile 3;",
             vec![
-                Mov(PushStack, Immediate(4)),
-                Mov(PushStack, Immediate(5)),
-                Mov(PushStack, Immediate(3)),
-                Mult(StackOffset(1), StackOffset(0)),
-                Add(StackOffset(2), StackOffset(1)),
-                Add(SP, Immediate(2)),
+                Mov(PreDec(Stack), Immediate(4)),
+                Mov(PreDec(Stack), Immediate(5)),
+                Mov(PreDec(Stack), Immediate(3)),
+                Mult(Offset(Stack, 1), Offset(Stack, 0)),
+                Add(Offset(Stack, 2), Offset(Stack, 1)),
+                Add(Register(Stack), Immediate(2)),
             ],
             19,
         );
-        expect_ir_result("4 + 5 * 3;", vec![Mov(PushStack, Immediate(19))], 19);
+        expect_ir_result("4 + 5 * 3;", vec![Mov(PreDec(Stack), Immediate(19))], 19);
     }
 
     #[test]
     fn negation() {
-        expect_ir_result("-3;", vec![Mov(PushStack, Immediate(-3))], -3);
+        expect_ir_result("-3;", vec![Mov(PreDec(Stack), Immediate(-3))], -3);
 
         expect_ir_result(
             "let a := 3; -a;",
             vec![
-                Mov(PushStack, Immediate(3)),
-                Mov(PushStack, Immediate(0)),
-                Sub(StackOffset(0), StackOffset(1)),
+                Mov(PreDec(Stack), Immediate(3)),
+                Mov(PreDec(Stack), Immediate(0)),
+                Sub(Offset(Stack, 0), Offset(Stack, 1)),
             ],
             -3,
         );
@@ -247,11 +245,11 @@ mod test {
         expect_ir_result(
             "-(volatile 3);",
             vec![
-                Mov(PushStack, Immediate(3)),
-                Mov(PushStack, Immediate(0)),
-                Sub(StackOffset(0), StackOffset(1)),
-                Mov(StackOffset(1), StackOffset(0)),
-                Add(SP, Immediate(1)),
+                Mov(PreDec(Stack), Immediate(3)),
+                Mov(PreDec(Stack), Immediate(0)),
+                Sub(Offset(Stack, 0), Offset(Stack, 1)),
+                Mov(Offset(Stack, 1), Offset(Stack, 0)),
+                Add(Register(Stack), Immediate(1)),
             ],
             -3,
         );
@@ -267,14 +265,14 @@ mod test {
         ",
             vec![
                 // // let x := 1;
-                // Mov(PushStack, Immediate(1)),
+                // Mov(PreDec(Stack), Immediate(1)),
                 // // let ptr := &x;
-                // LoadAddress(PushStack, StackOffset(0)),
+                // LoadAddress(PreDec(Stack), Offset(Stack, 0)),
                 // // volatile ptr
-                // Mov(PushStack, StackOffset(0)),
+                // Mov(PreDec(Stack), Offset(Stack, 0)),
                 // // []
-                // Mov(R0, StackOffset(0)),
-                // Mov(StackOffset(0), R0Offset(0)),
+                // Mov(Register(Data), Offset(Stack, 0)),
+                // Mov(Offset(Stack, 0), Offset(Data, 0)),
             ],
             1,
         );
@@ -287,12 +285,12 @@ mod test {
         ",
             vec![
                 // let x := 1;
-                Mov(PushStack, Immediate(1)),
+                Mov(PreDec(Stack), Immediate(1)),
                 // let ptr := &x;
-                LoadAddress(PushStack, StackOffset(0)),
+                LoadAddress(PreDec(Stack), Offset(Stack, 0)),
                 // ptr[]
-                Mov(R0, StackOffset(0)),
-                Mov(PushStack, R0Offset(0)),
+                Mov(Register(Data), Offset(Stack, 0)),
+                Mov(PreDec(Stack), Offset(Data, 0)),
             ],
             1,
         );
@@ -309,14 +307,14 @@ mod test {
         ",
             vec![
                 // let x := 1;
-                Mov(PushStack, Immediate(1)),
+                Mov(PreDec(Stack), Immediate(1)),
                 // let ptr := &x;
-                LoadAddress(PushStack, StackOffset(0)),
+                LoadAddress(PreDec(Stack), Offset(Stack, 0)),
                 // ptr[] := 2;
-                Mov(R0, StackOffset(0)),
-                Mov(R0Offset(0), Immediate(2)),
+                Mov(Register(Data), Offset(Stack, 0)),
+                Mov(Offset(Data, 0), Immediate(2)),
                 // x
-                Mov(PushStack, StackOffset(1)),
+                Mov(PreDec(Stack), Offset(Stack, 1)),
             ],
             2,
         );
@@ -327,8 +325,8 @@ mod test {
         expect_ir_result(
             "(volatile true as Int) +  2;",
             vec![
-                Mov(PushStack, Immediate(1)),
-                Add(StackOffset(0), Immediate(2)),
+                Mov(PreDec(Stack), Immediate(1)),
+                Add(Offset(Stack, 0), Immediate(2)),
             ],
             3,
         );
@@ -341,7 +339,7 @@ mod test {
                 type Word := Int;
                 let a : Word := 3;
             ",
-            vec![Mov(PushStack, Immediate(3))],
+            vec![Mov(PreDec(Stack), Immediate(3))],
         )
     }
 
@@ -355,16 +353,16 @@ mod test {
         ",
             vec![
                 // // let p := Point { x: 1, y: 2 };
-                // Sub(SP, Immediate(2)),
-                // Mov(StackOffset(0), Immediate(123)),
-                // Mov(StackOffset(1), Immediate(456)),
+                // Sub(Register(Stack), Immediate(2)),
+                // Mov(Offset(Stack, 0), Immediate(123)),
+                // Mov(Offset(Stack, 1), Immediate(456)),
                 // // volatile p
-                // Sub(SP, Immediate(2)),
-                // Mov(StackOffset(0), StackOffset(2)),
-                // Mov(StackOffset(1), StackOffset(3)),
+                // Sub(Register(Stack), Immediate(2)),
+                // Mov(Offset(Stack, 0), Offset(Stack, 2)),
+                // Mov(Offset(Stack, 1), Offset(Stack, 3)),
                 // // .x
-                // Mov(StackOffset(1), StackOffset(0)),
-                // Add(SP, Immediate(1)),
+                // Mov(Offset(Stack, 1), Offset(Stack, 0)),
+                // Add(Register(Stack), Immediate(1)),
             ],
             123,
         );
@@ -377,15 +375,15 @@ mod test {
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
-                Sub(SP, Immediate(2)),
-                Mov(StackOffset(0), Immediate(123)),
-                Mov(StackOffset(1), Immediate(456)),
+                Sub(Register(Stack), Immediate(2)),
+                Mov(Offset(Stack, 0), Immediate(123)),
+                Mov(Offset(Stack, 1), Immediate(456)),
                 // volatile p
-                Sub(SP, Immediate(2)),
-                Mov(StackOffset(0), StackOffset(2)),
-                Mov(StackOffset(1), StackOffset(3)),
+                Sub(Register(Stack), Immediate(2)),
+                Mov(Offset(Stack, 0), Offset(Stack, 2)),
+                Mov(Offset(Stack, 1), Offset(Stack, 3)),
                 // .y
-                Add(SP, Immediate(1)),
+                Add(Register(Stack), Immediate(1)),
             ],
             456,
         );
@@ -398,11 +396,11 @@ mod test {
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
-                Sub(SP, Immediate(2)),
-                Mov(StackOffset(0), Immediate(123)),
-                Mov(StackOffset(1), Immediate(456)),
+                Sub(Register(Stack), Immediate(2)),
+                Mov(Offset(Stack, 0), Immediate(123)),
+                Mov(Offset(Stack, 1), Immediate(456)),
                 // p.x
-                Mov(PushStack, StackOffset(0)),
+                Mov(PreDec(Stack), Offset(Stack, 0)),
             ],
             123,
         );
@@ -417,10 +415,10 @@ mod test {
             p.y := 789;
         ",
             vec![
-                Sub(SP, Immediate(2)),
-                Mov(StackOffset(0), Immediate(123)),
-                Mov(StackOffset(1), Immediate(456)),
-                Mov(StackOffset(1), Immediate(789)),
+                Sub(Register(Stack), Immediate(2)),
+                Mov(Offset(Stack, 0), Immediate(123)),
+                Mov(Offset(Stack, 1), Immediate(456)),
+                Mov(Offset(Stack, 1), Immediate(789)),
             ],
         );
     }
@@ -437,21 +435,21 @@ mod test {
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
-                Sub(SP, Immediate(2)),
-                Mov(StackOffset(0), Immediate(1)),
-                Mov(StackOffset(1), Immediate(2)),
+                Sub(Register(Stack), Immediate(2)),
+                Mov(Offset(Stack, 0), Immediate(1)),
+                Mov(Offset(Stack, 1), Immediate(2)),
                 // let ptr := &p.x;
-                LoadAddress(PushStack, StackOffset(0)),
+                LoadAddress(PreDec(Stack), Offset(Stack, 0)),
                 // p.x := 5;
-                Mov(StackOffset(1), Immediate(5)),
+                Mov(Offset(Stack, 1), Immediate(5)),
                 // volatile ptr
-                Mov(PushStack, StackOffset(0)),
+                Mov(PreDec(Stack), Offset(Stack, 0)),
                 // []
-                Mov(R0, StackOffset(0)),
-                Mov(PushStack, R0Offset(0)),
+                Mov(Register(Data), Offset(Stack, 0)),
+                Mov(PreDec(Stack), Offset(Data, 0)),
                 // cleanup
-                Mov(StackOffset(1), StackOffset(0)),
-                Add(SP, Immediate(1)),
+                Mov(Offset(Stack, 1), Offset(Stack, 0)),
+                Add(Register(Stack), Immediate(1)),
             ],
             5,
         );
@@ -466,16 +464,16 @@ mod test {
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
-                Sub(SP, Immediate(2)),
-                Mov(StackOffset(0), Immediate(1)),
-                Mov(StackOffset(1), Immediate(2)),
+                Sub(Register(Stack), Immediate(2)),
+                Mov(Offset(Stack, 0), Immediate(1)),
+                Mov(Offset(Stack, 1), Immediate(2)),
                 // let ptr := &p.x;
-                LoadAddress(PushStack, StackOffset(0)),
+                LoadAddress(PreDec(Stack), Offset(Stack, 0)),
                 // p.x := 5;
-                Mov(StackOffset(1), Immediate(5)),
+                Mov(Offset(Stack, 1), Immediate(5)),
                 // ptr[]
-                Mov(R0, StackOffset(0)),
-                Mov(PushStack, R0Offset(0)),
+                Mov(Register(Data), Offset(Stack, 0)),
+                Mov(PreDec(Stack), Offset(Data, 0)),
             ],
             5,
         );
@@ -492,14 +490,14 @@ mod test {
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
-                Sub(SP, Immediate(2)),
-                Mov(StackOffset(0), Immediate(1)),
-                Mov(StackOffset(1), Immediate(2)),
+                Sub(Register(Stack), Immediate(2)),
+                Mov(Offset(Stack, 0), Immediate(1)),
+                Mov(Offset(Stack, 1), Immediate(2)),
                 // let ptr := &p;
-                LoadAddress(PushStack, StackOffset(0)),
-                Mov(R0, StackOffset(0)),
+                LoadAddress(PreDec(Stack), Offset(Stack, 0)),
+                Mov(Register(Data), Offset(Stack, 0)),
                 // ptr[].y
-                Mov(PushStack, R0Offset(1)),
+                Mov(PreDec(Stack), Offset(Data, 1)),
             ],
             2,
         );
@@ -512,7 +510,7 @@ mod test {
             type TrafficLight := oneof {Red, Yellow, Green};
             TrafficLight.Yellow;
         ",
-            vec![Mov(PushStack, Immediate(1))],
+            vec![Mov(PreDec(Stack), Immediate(1))],
             1,
         )
     }
@@ -526,10 +524,10 @@ mod test {
             flags.Zero;
         ",
             vec![
-                Mov(PushStack, Immediate(0b101)),
-                Mov(PushStack, StackOffset(0)),
-                BitTest(StackOffset(0), Immediate(2)),
-                Mov(StackOffset(0), R0),
+                Mov(PreDec(Stack), Immediate(0b101)),
+                Mov(PreDec(Stack), Offset(Stack, 0)),
+                BitTest(Offset(Stack, 0), Immediate(2)),
+                Mov(Offset(Stack, 0), Register(Data)),
             ],
             1,
         );
@@ -544,21 +542,21 @@ mod test {
             ",
             vec![
                 // let xs := array[Int: 4]{10, 20, 30, 40};
-                Sub(SP, Immediate(4)),
-                Mov(StackOffset(0), Immediate(10)),
-                Mov(StackOffset(1), Immediate(20)),
-                Mov(StackOffset(2), Immediate(30)),
-                Mov(StackOffset(3), Immediate(40)),
+                Sub(Register(Stack), Immediate(4)),
+                Mov(Offset(Stack, 0), Immediate(10)),
+                Mov(Offset(Stack, 1), Immediate(20)),
+                Mov(Offset(Stack, 2), Immediate(30)),
+                Mov(Offset(Stack, 3), Immediate(40)),
                 // &xs + (1 * sizeof Int)
-                LoadAddress(PushStack, StackOffset(0)),
-                Mov(PushStack, Immediate(1)),
-                Mult(StackOffset(0), Immediate(1)),
-                Add(StackOffset(1), StackOffset(0)),
+                LoadAddress(PreDec(Stack), Offset(Stack, 0)),
+                Mov(PreDec(Stack), Immediate(1)),
+                Mult(Offset(Stack, 0), Immediate(1)),
+                Add(Offset(Stack, 1), Offset(Stack, 0)),
                 // deref
-                Mov(R0, StackOffset(1)),
-                Mov(StackOffset(1), R0Offset(0)),
+                Mov(Register(Data), Offset(Stack, 1)),
+                Mov(Offset(Stack, 1), Offset(Data, 0)),
                 // cleanup
-                Add(SP, Immediate(1)),
+                Add(Register(Stack), Immediate(1)),
             ],
             20,
         );
@@ -570,17 +568,17 @@ mod test {
             ",
             vec![
                 // let xs := array[Int: 4]{10, 20, 30, 40};
-                Sub(SP, Immediate(4)),
-                Mov(StackOffset(0), Immediate(10)),
-                Mov(StackOffset(1), Immediate(20)),
-                Mov(StackOffset(2), Immediate(30)),
-                Mov(StackOffset(3), Immediate(40)),
+                Sub(Register(Stack), Immediate(4)),
+                Mov(Offset(Stack, 0), Immediate(10)),
+                Mov(Offset(Stack, 1), Immediate(20)),
+                Mov(Offset(Stack, 2), Immediate(30)),
+                Mov(Offset(Stack, 3), Immediate(40)),
                 // &xs + 1
-                LoadAddress(PushStack, StackOffset(0)),
-                Add(StackOffset(0), Immediate(1)),
+                LoadAddress(PreDec(Stack), Offset(Stack, 0)),
+                Add(Offset(Stack, 0), Immediate(1)),
                 // deref
-                Mov(R0, StackOffset(0)),
-                Mov(StackOffset(0), R0Offset(0)),
+                Mov(Register(Data), Offset(Stack, 0)),
+                Mov(Offset(Stack, 0), Offset(Data, 0)),
             ],
             20,
         );
@@ -628,15 +626,15 @@ mod test {
         ",
             vec![
                 // let i := 1;
-                Mov(PushStack, Immediate(1)),
+                Mov(PreDec(Stack), Immediate(1)),
                 // false
-                Mov(PushStack, Immediate(0)),
+                Mov(PreDec(Stack), Immediate(0)),
                 // if .. then
-                BranchZero(Immediate(1), PopStack),
+                BranchZero(Immediate(1), PostInc(Stack)),
                 // i := 3
-                Mov(StackOffset(0), Immediate(3)),
+                Mov(Offset(Stack, 0), Immediate(3)),
                 // i;
-                Mov(PushStack, StackOffset(0)),
+                Mov(PreDec(Stack), Offset(Stack, 0)),
             ],
             1,
         );
@@ -667,20 +665,20 @@ mod test {
         ",
             vec![
                 // let i := 0
-                Mov(PushStack, Immediate(0)),
+                Mov(PreDec(Stack), Immediate(0)),
                 // true
-                Mov(PushStack, Immediate(1)),
+                Mov(PreDec(Stack), Immediate(1)),
                 // if .. then
-                BranchZero(Immediate(2), PopStack),
+                BranchZero(Immediate(2), PostInc(Stack)),
                 // i := 3
-                Mov(StackOffset(0), Immediate(3)),
+                Mov(Offset(Stack, 0), Immediate(3)),
                 // -> skip else
                 BranchZero(Immediate(1), Immediate(0)),
                 // else:
                 // i := 4;
-                Mov(StackOffset(0), Immediate(4)),
+                Mov(Offset(Stack, 0), Immediate(4)),
                 // i
-                Mov(PushStack, StackOffset(0)),
+                Mov(PreDec(Stack), Offset(Stack, 0)),
             ],
             3,
         );
@@ -715,27 +713,27 @@ mod test {
         ",
             vec![
                 // let i := 0;
-                Mov(PushStack, Immediate(0)),
+                Mov(PreDec(Stack), Immediate(0)),
                 // false
-                Mov(PushStack, Immediate(0)),
+                Mov(PreDec(Stack), Immediate(0)),
                 // if .. then
-                BranchZero(Immediate(2), PopStack),
+                BranchZero(Immediate(2), PostInc(Stack)),
                 // i := 3
-                Mov(StackOffset(0), Immediate(3)),
+                Mov(Offset(Stack, 0), Immediate(3)),
                 // -> end
                 BranchZero(Immediate(5), Immediate(0)),
                 // true
-                Mov(PushStack, Immediate(1)),
+                Mov(PreDec(Stack), Immediate(1)),
                 // if .. then
-                BranchZero(Immediate(2), PopStack),
+                BranchZero(Immediate(2), PostInc(Stack)),
                 // i := 4
-                Mov(StackOffset(0), Immediate(4)),
+                Mov(Offset(Stack, 0), Immediate(4)),
                 //  -> end
                 BranchZero(Immediate(1), Immediate(0)),
                 // i := 5
-                Mov(StackOffset(0), Immediate(5)),
+                Mov(Offset(Stack, 0), Immediate(5)),
                 // end: i
-                Mov(PushStack, StackOffset(0)),
+                Mov(PreDec(Stack), Offset(Stack, 0)),
             ],
             4,
         );
@@ -753,25 +751,25 @@ mod test {
         ",
             vec![
                 // let count := 0;
-                Mov(PushStack, Immediate(0)),
+                Mov(PreDec(Stack), Immediate(0)),
                 // begin: count
-                Mov(PushStack, StackOffset(0)),
+                Mov(PreDec(Stack), Offset(Stack, 0)),
                 // != 10
-                NotEqual(StackOffset(0), Immediate(10)),
+                NotEqual(Offset(Stack, 0), Immediate(10)),
                 // -> end
-                BranchZero(Immediate(5), PopStack),
+                BranchZero(Immediate(5), PostInc(Stack)),
                 // count
-                Mov(PushStack, StackOffset(0)),
+                Mov(PreDec(Stack), Offset(Stack, 0)),
                 // + 1
-                Add(StackOffset(0), Immediate(1)),
+                Add(Offset(Stack, 0), Immediate(1)),
                 // count :=
-                Mov(StackOffset(1), StackOffset(0)),
+                Mov(Offset(Stack, 1), Offset(Stack, 0)),
                 // drop
-                Add(SP, Immediate(1)),
+                Add(Register(Stack), Immediate(1)),
                 // -> begin
                 BranchZero(Immediate(-8), Immediate(0)),
                 // end: count
-                Mov(PushStack, StackOffset(0)),
+                Mov(PreDec(Stack), Offset(Stack, 0)),
             ],
             10,
         );
@@ -802,30 +800,30 @@ mod test {
         ",
             vec![
                 // let result := 0;
-                Mov(PushStack, Immediate(1)),
+                Mov(PreDec(Stack), Immediate(1)),
                 // let opt := Option.Some{value: 3};
-                Sub(SP, Immediate(2)),
-                Mov(StackOffset(0), Immediate(0)),
-                Mov(StackOffset(1), Immediate(3)),
+                Sub(Register(Stack), Immediate(2)),
+                Mov(Offset(Stack, 0), Immediate(0)),
+                Mov(Offset(Stack, 1), Immediate(3)),
                 // opt (todo: don't need to force resolution)
-                Sub(SP, Immediate(2)),
-                Mov(StackOffset(0), StackOffset(2)),
-                Mov(StackOffset(1), StackOffset(3)),
+                Sub(Register(Stack), Immediate(2)),
+                Mov(Offset(Stack, 0), Offset(Stack, 2)),
+                Mov(Offset(Stack, 1), Offset(Stack, 3)),
                 // match .. then
-                BranchZero(StackOffset(0), Immediate(0)),
+                BranchZero(Offset(Stack, 0), Immediate(0)),
                 BranchZero(Immediate(1), Immediate(0)),
                 BranchZero(Immediate(2), Immediate(0)),
                 // Some: result := value
-                Mov(StackOffset(4), StackOffset(1)),
+                Mov(Offset(Stack, 4), Offset(Stack, 1)),
                 BranchZero(Immediate(2), Immediate(0)),
                 // None: result := 10
-                Mov(StackOffset(4), Immediate(10)),
+                Mov(Offset(Stack, 4), Immediate(10)),
                 BranchZero(Immediate(0), Immediate(0)),
                 // end; result
-                Mov(PushStack, StackOffset(4)),
+                Mov(PreDec(Stack), Offset(Stack, 4)),
                 // cleanup
-                Mov(StackOffset(2), StackOffset(0)),
-                Add(SP, Immediate(2)),
+                Mov(Offset(Stack, 2), Offset(Stack, 0)),
+                Add(Register(Stack), Immediate(2)),
             ],
             3,
         );
@@ -853,29 +851,29 @@ mod test {
         ",
             vec![
                 // let result := 0;
-                Mov(PushStack, Immediate(1)),
+                Mov(PreDec(Stack), Immediate(1)),
                 // let opt := Option.None{};
-                Sub(SP, Immediate(2)),
-                Mov(StackOffset(0), Immediate(1)),
+                Sub(Register(Stack), Immediate(2)),
+                Mov(Offset(Stack, 0), Immediate(1)),
                 // opt (todo: don't need to force resolution)
-                Sub(SP, Immediate(2)),
-                Mov(StackOffset(0), StackOffset(2)),
-                Mov(StackOffset(1), StackOffset(3)),
+                Sub(Register(Stack), Immediate(2)),
+                Mov(Offset(Stack, 0), Offset(Stack, 2)),
+                Mov(Offset(Stack, 1), Offset(Stack, 3)),
                 // match .. then
-                BranchZero(StackOffset(0), Immediate(0)),
+                BranchZero(Offset(Stack, 0), Immediate(0)),
                 BranchZero(Immediate(1), Immediate(0)),
                 BranchZero(Immediate(2), Immediate(0)),
                 // Some: result := value
-                Mov(StackOffset(4), StackOffset(1)),
+                Mov(Offset(Stack, 4), Offset(Stack, 1)),
                 BranchZero(Immediate(2), Immediate(0)),
                 // None: result := 10
-                Mov(StackOffset(4), Immediate(10)),
+                Mov(Offset(Stack, 4), Immediate(10)),
                 BranchZero(Immediate(0), Immediate(0)),
                 // end; result
-                Mov(PushStack, StackOffset(4)),
+                Mov(PreDec(Stack), Offset(Stack, 4)),
                 // cleanup
-                Mov(StackOffset(2), StackOffset(0)),
-                Add(SP, Immediate(2)),
+                Mov(Offset(Stack, 2), Offset(Stack, 0)),
+                Add(Register(Stack), Immediate(2)),
             ],
             10,
         );
@@ -894,19 +892,19 @@ mod test {
         ",
             vec![
                 // let x:= 1
-                Mov(PushStack, Immediate(1)),
+                Mov(PreDec(Stack), Immediate(1)),
                 // true
-                Mov(PushStack, Immediate(1)),
+                Mov(PreDec(Stack), Immediate(1)),
                 // if .. then
-                BranchZero(Immediate(3), PopStack),
+                BranchZero(Immediate(3), PostInc(Stack)),
                 // let x := 2; (new x)
-                Mov(PushStack, Immediate(2)),
+                Mov(PreDec(Stack), Immediate(2)),
                 // x := 3;
-                Mov(StackOffset(0), Immediate(3)),
+                Mov(Offset(Stack, 0), Immediate(3)),
                 // drop scope
-                Add(SP, Immediate(1)),
+                Add(Register(Stack), Immediate(1)),
                 // x
-                Mov(PushStack, StackOffset(0)),
+                Mov(PreDec(Stack), Offset(Stack, 0)),
             ],
             1,
         );
@@ -930,11 +928,11 @@ mod test {
         ",
             vec![
                 // let x := Option.Some{value: 3};
-                Sub(SP, Immediate(2)),
-                Mov(StackOffset(0), Immediate(0)),
-                Mov(StackOffset(1), Immediate(3)),
+                Sub(Register(Stack), Immediate(2)),
+                Mov(Offset(Stack, 0), Immediate(0)),
+                Mov(Offset(Stack, 1), Immediate(3)),
                 // drop & return
-                Add(SP, Immediate(2)),
+                Add(Register(Stack), Immediate(2)),
                 Return,
             ],
         );
