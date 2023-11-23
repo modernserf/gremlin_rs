@@ -30,14 +30,16 @@ impl TySub {
     pub fn new(params: Vec<Ty>, ret: Ty) -> Self {
         Self { params, ret }
     }
-    pub fn return_frame_offset(&self) -> Word {
-        -(self.params.iter().map(|p| p.size()).sum::<Word>() + 1)
+    pub fn args_size(&self) -> Word {
+        self.params.iter().map(|p| p.size()).sum::<Word>()
     }
 }
 
 pub struct CallBuilder {
-    sub_index: SubIndex,
-    ty_sub: Rc<TySub>,
+    pub sub_index: SubIndex,
+    pub ty_sub: Rc<TySub>,
+    pub return_block: Block,
+    pub current_arg: usize,
 }
 
 pub struct SubBuilder {
@@ -64,7 +66,7 @@ impl SubBuilder {
         let params = self.params.iter().map(|(_, ty)| ty.clone()).collect();
         let ty_sub = TySub::new(params, self.return_type.clone());
         // frame offset is negative for args & return slot
-        let mut frame_offset = ty_sub.return_frame_offset();
+        let mut frame_offset = -(ty_sub.args_size() + 1);
         let return_expr = ResolvedExpr {
             block: Block::stack(frame_offset, self.return_type.size()),
             ty: self.return_type,
@@ -72,9 +74,8 @@ impl SubBuilder {
         compiler.enter_sub(self.name, Ty::sub(ty_sub), return_expr);
 
         for (key, ty) in self.params {
-            let size = ty.size();
+            frame_offset += ty.size();
             compiler.sub_param(key, frame_offset, ty);
-            frame_offset += size;
         }
 
         debug_assert!(frame_offset == -1);

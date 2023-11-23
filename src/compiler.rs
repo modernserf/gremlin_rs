@@ -81,6 +81,39 @@ impl Compiler {
             },
         );
     }
+    pub fn begin_call(&mut self, callee: Expr) -> Compile<CallBuilder> {
+        let sub_index = callee.sub_index()?;
+        let ty_sub = callee.ty.get_sub()?;
+        let return_block = self.memory.allocate(ty_sub.ret.size());
+        Ok(CallBuilder {
+            sub_index,
+            ty_sub,
+            return_block,
+            current_arg: 0,
+        })
+    }
+    pub fn call_arg(&mut self, builder: &mut CallBuilder, arg: Expr) -> Compile<()> {
+        let params = &builder.ty_sub.params;
+        if builder.current_arg > params.len() {
+            return Err(Expected("fewer params"));
+        }
+        params[builder.current_arg].check(&arg.ty)?;
+        self.resolve_expr(arg, ExprTarget::Stack);
+        builder.current_arg += 1;
+        Ok(())
+    }
+    pub fn end_call(&mut self, builder: CallBuilder) -> Compile<Expr> {
+        if builder.current_arg != builder.ty_sub.params.len() {
+            return Err(Expected("more params"));
+        }
+        self.memory
+            .call_sub(builder.sub_index, builder.ty_sub.args_size());
+        Ok(Expr::resolved(
+            builder.ty_sub.ret.clone(),
+            builder.return_block,
+        ))
+    }
+
     pub fn script_scope(&mut self) {
         self.module_or_sub = ModuleOrSub::Sub(SubContext::new(ResolvedExpr::void()))
     }
@@ -120,7 +153,6 @@ impl Compiler {
         };
         Ok(())
     }
-
     pub fn push_scope(&mut self) {
         self.module_or_sub.sub().push_scope(&self.memory);
     }

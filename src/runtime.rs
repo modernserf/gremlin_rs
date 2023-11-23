@@ -51,7 +51,7 @@ pub enum IR {
 #[derive(Debug, Clone)]
 pub struct CompileResult {
     pub code: Vec<IR>,
-    pub entry_point: usize,
+    pub entry_point: Word,
 }
 
 pub struct Runtime {
@@ -164,7 +164,7 @@ impl Runtime {
             IR::Call(addr) => {
                 // push return address
                 self.sp -= 1;
-                self.memory[self.sp as usize] = self.ip as Word + 1;
+                self.memory[self.sp as usize] = self.ip as Word;
                 self.ip = *addr as usize;
             }
             IR::Return => {

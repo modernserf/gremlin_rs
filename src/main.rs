@@ -69,8 +69,8 @@ mod test {
 
     fn expect_program(code: &str, ir: Vec<IR>) {
         let result = Parser::program(code).expect("compile");
-        Runtime::eval_result(result.clone());
         assert_eq!(result.code, ir);
+        Runtime::eval_result(result.clone());
     }
 
     #[test]
@@ -936,5 +936,48 @@ mod test {
                 Return,
             ],
         );
+    }
+
+    #[test]
+    fn subroutine_calls() {
+        expect_program(
+            "
+            sub add(left: Int, right: Int) -> Int do
+                return left + right;
+            end
+
+            sub main() do
+                let result := add(1, 2);
+                debug;
+                return;
+            end
+
+        ",
+            vec![
+                // add:
+                // left
+                Mov(PreDec(Stack), Offset(Stack, 2)), // [1, addr: 10, right: 2, left: 1, ret: 0 |...]
+                // + right
+                Add(Offset(Stack, 0), Offset(Stack, 2)), // [3, addr, right, left, ret: 0 |...]
+                // return _
+                Mov(Offset(Stack, 4), Offset(Stack, 0)), // [3, addr, right, left, ret: 3 |...]
+                Add(Register(Stack), Immediate(1)),      // [addr, right, left, ret: 3 |...]
+                Return,                                  // [right, left, ret: 3 |...]
+                // let result := add(
+                Sub(Register(Stack), Immediate(1)),
+                // 1,
+                Mov(PreDec(Stack), Immediate(1)),
+                // 2,
+                Mov(PreDec(Stack), Immediate(2)),
+                // )
+                Call(0),                            // [right, left, ret: 3, addr]
+                Add(Register(Stack), Immediate(2)), // [ret: 3, addr]
+                // debug
+                DebugStack,
+                // return
+                Add(Register(Stack), Immediate(1)), // [addr]
+                Return,
+            ],
+        )
     }
 }

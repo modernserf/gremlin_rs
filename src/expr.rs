@@ -1,6 +1,7 @@
 use crate::memory::*;
 use crate::op::Op;
 use crate::runtime::*;
+use crate::subroutine::TySub;
 use crate::ty::*;
 
 use crate::{Compile, CompileError::*};
@@ -87,6 +88,12 @@ impl Expr {
             ty: self.ty.cast(ty)?,
             kind: self.kind,
         })
+    }
+    pub fn sub_index(&self) -> Compile<SubIndex> {
+        match &self.kind {
+            ExprKind::Sub(sub_index) => Ok(*sub_index),
+            _ => Err(Expected("subroutine")),
+        }
     }
     pub fn record_field(self, field_name: &str) -> Compile<Self> {
         let record = self.ty.get_record()?;

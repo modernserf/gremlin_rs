@@ -119,6 +119,11 @@ impl Memory {
         self.write(IR::Mov, Dest::R0, Src::Block(ptr_block));
         self.write(IR::Mov, dest, Src::R0Offset(focus))
     }
+    pub fn call_sub(&mut self, sub_index: SubIndex, args_size: Word) {
+        self.output.push(IR::Call(sub_index.index));
+        self.current_frame_offset -= args_size;
+        self.drop(args_size);
+    }
     pub fn return_sub(&mut self) {
         self.drop(self.current_frame_offset);
         self.current_frame_offset = 0;
@@ -222,7 +227,7 @@ impl Memory {
     }
     pub fn sub(&self) -> SubIndex {
         SubIndex {
-            index: self.output.len(),
+            index: self.output.len() as Word,
         }
     }
 }
@@ -239,7 +244,7 @@ pub struct WhileIndex {
 
 #[derive(Debug, Clone, Copy)]
 pub struct SubIndex {
-    index: usize,
+    index: Word,
 }
 
 #[derive(Debug)]

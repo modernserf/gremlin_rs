@@ -230,6 +230,23 @@ impl Parser {
                         _ => return Err(Expected("field")),
                     }
                 }
+                Token::ParLeft => {
+                    self.lexer.advance();
+                    let mut builder = self.compiler.begin_call(left)?;
+                    loop {
+                        match self.expr()? {
+                            Some(expr) => {
+                                self.compiler.call_arg(&mut builder, expr)?;
+                            }
+                            None => break,
+                        };
+                        if self.lexer.token(Token::Comma)?.is_none() {
+                            break;
+                        }
+                    }
+                    self.lexer.expect_token(Token::ParRight)?;
+                    left = self.compiler.end_call(builder)?;
+                }
                 _ => return Ok(Some(left)),
             };
         }

@@ -104,6 +104,12 @@ impl Ty {
             TyKind::Sub(_) => 1,
         }
     }
+    pub fn get_sub(&self) -> Compile<Rc<TySub>> {
+        match &self.kind {
+            TyKind::Sub(sub) => Ok(sub.clone()),
+            _ => Err(Expected("subroutine")),
+        }
+    }
     pub fn index_ty(&self, index: &Ty) -> Compile<&Ty> {
         match &self.kind {
             TyKind::Array(a) => {
