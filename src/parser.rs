@@ -3,9 +3,7 @@ use crate::expr::*;
 use crate::lexer::*;
 use crate::memory::*;
 use crate::op::*;
-use crate::record::*;
 use crate::runtime::*;
-use crate::subroutine::*;
 use crate::ty::*;
 use crate::{Compile, CompileError::*, CompileOpt};
 

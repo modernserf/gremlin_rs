@@ -1,7 +1,6 @@
 use crate::memory::*;
 use crate::op::Op;
 use crate::runtime::*;
-use crate::subroutine::TySub;
 use crate::ty::*;
 
 use crate::{Compile, CompileError::*};

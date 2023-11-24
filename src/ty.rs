@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::record::*;
 use crate::runtime::*;
-use crate::subroutine::*;
 use crate::{Compile, CompileError::*};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -185,4 +183,99 @@ impl TyOneOf {
 struct TyArray {
     ty: Ty,
     capacity: Word,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TyRecord {
+    id: usize,
+    pub size: Word,
+    pub fields: HashMap<(RecordCase, String), RecordField>,
+    pub cases: HashMap<String, Word>,
+    pub case_field: Option<RecordField>,
+}
+
+pub type RecordCase = Option<Word>;
+
+impl TyRecord {
+    pub fn new(id: usize) -> Self {
+        Self {
+            id,
+            size: 0,
+            fields: HashMap::new(),
+            cases: HashMap::new(),
+            case_field: None,
+        }
+    }
+    pub fn insert_case(&mut self, k: String) -> Compile<Word> {
+        let id = self.cases.len() as Word;
+        // insert a field for the case discriminator itself
+        if self.case_field.is_none() {
+            self.case_field = Some(RecordField {
+                ty: Ty::int(),
+                offset: self.size,
+                case: None,
+            });
+            self.size += 1;
+        }
+
+        if self.cases.insert(k, id).is_some() {
+            return Err(Expected("duplicate struct case"));
+        }
+
+        Ok(id)
+    }
+    // TODO: cases use shared space
+    pub fn insert(&mut self, k: String, ty: Ty, case: RecordCase) -> Compile<()> {
+        let key = (case, k);
+        if self.fields.contains_key(&key) {
+            return Err(DuplicateField);
+        }
+        let size = ty.size();
+        self.fields.insert(
+            key,
+            RecordField {
+                ty,
+                offset: self.size,
+                case: None,
+            },
+        );
+        self.size += size;
+        Ok(())
+    }
+    pub fn get(&self, k: &str, case: RecordCase) -> Compile<&RecordField> {
+        self.fields
+            .get(&(case, k.to_string())) // fixme
+            .or_else(|| self.fields.get(&(None, k.to_string())))
+            .ok_or(MissingField)
+    }
+    pub fn get_case(&self, k: &str) -> Compile<Word> {
+        self.cases.get(k).copied().ok_or(Expected("case"))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordField {
+    pub ty: Ty,
+    pub offset: Word,
+    pub case: Option<Word>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TyOneOfMember {
+    pub index: Word,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TySub {
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+}
+
+impl TySub {
+    pub fn new(params: Vec<Ty>, ret: Ty) -> Self {
+        Self { params, ret }
+    }
+    pub fn args_size(&self) -> Word {
+        self.params.iter().map(|p| p.size()).sum::<Word>()
+    }
 }

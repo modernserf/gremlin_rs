@@ -4,9 +4,7 @@ mod lexer;
 mod memory;
 mod op;
 mod parser;
-mod record;
 mod runtime;
-mod subroutine;
 mod ty;
 
 use crate::lexer::*;

@@ -1,25 +1,12 @@
 use crate::expr::*;
 use crate::memory::*;
 use crate::op::*;
-use crate::record::*;
 use crate::runtime::*;
-use crate::subroutine::*;
 use crate::ty::*;
 use crate::{Compile, CompileError::*};
 use std::collections::HashMap;
-enum ModuleOrSub {
-    Module,
-    Sub(SubContext),
-}
+use std::rc::Rc;
 
-impl ModuleOrSub {
-    fn sub(&mut self) -> &mut SubContext {
-        match self {
-            Self::Module => unimplemented!(),
-            Self::Sub(ctx) => ctx,
-        }
-    }
-}
 pub struct Compiler {
     memory: Memory,
     ty_scope: TyScope,
@@ -47,6 +34,45 @@ impl Compiler {
             .sub_index;
         Ok(self.memory.done_program(entry_point))
     }
+    pub fn script_scope(&mut self) {
+        self.module_or_sub = ModuleOrSub::Sub(SubContext::new(ResolvedExpr::void()))
+    }
+}
+
+// TODO: either use block scope or forbid in blocks
+struct TyScope {
+    data: HashMap<String, Ty>,
+    next_type_id: usize,
+}
+
+impl TyScope {
+    fn new() -> Self {
+        Self {
+            data: HashMap::from_iter(
+                vec![("Int", Ty::int()), ("Bool", Ty::bool())]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v)),
+            ),
+            next_type_id: 1,
+        }
+    }
+    fn get(&self, key: &str) -> Compile<Ty> {
+        self.data
+            .get(key)
+            .cloned()
+            .ok_or_else(|| UnknownTypeIdentifier(key.to_string()))
+    }
+    fn assign(&mut self, key: String, record: Ty) {
+        self.data.insert(key, record);
+    }
+    fn new_type_id(&mut self) -> usize {
+        let id = self.next_type_id;
+        self.next_type_id += 1;
+        id
+    }
+}
+
+impl Compiler {
     pub fn new_record_ty(&mut self) -> TyRecord {
         TyRecord::new(self.ty_scope.new_type_id())
     }
@@ -59,27 +85,30 @@ impl Compiler {
     pub fn assign_ty(&mut self, name: String, ty: Ty) {
         self.ty_scope.assign(name, ty);
     }
-    pub fn get_expr(&mut self, name: &str) -> Compile<Expr> {
-        if let Some(record) = self.module_or_sub.sub().get_local(name) {
-            let block = Block::local(record.frame_offset, record.ty.size());
-            return Ok(Expr::lvalue(record.ty.clone(), block));
-        }
-        if let Some(record) = self.module_scope.get(name) {
-            return Ok(Expr::sub(record.ty.clone(), record.sub_index));
-        }
+}
 
-        Err(UnknownIdentifier(name.to_string()))
-    }
-    pub fn assign_expr(&mut self, name: String, expr: ResolvedExpr) {
-        let frame_offset = self.memory.assign(expr.block);
-        self.module_or_sub.sub().insert(
-            name,
-            ScopeRecord {
-                frame_offset,
-                ty: expr.ty,
-            },
-        );
-    }
+// Calling convention
+// [return value, args..., return addr, locals...] top
+// caller:
+// Sub(SP, sizeof return)
+// Mov(Push, arg) ...
+// JSR sub
+// ...
+// Add(SP, sizeof args)
+// callee:
+// ...
+// Mov(SP+return, result)
+// Add(SP, sizeof locals)
+// RTS
+
+pub struct CallBuilder {
+    sub_index: SubIndex,
+    ty_sub: Rc<TySub>,
+    return_block: Block,
+    current_arg: usize,
+}
+
+impl Compiler {
     pub fn begin_call(&mut self, callee: Expr) -> Compile<CallBuilder> {
         let sub_index = callee.sub_index()?;
         let ty_sub = callee.ty.get_sub()?;
@@ -112,23 +141,55 @@ impl Compiler {
             builder.return_block,
         ))
     }
+}
 
-    pub fn script_scope(&mut self) {
-        self.module_or_sub = ModuleOrSub::Sub(SubContext::new(ResolvedExpr::void()))
+pub struct SubBuilder {
+    name: String,
+    params: Vec<(String, Ty)>,
+    return_type: Ty,
+}
+
+impl SubBuilder {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            params: Vec::new(),
+            return_type: Ty::void(),
+        }
     }
+    pub fn add_param(&mut self, name: String, ty: Ty) {
+        self.params.push((name, ty));
+    }
+    pub fn returns(&mut self, ty: Ty) {
+        self.return_type = ty;
+    }
+}
+
+impl Compiler {
     pub fn begin_sub(&mut self, builder: SubBuilder) {
-        builder.push_sub_scope(self);
-    }
-    pub fn enter_sub(&mut self, key: String, ty: Ty, return_expr: ResolvedExpr) {
+        let params = builder.params.iter().map(|(_, ty)| ty.clone()).collect();
+        let ty_sub = TySub::new(params, builder.return_type.clone());
+        // frame offset is negative for args & return slot
+        let mut frame_offset = -(ty_sub.args_size() + 1);
+        let return_expr = ResolvedExpr {
+            block: Block::stack(frame_offset, builder.return_type.size()),
+            ty: builder.return_type,
+        };
+
+        let ty = Ty::sub(ty_sub);
         let sub_index = self.memory.sub();
         self.module_scope
-            .insert(key, ModuleRecord { ty, sub_index });
-        self.module_or_sub = ModuleOrSub::Sub(SubContext::new(return_expr));
-    }
-    pub fn sub_param(&mut self, name: String, frame_offset: Word, ty: Ty) {
-        self.module_or_sub
-            .sub()
-            .insert(name, ScopeRecord { frame_offset, ty });
+            .insert(builder.name, ModuleRecord { ty, sub_index });
+        let mut context = SubContext::new(return_expr);
+
+        for (key, ty) in builder.params {
+            frame_offset += ty.size();
+            context.insert(key, ScopeRecord { frame_offset, ty });
+        }
+
+        self.module_or_sub = ModuleOrSub::Sub(context);
+
+        debug_assert!(frame_offset == -1);
     }
     pub fn return_sub(&mut self, expr: Option<Expr>) -> Compile<()> {
         let sub = self.module_or_sub.sub();
@@ -156,6 +217,188 @@ impl Compiler {
         };
         Ok(())
     }
+}
+
+#[derive(Debug)]
+pub struct MatchBuilder {
+    case_index: CaseIndex,
+    record: Rc<TyRecord>,
+    end_addrs: Vec<usize>,
+    block: Block,
+}
+
+#[derive(Debug)]
+pub struct MatchCaseBuilder {
+    record: Rc<TyRecord>,
+    case_id: Word,
+    parent_block: Block,
+}
+
+impl Compiler {
+    pub fn begin_match(&mut self, expr: Expr) -> Compile<MatchBuilder> {
+        let res = expr.resolve(&mut self.memory, ExprTarget::Stack);
+        let record = res.ty.get_record()?;
+        let case_field = record.case_field.as_ref().ok_or(Expected("case field"))?;
+        let case_value = res.block.record_field(&case_field);
+        let case_index = self.memory.begin_match(case_value, record.cases.len());
+        Ok(MatchBuilder {
+            record,
+            block: res.block,
+            case_index,
+            end_addrs: Vec::new(),
+        })
+    }
+    pub fn begin_match_case(
+        &mut self,
+        builder: &mut MatchBuilder,
+        tag: &str,
+    ) -> Compile<MatchCaseBuilder> {
+        let case_id = *builder.record.cases.get(tag).ok_or(Expected("case"))?;
+        self.memory
+            .set_jump_target(builder.case_index, case_id as usize);
+
+        Ok(MatchCaseBuilder {
+            record: builder.record.clone(),
+            case_id,
+            parent_block: builder.block,
+        })
+    }
+    pub fn add_case_binding(&mut self, case: &mut MatchCaseBuilder, name: String) -> Compile<()> {
+        let field = case.record.get(&name, Some(case.case_id))?;
+        let block = case.parent_block.record_field(field);
+
+        self.module_or_sub.sub().insert(
+            name,
+            ScopeRecord {
+                frame_offset: block.frame_offset().expect("frame offset"),
+                ty: field.ty.clone(),
+            },
+        );
+        Ok(())
+    }
+    pub fn end_match_case(&mut self, builder: &mut MatchBuilder) {
+        builder.end_addrs.push(self.memory.end_case());
+    }
+    pub fn end_match(&mut self, builder: MatchBuilder) {
+        self.memory.set_jump_end_targets(
+            builder.case_index,
+            builder.record.cases.len(),
+            &builder.end_addrs,
+        );
+    }
+}
+
+enum ModuleOrSub {
+    Module,
+    Sub(SubContext),
+}
+
+impl ModuleOrSub {
+    fn sub(&mut self) -> &mut SubContext {
+        match self {
+            Self::Module => unimplemented!(),
+            Self::Sub(ctx) => ctx,
+        }
+    }
+}
+
+struct ModuleRecord {
+    ty: Ty,
+    sub_index: SubIndex,
+}
+
+struct SubContext {
+    scope: Vec<ScopeFrame>,
+    return_expr: ResolvedExpr,
+    did_return: bool,
+}
+
+impl SubContext {
+    fn new(return_expr: ResolvedExpr) -> Self {
+        Self {
+            scope: vec![ScopeFrame::new(ScopeIndex::root())],
+            return_expr,
+            did_return: false,
+        }
+    }
+    fn get_local(&self, key: &str) -> Option<&ScopeRecord> {
+        for frame in self.scope.iter().rev() {
+            match frame.scope.get(key) {
+                Some(rec) => return Some(rec),
+                None => {}
+            };
+        }
+        None
+    }
+    fn insert(&mut self, key: String, value: ScopeRecord) {
+        let len = self.scope.len();
+        self.scope[len - 1].scope.insert(key, value);
+    }
+    pub fn push_scope(&mut self, memory: &Memory) {
+        self.scope.push(ScopeFrame::new(memory.begin_scope()));
+    }
+    pub fn pop_scope(&mut self) -> ScopeFrame {
+        self.scope.pop().expect("scope frame")
+    }
+    pub fn check_return(&mut self, ty: &Ty) -> Compile<()> {
+        self.did_return = true;
+        self.return_expr.ty.check(ty)
+    }
+    pub fn resolve(&self, compiler: &mut Compiler) -> Compile<()> {
+        if self.did_return {
+            return Ok(());
+        };
+        if self.return_expr.ty == Ty::void() {
+            compiler.return_sub_default()?;
+            return Ok(());
+        };
+        return Err(Expected("return"));
+    }
+}
+
+struct ScopeFrame {
+    scope_index: ScopeIndex,
+    scope: HashMap<String, ScopeRecord>,
+}
+
+impl ScopeFrame {
+    fn new(scope_index: ScopeIndex) -> Self {
+        Self {
+            scope_index,
+            scope: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ScopeRecord {
+    frame_offset: Word,
+    ty: Ty,
+}
+
+impl Compiler {
+    pub fn get_expr(&mut self, name: &str) -> Compile<Expr> {
+        if let Some(record) = self.module_or_sub.sub().get_local(name) {
+            let block = Block::local(record.frame_offset, record.ty.size());
+            return Ok(Expr::lvalue(record.ty.clone(), block));
+        }
+        if let Some(record) = self.module_scope.get(name) {
+            return Ok(Expr::sub(record.ty.clone(), record.sub_index));
+        }
+
+        Err(UnknownIdentifier(name.to_string()))
+    }
+    pub fn assign_expr(&mut self, name: String, expr: ResolvedExpr) {
+        let frame_offset = self.memory.assign(expr.block);
+        self.module_or_sub.sub().insert(
+            name,
+            ScopeRecord {
+                frame_offset,
+                ty: expr.ty,
+            },
+        );
+    }
+
     pub fn push_scope(&mut self) {
         self.module_or_sub.sub().push_scope(&self.memory);
     }
@@ -247,144 +490,8 @@ impl Compiler {
     pub fn compact(&mut self, block: Block) {
         self.memory.compact(block)
     }
-    pub fn begin_match(&mut self, target: Expr) -> Compile<MatchBuilder> {
-        MatchBuilder::new(target, &mut self.memory, ExprTarget::Stack)
-    }
-    pub fn begin_match_case(
-        &mut self,
-        builder: &mut MatchBuilder,
-        tag: &str,
-    ) -> Compile<MatchCaseBuilder> {
-        let case = builder.add_case(&tag, &mut self.memory)?;
-        Ok(case)
-    }
-    pub fn add_case_binding(&mut self, case: &mut MatchCaseBuilder, name: String) -> Compile<()> {
-        let field = case.record.get(&name, Some(case.case_id))?;
-        let block = case.parent_block.record_field(field);
 
-        self.module_or_sub.sub().insert(
-            name,
-            ScopeRecord {
-                frame_offset: block.frame_offset().expect("frame offset"),
-                ty: field.ty.clone(),
-            },
-        );
-        Ok(())
-    }
-    pub fn end_match_case(&mut self, builder: &mut MatchBuilder) {
-        builder.end_case(&mut self.memory);
-    }
-    pub fn end_match(&mut self, builder: MatchBuilder) {
-        builder.resolve(&mut self.memory);
-    }
     pub fn panic(&mut self) {
         self.memory.panic();
-    }
-}
-
-struct ScopeFrame {
-    scope_index: ScopeIndex,
-    scope: HashMap<String, ScopeRecord>,
-}
-
-impl ScopeFrame {
-    fn new(scope_index: ScopeIndex) -> Self {
-        Self {
-            scope_index,
-            scope: HashMap::new(),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct ScopeRecord {
-    frame_offset: Word,
-    ty: Ty,
-}
-
-struct ModuleRecord {
-    ty: Ty,
-    sub_index: SubIndex,
-}
-
-struct SubContext {
-    scope: Vec<ScopeFrame>,
-    return_expr: ResolvedExpr,
-    did_return: bool,
-}
-
-impl SubContext {
-    fn new(return_expr: ResolvedExpr) -> Self {
-        Self {
-            scope: vec![ScopeFrame::new(ScopeIndex::root())],
-            return_expr,
-            did_return: false,
-        }
-    }
-    fn get_local(&self, key: &str) -> Option<&ScopeRecord> {
-        for frame in self.scope.iter().rev() {
-            match frame.scope.get(key) {
-                Some(rec) => return Some(rec),
-                None => {}
-            };
-        }
-        None
-    }
-    fn insert(&mut self, key: String, value: ScopeRecord) {
-        let len = self.scope.len();
-        self.scope[len - 1].scope.insert(key, value);
-    }
-    pub fn push_scope(&mut self, memory: &Memory) {
-        self.scope.push(ScopeFrame::new(memory.begin_scope()));
-    }
-    pub fn pop_scope(&mut self) -> ScopeFrame {
-        self.scope.pop().expect("scope frame")
-    }
-    pub fn check_return(&mut self, ty: &Ty) -> Compile<()> {
-        self.did_return = true;
-        self.return_expr.ty.check(ty)
-    }
-    pub fn resolve(&self, compiler: &mut Compiler) -> Compile<()> {
-        if self.did_return {
-            return Ok(());
-        };
-        if self.return_expr.ty == Ty::void() {
-            compiler.return_sub_default()?;
-            return Ok(());
-        };
-        return Err(Expected("return"));
-    }
-}
-
-// TODO: either use block scope or forbid in blocks
-struct TyScope {
-    data: HashMap<String, Ty>,
-    next_type_id: usize,
-}
-
-impl TyScope {
-    fn new() -> Self {
-        Self {
-            data: HashMap::from_iter(
-                vec![("Int", Ty::int()), ("Bool", Ty::bool())]
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v)),
-            ),
-            next_type_id: 1,
-        }
-    }
-    fn get(&self, key: &str) -> Compile<Ty> {
-        self.data
-            .get(key)
-            .cloned()
-            .ok_or_else(|| UnknownTypeIdentifier(key.to_string()))
-    }
-    fn assign(&mut self, key: String, record: Ty) {
-        self.data.insert(key, record);
-    }
-    fn new_type_id(&mut self) -> usize {
-        let id = self.next_type_id;
-        self.next_type_id += 1;
-        id
     }
 }
