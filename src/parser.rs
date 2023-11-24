@@ -543,13 +543,14 @@ impl Parser {
         };
         self.lexer.expect_token(Token::ColonEq)?;
 
+        let frame_offset = self.compiler.begin_compact();
         let expr = self.expect_expr()?;
         let resolved = self.compiler.resolve_expr(expr, ExprTarget::Stack);
         match bind_ty {
             Some(b) => b.check(&resolved.ty)?,
             None => {}
         };
-        self.compiler.assign_expr(binding, resolved);
+        self.compiler.assign_expr(binding, resolved, frame_offset);
         self.lexer.expect_token(Token::Semicolon)?;
         Ok(())
     }
@@ -593,10 +594,11 @@ impl Parser {
             }
 
             _ => {
+                let state = self.compiler.begin_compact();
                 match self.expr()? {
                     Some(expr) => {
                         let res = self.compiler.resolve_expr(expr, ExprTarget::Stack);
-                        self.compiler.compact(res.block);
+                        self.compiler.end_compact(state, res);
                         self.lexer.expect_token(Token::Semicolon)?;
                     }
                     None => return Ok(None),

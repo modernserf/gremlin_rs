@@ -5,14 +5,12 @@ use crate::ty::*;
 #[derive(Debug)]
 pub struct Memory {
     output: Vec<IR>,
-    locals_offset: Word,
-    current_frame_offset: Word,
+    pub current_frame_offset: Word,
 }
 
 impl Memory {
     pub fn new() -> Self {
         Self {
-            locals_offset: 0,
             current_frame_offset: 0,
             output: Vec::new(),
         }
@@ -224,30 +222,6 @@ impl Memory {
             self.output.push(IR::Mov(ea_dest, ea_src));
         }
     }
-    fn drop(&mut self, to_remove: Word) {
-        if to_remove > 0 {
-            self.output.push(IR::Add(
-                EA::Register(Register::Stack),
-                EA::Immediate(to_remove),
-            ));
-        }
-    }
-    pub fn compact(&mut self, block: Block) {
-        let stack_space = block.stack_space();
-        if stack_space.size == 0 {
-            return;
-        }
-        let to_shift = stack_space.offset - stack_space.size - self.locals_offset;
-        self.shift(block, to_shift);
-        let to_remove = self.current_frame_offset - stack_space.offset + to_shift;
-        self.drop(to_remove);
-        self.current_frame_offset = stack_space.offset;
-    }
-    pub fn assign(&mut self, block: Block) -> Word {
-        self.compact(block);
-        self.locals_offset = self.current_frame_offset;
-        self.locals_offset
-    }
     pub fn allocate(&mut self, size: Word) -> Block {
         self.current_frame_offset += size;
         if size > 0 {
@@ -255,6 +229,29 @@ impl Memory {
                 .push(IR::Sub(EA::Register(Register::Stack), EA::Immediate(size)));
         }
         Block::stack(self.current_frame_offset, size)
+    }
+    fn drop(&mut self, to_remove: Word) {
+        if to_remove > 0 {
+            self.current_frame_offset -= to_remove;
+            self.output.push(IR::Add(
+                EA::Register(Register::Stack),
+                EA::Immediate(to_remove),
+            ));
+        }
+    }
+    pub fn compact(&mut self, block: Block, prev_frame_offset: Word) {
+        let stack_space = block.stack_space();
+        if stack_space.size == 0 {
+            return;
+        }
+        let to_shift = stack_space.offset - stack_space.size - prev_frame_offset;
+        self.shift(block, to_shift);
+        let to_remove = self.current_frame_offset - stack_space.offset + to_shift;
+        self.drop(to_remove);
+    }
+    pub fn assign(&mut self, block: Block, prev_frame_offset: Word) -> Word {
+        self.compact(block, prev_frame_offset);
+        self.current_frame_offset
     }
     pub fn deref(&mut self, ptr_block: Block, dest: Dest, focus: Slice) -> Block {
         assert_eq!(ptr_block.size(), 1);
@@ -332,13 +329,10 @@ impl Memory {
     }
     pub fn call_sub(&mut self, sub_index: SubIndex, args_size: Word) {
         self.output.push(IR::Call(sub_index.index));
-        self.current_frame_offset -= args_size;
         self.drop(args_size);
     }
     pub fn return_sub(&mut self) {
         self.drop(self.current_frame_offset);
-        self.current_frame_offset = 0;
-        self.locals_offset = 0;
         self.output.push(IR::Return);
     }
 }
@@ -346,15 +340,11 @@ impl Memory {
 #[derive(Debug)]
 pub struct ScopeIndex {
     frame_offset: Word,
-    locals_offset: Word,
 }
 
 impl ScopeIndex {
     pub fn root() -> Self {
-        ScopeIndex {
-            frame_offset: 0,
-            locals_offset: 0,
-        }
+        ScopeIndex { frame_offset: 0 }
     }
 }
 
@@ -362,13 +352,10 @@ impl Memory {
     pub fn begin_scope(&self) -> ScopeIndex {
         ScopeIndex {
             frame_offset: self.current_frame_offset,
-            locals_offset: self.locals_offset,
         }
     }
     pub fn end_scope(&mut self, scope_index: ScopeIndex) {
         let to_drop = self.current_frame_offset - scope_index.frame_offset;
-        self.current_frame_offset = scope_index.frame_offset;
-        self.locals_offset = scope_index.locals_offset;
         self.drop(to_drop);
     }
 }

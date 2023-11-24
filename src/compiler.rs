@@ -388,8 +388,8 @@ impl Compiler {
 
         Err(UnknownIdentifier(name.to_string()))
     }
-    pub fn assign_expr(&mut self, name: String, expr: ResolvedExpr) {
-        let frame_offset = self.memory.assign(expr.block);
+    pub fn assign_expr(&mut self, name: String, expr: ResolvedExpr, prev_frame_offset: Word) {
+        let frame_offset = self.memory.assign(expr.block, prev_frame_offset);
         self.module_or_sub.sub().insert(
             name,
             ScopeRecord {
@@ -487,11 +487,19 @@ impl Compiler {
     pub fn debug_stack(&mut self) {
         self.memory.debug_stack()
     }
-    pub fn compact(&mut self, block: Block) {
-        self.memory.compact(block)
-    }
-
+    // pub fn compact(&mut self, block: Block) {
+    //     self.memory.compact(block)
+    // }
     pub fn panic(&mut self) {
         self.memory.panic();
+    }
+}
+
+impl Compiler {
+    pub fn begin_compact(&mut self) -> Word {
+        self.memory.current_frame_offset
+    }
+    pub fn end_compact(&mut self, prev_frame_offset: Word, res: ResolvedExpr) {
+        self.memory.compact(res.block, prev_frame_offset)
     }
 }

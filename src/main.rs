@@ -533,28 +533,29 @@ mod test {
 
     #[test]
     fn array() {
-        expect_result(
+        expect_ir_result(
             "
                 let xs := array[Int: 4]{10, 20, 30, 40};
                 xs[volatile 1];
             ",
             vec![
-                // let xs := array[Int: 4]{10, 20, 30, 40};
+                //
                 Sub(Register(Stack), Immediate(4)),
                 Mov(Offset(Stack, 0), Immediate(10)),
                 Mov(Offset(Stack, 1), Immediate(20)),
                 Mov(Offset(Stack, 2), Immediate(30)),
                 Mov(Offset(Stack, 3), Immediate(40)),
-                // &xs + (1 * sizeof Int)
+                // xs
                 LoadAddress(PreDec(Stack), Offset(Stack, 0)),
+                // [1]
                 Mov(PreDec(Stack), Immediate(1)),
                 Mult(Offset(Stack, 0), Immediate(1)),
                 Add(Offset(Stack, 1), Offset(Stack, 0)),
-                // deref
                 Mov(Register(Data), Offset(Stack, 1)),
-                Mov(Offset(Stack, 1), Offset(Data, 0)),
-                // cleanup
-                Add(Register(Stack), Immediate(1)),
+                Mov(PreDec(Stack), Offset(Data, 0)),
+                // compact
+                Mov(Offset(Stack, 2), Offset(Stack, 0)),
+                Add(Register(Stack), Immediate(2)),
             ],
             20,
         );
@@ -775,7 +776,7 @@ mod test {
 
     #[test]
     fn match_stmt() {
-        expect_ir_result(
+        expect_result(
             "
             type Option := record {
                 case Some {
@@ -819,9 +820,6 @@ mod test {
                 BranchZero(Immediate(0), Immediate(0)),
                 // end; result
                 Mov(PreDec(Stack), Offset(Stack, 4)),
-                // cleanup
-                Mov(Offset(Stack, 2), Offset(Stack, 0)),
-                Add(Register(Stack), Immediate(2)),
             ],
             3,
         );
@@ -869,9 +867,6 @@ mod test {
                 BranchZero(Immediate(0), Immediate(0)),
                 // end; result
                 Mov(PreDec(Stack), Offset(Stack, 4)),
-                // cleanup
-                Mov(Offset(Stack, 2), Offset(Stack, 0)),
-                Add(Register(Stack), Immediate(2)),
             ],
             10,
         );
