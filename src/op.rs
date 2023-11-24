@@ -85,15 +85,12 @@ impl Op {
             Op::Add => memory.write(IR::Add, left.as_dest(), right),
             Op::Sub => memory.write(IR::Sub, left.as_dest(), right),
             Op::Mul => memory.write(IR::Mult, left.as_dest(), right),
-            // fixme: correctly handle consuming lhs
             Op::Equal => {
                 memory.write_cmp(left, right);
-                memory.drop(1);
                 return Expr::cond(IRCond::Zero);
             }
             Op::NotEqual => {
                 memory.write_cmp(left, right);
-                memory.drop(1);
                 return Expr::cond(IRCond::NotZero);
             }
         };

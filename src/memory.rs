@@ -139,6 +139,20 @@ impl Src {
             }
         }
     }
+    // TODO: only pop new stack values, not lvalues
+    // this should probably be handled by expr
+    fn to_pop_ea(&self, current_frame_offset: &mut Word) -> EA {
+        match &self {
+            Self::Block(block) => match block.to_ea(*current_frame_offset, 0) {
+                EA::Offset(Register::SP, 0) => {
+                    *current_frame_offset -= 1;
+                    EA::PostInc(Register::SP)
+                }
+                ea => ea,
+            },
+            Src::Immediate(value) => EA::Immediate(*value),
+        }
+    }
     // TODO: better interface for op.apply()
     pub fn as_dest(self) -> Dest {
         match self {
@@ -409,23 +423,13 @@ impl Memory {
         out
     }
     pub fn cmp_bool(&mut self, block: Block) -> IRCond {
-        let ea = match block {
-            Block::Frame(slice) => {
-                assert!(
-                    slice.offset == self.current_frame_offset,
-                    "must be top of stack"
-                );
-                self.current_frame_offset -= 1;
-                EA::PostInc(Register::SP)
-            }
-            block => block.to_ea(self.current_frame_offset, 0),
-        };
+        let ea = Src::Block(block).to_pop_ea(&mut self.current_frame_offset);
         self.output.push(IR::Cmp(ea, EA::Immediate(1)));
         IRCond::Zero
     }
     pub fn write_cmp(&mut self, left: Src, right: Src) {
-        let left = left.to_ea(self.current_frame_offset, 0);
         let right = right.to_ea(self.current_frame_offset, 0);
+        let left = left.to_pop_ea(&mut self.current_frame_offset);
         self.output.push(IR::Cmp(left, right))
     }
 }

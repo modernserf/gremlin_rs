@@ -166,6 +166,7 @@ impl Expr {
             _ => {}
         };
 
+        // TODO: left doesnt need to be on stack, just needs to be addressable
         let left = left.resolve(memory, ExprTarget::Stack);
         // fixme
         let dest = Src::Block(left.block);

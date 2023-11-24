@@ -753,18 +753,16 @@ mod test {
                 Mov(PreDec(SP), Immediate(20)),
                 // if cmp = 10
                 Mov(PreDec(SP), Offset(SP, 0)),
-                Cmp(Offset(SP, 0), Immediate(10)),
-                Add(Register(SP), Immediate(1)),
+                Cmp(PostInc(SP), Immediate(10)),
                 // then
                 BranchIf(Immediate(2), Zero),
                 // i := 3
                 Mov(Offset(SP, 1), Immediate(3)),
                 // -> end
-                BranchIf(Immediate(7), Always),
+                BranchIf(Immediate(6), Always),
                 // else if cmp = 20
                 Mov(PreDec(SP), Offset(SP, 0)),
-                Cmp(Offset(SP, 0), Immediate(20)),
-                Add(Register(SP), Immediate(1)),
+                Cmp(PostInc(SP), Immediate(20)),
                 // then
                 BranchIf(Immediate(2), Zero),
                 // i := 4
@@ -793,11 +791,9 @@ mod test {
             vec![
                 // let count := 0
                 Mov(PreDec(SP), Immediate(0)),
-                // begin: count
+                // begin: count != 10
                 Mov(PreDec(SP), Offset(SP, 0)),
-                // != 10
-                Cmp(Offset(SP, 0), Immediate(10)),
-                Add(Register(SP), Immediate(1)),
+                Cmp(PostInc(SP), Immediate(10)),
                 // while .. loop
                 BranchIf(Immediate(5), NotZero),
                 // count
@@ -809,7 +805,7 @@ mod test {
                 // end
                 Add(Register(SP), Immediate(1)),
                 // -> begin
-                BranchIf(Immediate(-9), Always),
+                BranchIf(Immediate(-8), Always),
                 // count
                 Mov(PreDec(SP), Offset(SP, 0)),
             ],
@@ -1012,8 +1008,7 @@ mod test {
                 // if result
                 Mov(PreDec(SP), Offset(SP, 0)),
                 // != 3
-                Cmp(Offset(SP, 0), Immediate(3)),
-                Add(Register(SP), Immediate(1)),
+                Cmp(PostInc(SP), Immediate(3)),
                 // then
                 BranchIf(Immediate(1), NotZero),
                 Panic,
