@@ -10,13 +10,13 @@ pub enum Register {
 pub enum EA {
     // #123
     Immediate(Word),
-    // D0
+    // R0
     Register(Register),
     // $ff00
     Absolute(Word),
     // n(SP)
     Offset(Register, Word),
-    // n(SP, D0)
+    // n(SP, R0)
     Index(Register, Register, Word),
     // (SP)+
     PostInc(Register),
@@ -28,6 +28,7 @@ pub enum EA {
 pub enum IRCond {
     Zero,
     NotZero,
+    Always,
 }
 
 type IRDest = EA;
@@ -44,11 +45,18 @@ pub enum IR {
     And(IRDest, IRSrc),
     Or(IRDest, IRSrc),
     Xor(IRDest, IRSrc),
+
+    // set status register
+    BitTest(IRSrc, IRSrc),
+    Cmp(IRSrc, IRSrc),
+    // read status register
+    SetIf(IRDest, IRCond),
+    BranchIf(IRDest, IRCond),
+
+    // TODO: replace with conds
     Equal(IRDest, IRSrc),
     NotEqual(IRDest, IRSrc),
-    BitTest(IRDest, IRSrc),
-    SetIf(IRDest, IRCond),
-    BranchZero(IRDest, IRSrc),
+    ///
     Call(Word),
     Return,
     DebugStack,
@@ -156,6 +164,18 @@ impl Runtime {
                 let dest_ptr = self.get_dest(*dest);
                 *dest_ptr |= value;
             }
+            IR::Cmp(left, right) => {
+                let l = self.get_src(*left);
+                let r = self.get_src(*right);
+                self.status.zero = l != r
+            }
+            IR::BranchIf(disp, cond) => {
+                let displacement = self.get_branch_dest(*disp);
+                if self.get_cond(*cond) {
+                    self.ip = (self.ip as Word + displacement) as usize
+                }
+            }
+
             // TODO: Cmp IR that puts result in status register
             IR::Equal(dest, src) => {
                 let value = self.get_src(*src);
@@ -168,24 +188,15 @@ impl Runtime {
                 *dest_ptr = if value == *dest_ptr { 0 } else { 1 }
             }
 
-            IR::BitTest(dest, src) => {
-                let bit = self.get_src(*src);
-                let dest = *self.get_dest(*dest);
-                self.status.zero = (dest & (1 << bit)) == 0;
+            IR::BitTest(target, bit) => {
+                let bit = self.get_src(*bit);
+                let target = *self.get_dest(*target);
+                self.status.zero = (target & (1 << bit)) == 0;
             }
             IR::SetIf(dest, cond) => {
                 let result = if self.get_cond(*cond) { 1 } else { 0 };
                 let dest_ptr = self.get_dest(*dest);
                 *dest_ptr = result
-            }
-
-            // TODO: replace with BranchIf(dest, cond)
-            IR::BranchZero(dest, src) => {
-                let value = self.get_src(*src);
-                let displacement = self.get_branch_dest(*dest);
-                if value == 0 {
-                    self.ip = (self.ip as Word + displacement) as usize
-                }
             }
             IR::Call(addr) => {
                 // push return address
@@ -279,6 +290,7 @@ impl Runtime {
     }
     fn get_cond(&mut self, cond: IRCond) -> bool {
         match cond {
+            IRCond::Always => true,
             IRCond::Zero => self.status.zero,
             IRCond::NotZero => !self.status.zero,
         }

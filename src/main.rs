@@ -629,7 +629,8 @@ mod test {
                 // false
                 Mov(PreDec(SP), Immediate(0)),
                 // if .. then
-                BranchZero(Immediate(1), PostInc(SP)),
+                Cmp(PostInc(SP), Immediate(1)),
+                BranchIf(Immediate(1), Zero),
                 // i := 3
                 Mov(Offset(SP, 0), Immediate(3)),
                 // i;
@@ -668,11 +669,12 @@ mod test {
                 // true
                 Mov(PreDec(SP), Immediate(1)),
                 // if .. then
-                BranchZero(Immediate(2), PostInc(SP)),
+                Cmp(PostInc(SP), Immediate(1)),
+                BranchIf(Immediate(2), Zero),
                 // i := 3
                 Mov(Offset(SP, 0), Immediate(3)),
                 // -> skip else
-                BranchZero(Immediate(1), Immediate(0)),
+                BranchIf(Immediate(1), Always),
                 // else:
                 // i := 4;
                 Mov(Offset(SP, 0), Immediate(4)),
@@ -716,19 +718,21 @@ mod test {
                 // false
                 Mov(PreDec(SP), Immediate(0)),
                 // if .. then
-                BranchZero(Immediate(2), PostInc(SP)),
+                Cmp(PostInc(SP), Immediate(1)),
+                BranchIf(Immediate(2), Zero),
                 // i := 3
                 Mov(Offset(SP, 0), Immediate(3)),
                 // -> end
-                BranchZero(Immediate(5), Immediate(0)),
+                BranchIf(Immediate(6), Always),
                 // true
                 Mov(PreDec(SP), Immediate(1)),
                 // if .. then
-                BranchZero(Immediate(2), PostInc(SP)),
+                Cmp(PostInc(SP), Immediate(1)),
+                BranchIf(Immediate(2), Zero),
                 // i := 4
                 Mov(Offset(SP, 0), Immediate(4)),
                 //  -> end
-                BranchZero(Immediate(1), Immediate(0)),
+                BranchIf(Immediate(1), Always),
                 // i := 5
                 Mov(Offset(SP, 0), Immediate(5)),
                 // end: i
@@ -756,7 +760,8 @@ mod test {
                 // != 10
                 NotEqual(Offset(SP, 0), Immediate(10)),
                 // -> end
-                BranchZero(Immediate(5), PostInc(SP)),
+                Cmp(PostInc(SP), Immediate(1)),
+                BranchIf(Immediate(5), Zero),
                 // count
                 Mov(PreDec(SP), Offset(SP, 0)),
                 // + 1
@@ -766,7 +771,7 @@ mod test {
                 // drop
                 Add(Register(SP), Immediate(1)),
                 // -> begin
-                BranchZero(Immediate(-8), Immediate(0)),
+                BranchIf(Immediate(-9), Always),
                 // end: count
                 Mov(PreDec(SP), Offset(SP, 0)),
             ],
@@ -809,15 +814,15 @@ mod test {
                 Mov(Offset(SP, 0), Offset(SP, 2)),
                 Mov(Offset(SP, 1), Offset(SP, 3)),
                 // match .. then
-                BranchZero(Offset(SP, 0), Immediate(0)),
-                BranchZero(Immediate(1), Immediate(0)),
-                BranchZero(Immediate(2), Immediate(0)),
+                BranchIf(Offset(SP, 0), Always),
+                BranchIf(Immediate(1), Always),
+                BranchIf(Immediate(2), Always),
                 // Some: result := value
                 Mov(Offset(SP, 4), Offset(SP, 1)),
-                BranchZero(Immediate(2), Immediate(0)),
+                BranchIf(Immediate(2), Always),
                 // None: result := 10
                 Mov(Offset(SP, 4), Immediate(10)),
-                BranchZero(Immediate(0), Immediate(0)),
+                BranchIf(Immediate(0), Always),
                 // end; result
                 Mov(PreDec(SP), Offset(SP, 4)),
             ],
@@ -856,15 +861,15 @@ mod test {
                 Mov(Offset(SP, 0), Offset(SP, 2)),
                 Mov(Offset(SP, 1), Offset(SP, 3)),
                 // match .. then
-                BranchZero(Offset(SP, 0), Immediate(0)),
-                BranchZero(Immediate(1), Immediate(0)),
-                BranchZero(Immediate(2), Immediate(0)),
+                BranchIf(Offset(SP, 0), Always),
+                BranchIf(Immediate(1), Always),
+                BranchIf(Immediate(2), Always),
                 // Some: result := value
                 Mov(Offset(SP, 4), Offset(SP, 1)),
-                BranchZero(Immediate(2), Immediate(0)),
+                BranchIf(Immediate(2), Always),
                 // None: result := 10
                 Mov(Offset(SP, 4), Immediate(10)),
-                BranchZero(Immediate(0), Immediate(0)),
+                BranchIf(Immediate(0), Always),
                 // end; result
                 Mov(PreDec(SP), Offset(SP, 4)),
             ],
@@ -889,7 +894,8 @@ mod test {
                 // true
                 Mov(PreDec(SP), Immediate(1)),
                 // if .. then
-                BranchZero(Immediate(3), PostInc(SP)),
+                Cmp(PostInc(SP), Immediate(1)),
+                BranchIf(Immediate(3), Zero),
                 // let x := 2; (new x)
                 Mov(PreDec(SP), Immediate(2)),
                 // x := 3;
@@ -970,7 +976,8 @@ mod test {
                 Mov(PreDec(SP), Offset(SP, 0)),
                 // if _ != 3
                 NotEqual(Offset(SP, 0), Immediate(3)),
-                BranchZero(Immediate(1), PostInc(SP)),
+                Cmp(PostInc(SP), Immediate(1)),
+                BranchIf(Immediate(1), Zero),
                 Panic,
                 // return
                 Add(Register(SP), Immediate(1)), // [addr]

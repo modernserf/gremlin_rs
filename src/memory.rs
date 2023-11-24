@@ -255,6 +255,7 @@ pub struct WhileIndex {
 
 impl Memory {
     pub fn begin_cond(&mut self, expr: Expr, target: ExprTarget) -> CondIndex {
+        // TODO: expr.cond() that sets status register
         let res = expr.resolve(self, target);
         let ea = match res.block {
             Block::Frame(slice) => {
@@ -267,14 +268,17 @@ impl Memory {
             }
             block => block.to_ea(self.current_frame_offset, 0),
         };
+        self.output.push(IR::Cmp(ea, EA::Immediate(1)));
+        //
         let index = self.output.len();
-        self.output.push(IR::BranchZero(EA::Immediate(-1), ea));
+        self.output
+            .push(IR::BranchIf(EA::Immediate(-1), IRCond::Zero));
         CondIndex { index }
     }
     pub fn begin_else(&mut self, if_rec: CondIndex) -> CondIndex {
         let else_index = self.output.len();
         self.output
-            .push(IR::BranchZero(EA::Immediate(-1), EA::Immediate(0)));
+            .push(IR::BranchIf(EA::Immediate(-1), IRCond::Always));
         self.end_if(if_rec);
         CondIndex { index: else_index }
     }
@@ -282,7 +286,7 @@ impl Memory {
         let original = &self.output[rec.index];
         let displacement = (self.output.len() - rec.index - 1) as Word;
         self.output[rec.index] = match original {
-            IR::BranchZero(_, ea) => IR::BranchZero(EA::Immediate(displacement), *ea),
+            IR::BranchIf(_, cond) => IR::BranchIf(EA::Immediate(displacement), *cond),
             _ => unreachable!(),
         };
     }
@@ -294,7 +298,7 @@ impl Memory {
     pub fn end_while(&mut self, while_rec: WhileIndex, cond: CondIndex) {
         let jump_back = (self.output.len() - while_rec.index + 1) as Word;
         self.output
-            .push(IR::BranchZero(EA::Immediate(-jump_back), EA::Immediate(0)));
+            .push(IR::BranchIf(EA::Immediate(-jump_back), IRCond::Always));
         self.end_if(cond);
     }
 }
@@ -350,42 +354,42 @@ pub struct CaseIndex {
 
 impl Memory {
     pub fn begin_match(&mut self, block: Block, size: usize) -> CaseIndex {
-        self.output.push(IR::BranchZero(
+        self.output.push(IR::BranchIf(
             block.to_ea(self.current_frame_offset, 0),
-            EA::Immediate(0),
+            IRCond::Always,
         ));
         let index = self.output.len();
         for _ in 0..size {
             self.output
-                .push(IR::BranchZero(EA::Immediate(-1), EA::Immediate(0)));
+                .push(IR::BranchIf(EA::Immediate(-1), IRCond::Always));
         }
         CaseIndex { index }
     }
     pub fn set_jump_target(&mut self, rec: CaseIndex, offset: usize) {
         let displacement = (self.output.len() - rec.index - 1 - offset) as Word;
-        self.output[rec.index + offset] =
-            IR::BranchZero(EA::Immediate(displacement), EA::Immediate(0));
+        self.output[rec.index + offset] = IR::BranchIf(EA::Immediate(displacement), IRCond::Always);
     }
     pub fn end_case(&mut self) -> usize {
         let index = self.output.len();
         self.output
-            .push(IR::BranchZero(EA::Immediate(-1), EA::Immediate(0)));
+            .push(IR::BranchIf(EA::Immediate(-1), IRCond::Always));
         index
     }
     pub fn set_jump_end_targets(&mut self, rec: CaseIndex, len: usize, case_ends: &[usize]) {
         let displacement = (self.output.len() - rec.index - 1) as Word;
         for i in 0..len {
             match &self.output[rec.index + i] {
-                IR::BranchZero(EA::Immediate(-1), _) => {}
-                IR::BranchZero(_, _) => continue,
+                IR::BranchIf(EA::Immediate(-1), IRCond::Always) => {
+                    self.output[rec.index + i] =
+                        IR::BranchIf(EA::Immediate(displacement), IRCond::Always);
+                }
+                IR::BranchIf(_, _) => continue,
                 _ => panic!("expected jump table instruction"),
             }
-            self.output[rec.index + i] =
-                IR::BranchZero(EA::Immediate(displacement), EA::Immediate(0));
         }
         for index in case_ends {
             let displacement = (self.output.len() - index - 1) as Word;
-            self.output[*index] = IR::BranchZero(EA::Immediate(displacement), EA::Immediate(0));
+            self.output[*index] = IR::BranchIf(EA::Immediate(displacement), IRCond::Always);
         }
     }
 }
