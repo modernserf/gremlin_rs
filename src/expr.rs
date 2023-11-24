@@ -183,7 +183,11 @@ impl Expr {
         let dest = Dest::Block(self.resolve(memory, target).block);
         let out = memory.write(IR::BitTest, dest, Src::Immediate(field.index));
         let ty = Ty::bool();
-        memory.write(IR::Mov, Dest::Block(out), Src::R0);
+        memory.write(
+            IR::Mov,
+            Dest::Block(out),
+            Src::Block(Block::Register(Register::Data)),
+        );
         Ok(Expr::resolved(ty, out))
     }
     pub fn resolve(self, memory: &mut Memory, target: ExprTarget) -> ResolvedExpr {
@@ -226,7 +230,7 @@ impl ResolvedExpr {
     pub fn void() -> Self {
         ResolvedExpr {
             ty: Ty::void(),
-            block: Block::Stack(Slice::with_size(0)),
+            block: Block::Frame(Slice::with_size(0)),
         }
     }
     pub fn to_expr(self) -> Expr {
@@ -242,25 +246,40 @@ pub enum ExprTarget {
 }
 
 impl ExprTarget {
-    fn to_dest(self, size: Word) -> Dest {
+    fn write_op(self, memory: &mut Memory, op: IROp, src: Src, size: Word) -> Block {
         match self {
-            Self::Stack => Dest::Stack(size),
-            Self::Block(block) => Dest::Block(block),
-            Self::RefBlock(block) => Dest::RefBlock(block, size),
+            Self::Stack => memory.write(op, Dest::Stack(size), src),
+            Self::Block(block) => memory.write(op, Dest::Block(block), src),
+            Self::RefBlock(ptr_block) => {
+                let dest = memory.deref_to_dest(ptr_block, size);
+                memory.write(op, dest, src)
+            }
         }
     }
     fn write_const(self, memory: &mut Memory, value: Word) -> Block {
-        memory.write(IR::Mov, self.to_dest(1), Src::Immediate(value))
+        self.write_op(memory, IR::Mov, Src::Immediate(value), 1)
     }
     fn write_block(self, memory: &mut Memory, block: Block) -> Block {
-        memory.write(IR::Mov, self.to_dest(block.size()), Src::Block(block))
+        self.write_op(memory, IR::Mov, Src::Block(block), block.size())
     }
     fn write_ref(self, memory: &mut Memory, block: Block) -> Block {
-        memory.write(IR::LoadAddress, self.to_dest(1), Src::Block(block))
+        let src = Src::Block(block);
+        self.write_op(memory, IR::LoadAddress, src, 1)
     }
-    fn write_deref(self, memory: &mut Memory, block: Block, deref_ty: &Ty, focus: Slice) -> Block {
+    fn write_deref(
+        self,
+        memory: &mut Memory,
+        ptr_block: Block,
+        deref_ty: &Ty,
+        focus: Slice,
+    ) -> Block {
+        match &self {
+            Self::RefBlock(_) => todo!("both src & dest want to use pointer"),
+            _ => {}
+        };
         let size = deref_ty.size();
-        memory.deref(block, self.to_dest(size), focus)
+        let src = memory.deref_to_src(ptr_block, focus);
+        self.write_op(memory, IR::Mov, src, size)
     }
     fn maybe_move_block(self, memory: &mut Memory, block: Block) -> Block {
         match self {

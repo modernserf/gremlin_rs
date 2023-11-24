@@ -34,8 +34,8 @@ impl Memory {
 
 #[derive(Debug, Copy, Clone)]
 pub struct Slice {
-    offset: Word,
-    size: Word,
+    pub offset: Word,
+    pub size: Word,
 }
 
 impl Slice {
@@ -60,43 +60,44 @@ impl Slice {
 // a location in memory
 #[derive(Debug, Copy, Clone)]
 pub enum Block {
-    Stack(Slice),
-    R0,
-    R0Offset(Slice),
+    // relative to (imaginary) frame pointer, converted to stack-relative
+    Frame(Slice),
+    Register(Register),
+    Offset(Register, Slice),
 }
 
 impl Block {
-    pub fn stack(offset: Word, size: Word) -> Self {
-        Self::Stack(Slice { offset, size })
-    }
-    pub fn r0_offset(offset: Word, size: Word) -> Self {
-        Self::R0Offset(Slice { offset, size })
+    pub fn frame(offset: Word, size: Word) -> Self {
+        Self::Frame(Slice { offset, size })
     }
     pub fn size(&self) -> Word {
         match &self {
-            Self::Stack(slice) => slice.size,
-            Self::R0 => 1,
-            Self::R0Offset(slice) => slice.size,
+            Self::Frame(slice) => slice.size,
+            Self::Register(_) => 1,
+            Self::Offset(_, slice) => slice.size,
         }
     }
-    pub fn frame_offset(self) -> Option<Word> {
+    pub fn frame_slice(self) -> Option<Slice> {
         match self {
-            Self::Stack(slice) => Some(slice.offset),
+            Self::Frame(slice) => Some(slice),
             _ => None,
         }
     }
     fn to_ea(self, current_frame_offset: Word, index: Word) -> EA {
         match &self {
-            Self::Stack(slice) => {
+            Self::Frame(slice) => {
                 EA::Offset(Register::Stack, current_frame_offset - slice.offset + index)
             }
-            Self::R0 => EA::Register(Register::Data),
-            Self::R0Offset(slice) => EA::Offset(Register::Data, slice.offset),
+            Self::Register(register) => {
+                assert_eq!(index, 0);
+                EA::Register(*register)
+            }
+            Self::Offset(register, slice) => EA::Offset(*register, slice.offset + index),
         }
     }
     pub fn focus(&self, focus: Slice) -> Block {
         match &self {
-            Self::Stack(slice) => Self::Stack(slice.focus(focus)),
+            Self::Frame(slice) => Self::Frame(slice.focus(focus)),
             _ => unimplemented!(),
         }
     }
@@ -115,26 +116,23 @@ impl Block {
 pub enum Src {
     Block(Block),
     Immediate(Word),
-    R0,
-    R0Offset(Slice),
 }
 
 impl Src {
     fn to_ea(&self, current_frame_offset: Word, index: Word) -> EA {
         match &self {
-            Self::Immediate(value) => EA::Immediate(*value),
             Self::Block(block) => block.to_ea(current_frame_offset, index),
-            Self::R0Offset(slice) => EA::Offset(Register::Data, slice.offset + index),
-            Self::R0 => EA::Register(Register::Data),
+            Self::Immediate(value) => {
+                assert_eq!(index, 0);
+                EA::Immediate(*value)
+            }
         }
     }
 }
 
 pub enum Dest {
     Block(Block),
-    RefBlock(Block, Word),
     Stack(Word),
-    R0,
 }
 
 impl Memory {
@@ -149,21 +147,10 @@ impl Memory {
                     let ea_src = src.to_ea(self.current_frame_offset, 0);
                     self.output.push(op(EA::PreDec(Register::Stack), ea_src));
                     self.current_frame_offset += 1;
-                    Block::stack(self.current_frame_offset, 1)
+                    Block::frame(self.current_frame_offset, 1)
                 }
             }
             Dest::Block(block) => self.write_to_block(op, block, src),
-            Dest::R0 => {
-                self.output.push(op(
-                    EA::Register(Register::Data),
-                    src.to_ea(self.current_frame_offset, 0),
-                ));
-                Block::R0
-            }
-            Dest::RefBlock(ptr_block, size) => {
-                self.write(IR::Mov, Dest::R0, Src::Block(ptr_block));
-                self.write_to_block(op, Block::r0_offset(0, size), src)
-            }
         }
     }
     fn write_to_block(&mut self, op: IROp, dest: Block, src: Src) -> Block {
@@ -199,7 +186,7 @@ impl Memory {
             self.output
                 .push(IR::Sub(EA::Register(Register::Stack), EA::Immediate(size)));
         }
-        Block::stack(self.current_frame_offset, size)
+        Block::frame(self.current_frame_offset, size)
     }
     fn drop(&mut self, to_remove: Word) {
         if to_remove > 0 {
@@ -211,10 +198,7 @@ impl Memory {
         }
     }
     pub fn compact(&mut self, block: Block, prev_frame_offset: Word) {
-        let stack_slice = match block {
-            Block::Stack(slice) => slice,
-            _ => Slice { offset: 0, size: 0 },
-        };
+        let stack_slice = block.frame_slice().unwrap_or(Slice::with_size(0));
         if stack_slice.size == 0 || stack_slice.offset <= prev_frame_offset {
             return;
         }
@@ -227,10 +211,22 @@ impl Memory {
         self.compact(block, prev_frame_offset);
         self.current_frame_offset
     }
-    pub fn deref(&mut self, ptr_block: Block, dest: Dest, focus: Slice) -> Block {
+    // TODO: handle register contention (e.g. writing from one pointer to another)
+    // a first approximation could be to just make another register
+    pub fn deref_to_dest(&mut self, ptr_block: Block, size: Word) -> Dest {
+        self.load_ptr(ptr_block);
+        Dest::Block(Block::Offset(Register::Data, Slice::with_size(size)))
+    }
+    pub fn deref_to_src(&mut self, ptr_block: Block, focus: Slice) -> Src {
+        self.load_ptr(ptr_block);
+        Src::Block(Block::Offset(Register::Data, focus))
+    }
+    fn load_ptr(&mut self, ptr_block: Block) {
         assert_eq!(ptr_block.size(), 1);
-        self.write(IR::Mov, Dest::R0, Src::Block(ptr_block));
-        self.write(IR::Mov, dest, Src::R0Offset(focus))
+        self.output.push(IR::Mov(
+            EA::Register(Register::Data),
+            ptr_block.to_ea(self.current_frame_offset, 0),
+        ));
     }
 }
 
@@ -248,7 +244,7 @@ impl Memory {
     pub fn begin_cond(&mut self, expr: Expr, target: ExprTarget) -> CondIndex {
         let res = expr.resolve(self, target);
         let ea = match res.block {
-            Block::Stack(slice) => {
+            Block::Frame(slice) => {
                 assert!(
                     slice.offset == self.current_frame_offset,
                     "must be top of stack"

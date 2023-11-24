@@ -2,7 +2,6 @@ use crate::compiler::*;
 use crate::expr::*;
 use crate::lexer::*;
 use crate::memory::*;
-use crate::op::*;
 use crate::runtime::*;
 use crate::ty::*;
 use crate::{Compile, CompileError::*, CompileOpt};
