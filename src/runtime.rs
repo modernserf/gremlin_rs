@@ -54,10 +54,6 @@ pub enum IR {
     SetIf(IRDest, IRCond),
     BranchIf(IRDest, IRCond),
 
-    // TODO: replace with conds
-    Equal(IRDest, IRSrc),
-    NotEqual(IRDest, IRSrc),
-    ///
     Call(Word),
     Return,
     DebugStack,
@@ -176,19 +172,6 @@ impl Runtime {
                     self.ip = (self.ip as Word + displacement) as usize
                 }
             }
-
-            // TODO: Cmp IR that puts result in status register
-            IR::Equal(dest, src) => {
-                let value = self.get_src(*src);
-                let dest_ptr = self.get_dest(*dest);
-                *dest_ptr = if value == *dest_ptr { 1 } else { 0 }
-            }
-            IR::NotEqual(dest, src) => {
-                let value = self.get_src(*src);
-                let dest_ptr = self.get_dest(*dest);
-                *dest_ptr = if value == *dest_ptr { 0 } else { 1 }
-            }
-
             IR::BitTest(target, bit) => {
                 let bit = self.get_src(*bit);
                 let target = *self.get_dest(*target);
@@ -249,7 +232,6 @@ impl Runtime {
                 let addr = *self.get_register(register);
                 self.memory[addr as usize]
             }
-            _ => unimplemented!(),
         }
     }
     fn get_register(&mut self, register: Register) -> &mut Word {

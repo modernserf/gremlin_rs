@@ -139,6 +139,13 @@ impl Src {
             }
         }
     }
+    // TODO: better interface for op.apply()
+    pub fn as_dest(self) -> Dest {
+        match self {
+            Self::Block(block) => Dest::Block(block),
+            _ => unimplemented!(),
+        }
+    }
 }
 
 pub enum Dest {
@@ -199,7 +206,7 @@ impl Memory {
         }
         Block::frame(self.current_frame_offset, size)
     }
-    fn drop(&mut self, to_remove: Word) {
+    pub fn drop(&mut self, to_remove: Word) {
         if to_remove > 0 {
             self.current_frame_offset -= to_remove;
             self.output.push(IR::Add(
@@ -254,22 +261,6 @@ pub struct WhileIndex {
 }
 
 impl Memory {
-    pub fn cmp_bool(&mut self, block: Block) -> IRCond {
-        let ea = match block {
-            Block::Frame(slice) => {
-                assert!(
-                    slice.offset == self.current_frame_offset,
-                    "must be top of stack"
-                );
-                self.current_frame_offset -= 1;
-                EA::PostInc(Register::SP)
-            }
-            block => block.to_ea(self.current_frame_offset, 0),
-        };
-        self.output.push(IR::Cmp(ea, EA::Immediate(1)));
-        IRCond::Zero
-    }
-
     pub fn begin_cond(&mut self, expr: Expr) -> CondIndex {
         // TODO: expr.cond() that sets status register
         let cond = expr.resolve_branch_cond(self);
@@ -405,12 +396,36 @@ impl Memory {
             src.to_ea(self.current_frame_offset, 0),
         ))
     }
-    pub fn set_if(&mut self, dest: Dest, cond: IRCond) {
-        let ea = match dest {
-            Dest::Stack(_) => EA::PreDec(Register::SP),
-            Dest::Block(block) => block.to_ea(self.current_frame_offset, 0),
+    pub fn set_if(&mut self, dest: Dest, cond: IRCond) -> Block {
+        let (ea, out) = match dest {
+            Dest::Stack(_) => (
+                EA::PreDec(Register::SP),
+                Block::frame(self.current_frame_offset + 1, 1),
+            ),
+            Dest::Block(block) => (block.to_ea(self.current_frame_offset, 0), block),
         };
 
-        self.output.push(IR::SetIf(ea, cond))
+        self.output.push(IR::SetIf(ea, cond));
+        out
+    }
+    pub fn cmp_bool(&mut self, block: Block) -> IRCond {
+        let ea = match block {
+            Block::Frame(slice) => {
+                assert!(
+                    slice.offset == self.current_frame_offset,
+                    "must be top of stack"
+                );
+                self.current_frame_offset -= 1;
+                EA::PostInc(Register::SP)
+            }
+            block => block.to_ea(self.current_frame_offset, 0),
+        };
+        self.output.push(IR::Cmp(ea, EA::Immediate(1)));
+        IRCond::Zero
+    }
+    pub fn write_cmp(&mut self, left: Src, right: Src) {
+        let left = left.to_ea(self.current_frame_offset, 0);
+        let right = right.to_ea(self.current_frame_offset, 0);
+        self.output.push(IR::Cmp(left, right))
     }
 }

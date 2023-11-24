@@ -1,4 +1,6 @@
-use crate::runtime::{IROp, Word, IR};
+use crate::expr::*;
+use crate::memory::*;
+use crate::runtime::*;
 use crate::ty::*;
 use crate::Compile;
 
@@ -77,14 +79,24 @@ impl Op {
             }
         }
     }
-    // TODO: operators that aren't single instructions as `dest = dest • src`
-    pub fn ir(&self) -> IROp {
-        match self {
-            Op::Add => IR::Add,
-            Op::Sub => IR::Sub,
-            Op::Mul => IR::Mult,
-            Op::Equal => IR::Equal,
-            Op::NotEqual => IR::NotEqual,
-        }
+
+    pub fn apply(&self, memory: &mut Memory, ty: Ty, left: Src, right: Src) -> Expr {
+        let block = match self {
+            Op::Add => memory.write(IR::Add, left.as_dest(), right),
+            Op::Sub => memory.write(IR::Sub, left.as_dest(), right),
+            Op::Mul => memory.write(IR::Mult, left.as_dest(), right),
+            // fixme: correctly handle consuming lhs
+            Op::Equal => {
+                memory.write_cmp(left, right);
+                memory.drop(1);
+                return Expr::cond(IRCond::Zero);
+            }
+            Op::NotEqual => {
+                memory.write_cmp(left, right);
+                memory.drop(1);
+                return Expr::cond(IRCond::NotZero);
+            }
+        };
+        Expr::resolved(ty, block)
     }
 }

@@ -753,8 +753,8 @@ mod test {
                 Mov(PreDec(SP), Immediate(20)),
                 // if cmp = 10
                 Mov(PreDec(SP), Offset(SP, 0)),
-                Equal(Offset(SP, 0), Immediate(10)),
-                Cmp(PostInc(SP), Immediate(1)),
+                Cmp(Offset(SP, 0), Immediate(10)),
+                Add(Register(SP), Immediate(1)),
                 // then
                 BranchIf(Immediate(2), Zero),
                 // i := 3
@@ -763,8 +763,8 @@ mod test {
                 BranchIf(Immediate(7), Always),
                 // else if cmp = 20
                 Mov(PreDec(SP), Offset(SP, 0)),
-                Equal(Offset(SP, 0), Immediate(20)),
-                Cmp(PostInc(SP), Immediate(1)),
+                Cmp(Offset(SP, 0), Immediate(20)),
+                Add(Register(SP), Immediate(1)),
                 // then
                 BranchIf(Immediate(2), Zero),
                 // i := 4
@@ -791,26 +791,26 @@ mod test {
             count;
         ",
             vec![
-                // let count := 0;
+                // let count := 0
                 Mov(PreDec(SP), Immediate(0)),
                 // begin: count
                 Mov(PreDec(SP), Offset(SP, 0)),
                 // != 10
-                NotEqual(Offset(SP, 0), Immediate(10)),
-                // -> end
-                Cmp(PostInc(SP), Immediate(1)),
-                BranchIf(Immediate(5), Zero),
+                Cmp(Offset(SP, 0), Immediate(10)),
+                Add(Register(SP), Immediate(1)),
+                // while .. loop
+                BranchIf(Immediate(5), NotZero),
                 // count
                 Mov(PreDec(SP), Offset(SP, 0)),
                 // + 1
                 Add(Offset(SP, 0), Immediate(1)),
-                // count :=
+                // count := _
                 Mov(Offset(SP, 1), Offset(SP, 0)),
-                // drop
+                // end
                 Add(Register(SP), Immediate(1)),
                 // -> begin
                 BranchIf(Immediate(-9), Always),
-                // end: count
+                // count
                 Mov(PreDec(SP), Offset(SP, 0)),
             ],
             10,
@@ -989,33 +989,36 @@ mod test {
 
         ",
             vec![
-                // add:
+                // add(Int, Int) -> Int
                 // left
-                Mov(PreDec(SP), Offset(SP, 2)), // [1, addr: 10, right: 2, left: 1, ret: 0 |...]
+                Mov(PreDec(SP), Offset(SP, 2)),
                 // + right
-                Add(Offset(SP, 0), Offset(SP, 2)), // [3, addr, right, left, ret: 0 |...]
-                // return _
-                Mov(Offset(SP, 4), Offset(SP, 0)), // [3, addr, right, left, ret: 3 |...]
-                Add(Register(SP), Immediate(1)),   // [addr, right, left, ret: 3 |...]
-                Return,                            // [right, left, ret: 3 |...]
+                Add(Offset(SP, 0), Offset(SP, 2)),
+                // return :=
+                Mov(Offset(SP, 4), Offset(SP, 0)),
+                // return
+                Add(Register(SP), Immediate(1)),
+                Return,
+                // main()
                 // let result := add(
                 Sub(Register(SP), Immediate(1)),
-                // 1,
+                // 1
                 Mov(PreDec(SP), Immediate(1)),
-                // 2,
+                // 2
                 Mov(PreDec(SP), Immediate(2)),
-                // )
-                Call(0),                         // [right, left, ret: 3, addr]
-                Add(Register(SP), Immediate(2)), // [ret: 3, addr]
-                // result
+                // );
+                Call(0),
+                Add(Register(SP), Immediate(2)),
+                // if result
                 Mov(PreDec(SP), Offset(SP, 0)),
-                // if _ != 3
-                NotEqual(Offset(SP, 0), Immediate(3)),
-                Cmp(PostInc(SP), Immediate(1)),
-                BranchIf(Immediate(1), Zero),
+                // != 3
+                Cmp(Offset(SP, 0), Immediate(3)),
+                Add(Register(SP), Immediate(1)),
+                // then
+                BranchIf(Immediate(1), NotZero),
                 Panic,
-                // return
-                Add(Register(SP), Immediate(1)), // [addr]
+                // end
+                Add(Register(SP), Immediate(1)),
                 Return,
             ],
         )

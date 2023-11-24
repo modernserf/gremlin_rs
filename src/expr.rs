@@ -18,6 +18,9 @@ enum ExprKind {
     Resolved(Block),
     // a value known at compile time that has not yet been written to memory
     Constant(Word),
+    // the result of a comparison that set the status register
+    Cond(IRCond),
+
     // a reference to a value in memory
     Reference {
         // 0 = an identifier, 1 = a pointer
@@ -44,6 +47,12 @@ impl Expr {
             kind: ExprKind::Constant(value),
         }
     }
+    pub fn cond(cond: IRCond) -> Self {
+        Self {
+            ty: Ty::bool(),
+            kind: ExprKind::Cond(cond),
+        }
+    }
     pub fn lvalue(ty: Ty, block: Block) -> Self {
         Self {
             ty,
@@ -58,12 +67,6 @@ impl Expr {
         Self {
             ty,
             kind: ExprKind::Sub(sub_index),
-        }
-    }
-    pub fn get_constant(&self) -> Option<Word> {
-        match &self.kind {
-            ExprKind::Constant(value) => Some(*value),
-            _ => None,
         }
     }
     pub fn assign_ctx(self) -> Compile<ExprTarget> {
@@ -106,7 +109,6 @@ impl Expr {
                     next: block,
                     focus: Slice::from_record_field(field),
                 },
-                // ctx: self.ctx.shrink_to(field.ty.size()),
             }),
             ExprKind::Reference {
                 deref_level, next, ..
@@ -117,9 +119,8 @@ impl Expr {
                     next,
                     focus: Slice::from_record_field(field),
                 },
-                // ctx: self.ctx.shrink_to(field.ty.size()),
             }),
-            ExprKind::Sub(_) => unreachable!(),
+            _ => unimplemented!(),
         }
     }
     //
@@ -156,11 +157,25 @@ impl Expr {
             _ => unreachable!(),
         }
     }
-    pub fn op_rhs(self, memory: &mut Memory, op: Op, dest_block: Block) {
-        let dest = Dest::Block(dest_block);
+    pub fn op_rhs(self, memory: &mut Memory, ty: Ty, op: Op, left: Expr) -> Expr {
+        match (&left.kind, &self.kind) {
+            (ExprKind::Constant(l), ExprKind::Constant(r)) => {
+                let value = op.inline(*l, *r);
+                return Expr::constant(ty, value);
+            }
+            _ => {}
+        };
+
+        let left = left.resolve(memory, ExprTarget::Stack);
+        // fixme
+        let dest = Src::Block(left.block);
         match self.kind {
-            ExprKind::Resolved(block) => memory.write(op.ir(), dest, Src::Block(block)),
-            ExprKind::Constant(value) => memory.write(op.ir(), dest, Src::Immediate(value)),
+            ExprKind::Resolved(block) => op.apply(memory, ty, dest, Src::Block(block)),
+            ExprKind::Constant(value) => op.apply(memory, ty, dest, Src::Immediate(value)),
+            ExprKind::Cond(cond) => {
+                let block = memory.set_if(Dest::Stack(1), cond);
+                op.apply(memory, ty, dest, Src::Block(block))
+            }
             ExprKind::Reference {
                 deref_level,
                 next,
@@ -168,10 +183,10 @@ impl Expr {
             } => {
                 // TODO
                 assert!(deref_level == 0);
-                memory.write(op.ir(), dest, Src::Block(next.focus(focus)))
+                op.apply(memory, ty, dest, Src::Block(next.focus(focus)))
             }
             ExprKind::Sub(_) => unreachable!(),
-        };
+        }
     }
     pub fn bitset_field(
         self,
@@ -196,7 +211,7 @@ impl Expr {
                     IRCond::Always
                 }
             }
-            // TODO: ExprKind::Cond
+            ExprKind::Cond(cond) => cond,
             _ => {
                 let res = self.resolve(memory, ExprTarget::Stack);
                 memory.cmp_bool(res.block)
@@ -212,6 +227,10 @@ impl Expr {
             }
             ExprKind::Constant(value) => {
                 let block = target.write_const(memory, value);
+                ResolvedExpr { ty: self.ty, block }
+            }
+            ExprKind::Cond(cond) => {
+                let block = target.write_cond(memory, cond);
                 ResolvedExpr { ty: self.ty, block }
             }
             ExprKind::Reference {
@@ -277,6 +296,18 @@ impl ExprTarget {
     }
     fn write_block(self, memory: &mut Memory, block: Block) -> Block {
         self.write_op(memory, IR::Mov, Src::Block(block), block.size())
+    }
+    fn write_cond(self, memory: &mut Memory, cond: IRCond) -> Block {
+        match self {
+            Self::Stack => memory.set_if(Dest::Stack(1), cond),
+            Self::Block(block) => memory.set_if(Dest::Block(block), cond),
+            Self::RefBlock(ptr_block) => {
+                let (register, dest) = memory.deref_to_dest(ptr_block, 1);
+                let block = memory.set_if(dest, cond);
+                memory.free_register(register);
+                block
+            }
+        }
     }
     fn write_ref(self, memory: &mut Memory, block: Block) -> Block {
         let src = Src::Block(block);

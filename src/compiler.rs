@@ -399,17 +399,7 @@ impl Compiler {
         let left = op_expr.operands.pop().expect("lhs");
 
         let out_ty = op.check_ty(&left.ty, &right.ty)?;
-        let result = match (&left.get_constant(), &right.get_constant()) {
-            (Some(l), Some(r)) => {
-                let value = op.inline(*l, *r);
-                Ok(Expr::constant(out_ty, value))
-            }
-            _ => {
-                let left = left.resolve(&mut self.memory, ExprTarget::Stack);
-                right.op_rhs(&mut self.memory, op, left.block);
-                Ok(Expr::resolved(out_ty, left.block))
-            }
-        }?;
+        let result = right.op_rhs(&mut self.memory, out_ty, op, left);
         op_expr.operands.push(result);
         Ok(())
     }
