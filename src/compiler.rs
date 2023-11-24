@@ -448,7 +448,7 @@ struct ScopeRecord {
 impl Compiler {
     pub fn get_expr(&mut self, name: &str) -> Compile<Expr> {
         if let Some(record) = self.module_or_sub.sub().get_local(name) {
-            let block = Block::local(record.frame_offset, record.ty.size());
+            let block = Block::stack(record.frame_offset, record.ty.size());
             return Ok(Expr::lvalue(record.ty.clone(), block));
         }
         if let Some(record) = self.module_scope.get(name) {

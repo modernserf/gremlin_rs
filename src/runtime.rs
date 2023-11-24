@@ -41,10 +41,10 @@ pub enum IR {
     Equal(IRDest, IRSrc),
     NotEqual(IRDest, IRSrc),
     BitTest(IRDest, IRSrc),
-    DebugStack,
     BranchZero(IRDest, IRSrc),
     Call(Word),
     Return,
+    DebugStack,
     Panic,
     Halt,
 }

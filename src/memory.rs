@@ -48,13 +48,6 @@ impl Slice {
             size: field.ty.size(),
         }
     }
-    fn shrink_top(self, new_size: Word) -> Self {
-        assert!(new_size <= self.size);
-        Self {
-            offset: self.offset - self.size + new_size,
-            size: new_size,
-        }
-    }
     fn focus(&self, other: Slice) -> Self {
         assert!(other.size <= self.size);
         Self {
@@ -68,7 +61,6 @@ impl Slice {
 #[derive(Debug, Copy, Clone)]
 pub enum Block {
     Stack(Slice),
-    Local(Slice),
     R0,
     R0Offset(Slice),
 }
@@ -77,39 +69,24 @@ impl Block {
     pub fn stack(offset: Word, size: Word) -> Self {
         Self::Stack(Slice { offset, size })
     }
-    pub fn local(offset: Word, size: Word) -> Self {
-        Self::Local(Slice { offset, size })
-    }
     pub fn r0_offset(offset: Word, size: Word) -> Self {
         Self::R0Offset(Slice { offset, size })
     }
     pub fn size(&self) -> Word {
         match &self {
             Self::Stack(slice) => slice.size,
-            Self::Local(slice) => slice.size,
             Self::R0 => 1,
             Self::R0Offset(slice) => slice.size,
-        }
-    }
-    pub fn shrink_to(self, new_size: Word) -> Self {
-        match self {
-            Self::Stack(slice) => Self::Stack(slice.shrink_top(new_size)),
-            Self::Local(slice) => Self::Local(slice.shrink_top(new_size)),
-            _ => unimplemented!(),
         }
     }
     pub fn frame_offset(self) -> Option<Word> {
         match self {
             Self::Stack(slice) => Some(slice.offset),
-            Self::Local(slice) => Some(slice.offset),
             _ => None,
         }
     }
     fn to_ea(self, current_frame_offset: Word, index: Word) -> EA {
         match &self {
-            Self::Local(slice) => {
-                EA::Offset(Register::Stack, current_frame_offset - slice.offset + index)
-            }
             Self::Stack(slice) => {
                 EA::Offset(Register::Stack, current_frame_offset - slice.offset + index)
             }
@@ -117,15 +94,8 @@ impl Block {
             Self::R0Offset(slice) => EA::Offset(Register::Data, slice.offset),
         }
     }
-    fn stack_space(self) -> Slice {
-        match self {
-            Self::Stack(slice) => slice,
-            _ => Slice { offset: 0, size: 0 },
-        }
-    }
     pub fn focus(&self, focus: Slice) -> Block {
         match &self {
-            Self::Local(slice) => Self::Local(slice.focus(focus)),
             Self::Stack(slice) => Self::Stack(slice.focus(focus)),
             _ => unimplemented!(),
         }
@@ -209,14 +179,14 @@ impl Memory {
         }
         dest
     }
-    fn shift(&mut self, block: Block, to_shift: Word) {
+    // move a slice "up" the stack in-place
+    fn shift(&mut self, stack_slice: Slice, to_shift: Word) {
         if to_shift == 0 {
             return;
         }
-        let stack_space = block.stack_space();
-        for i in 0..stack_space.size {
+        for i in 0..stack_slice.size {
             // copy high to low
-            let base_stack_offset = self.current_frame_offset - stack_space.offset - i;
+            let base_stack_offset = self.current_frame_offset - stack_slice.offset - i;
             let ea_src = EA::Offset(Register::Stack, base_stack_offset);
             let ea_dest = EA::Offset(Register::Stack, base_stack_offset + to_shift);
 
@@ -241,13 +211,16 @@ impl Memory {
         }
     }
     pub fn compact(&mut self, block: Block, prev_frame_offset: Word) {
-        let stack_space = block.stack_space();
-        if stack_space.size == 0 {
+        let stack_slice = match block {
+            Block::Stack(slice) => slice,
+            _ => Slice { offset: 0, size: 0 },
+        };
+        if stack_slice.size == 0 || stack_slice.offset <= prev_frame_offset {
             return;
         }
-        let to_shift = stack_space.offset - stack_space.size - prev_frame_offset;
-        self.shift(block, to_shift);
-        let to_remove = self.current_frame_offset - stack_space.offset + to_shift;
+        let to_shift = stack_slice.offset - stack_slice.size - prev_frame_offset;
+        self.shift(stack_slice, to_shift);
+        let to_remove = self.current_frame_offset - stack_slice.offset + to_shift;
         self.drop(to_remove);
     }
     pub fn assign(&mut self, block: Block, prev_frame_offset: Word) -> Word {
