@@ -514,7 +514,7 @@ impl Compiler {
 
     pub fn begin_cond(&mut self, cond: Expr) -> Compile<CondIndex> {
         Ty::bool().check(&cond.ty)?;
-        Ok(self.memory.begin_cond(cond, ExprTarget::Stack))
+        Ok(self.memory.begin_cond(cond))
     }
     pub fn begin_else(&mut self, if_rec: CondIndex) -> CondIndex {
         self.memory.begin_else(if_rec)

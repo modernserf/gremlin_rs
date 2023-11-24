@@ -29,6 +29,7 @@ pub enum IRCond {
     Zero,
     NotZero,
     Always,
+    Never,
 }
 
 type IRDest = EA;
@@ -291,6 +292,7 @@ impl Runtime {
     fn get_cond(&mut self, cond: IRCond) -> bool {
         match cond {
             IRCond::Always => true,
+            IRCond::Never => false,
             IRCond::Zero => self.status.zero,
             IRCond::NotZero => !self.status.zero,
         }

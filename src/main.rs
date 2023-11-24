@@ -626,11 +626,8 @@ mod test {
             vec![
                 // let i := 1;
                 Mov(PreDec(SP), Immediate(1)),
-                // false
-                Mov(PreDec(SP), Immediate(0)),
-                // if .. then
-                Cmp(PostInc(SP), Immediate(1)),
-                BranchIf(Immediate(1), Zero),
+                // if false then
+                BranchIf(Immediate(1), Always),
                 // i := 3
                 Mov(Offset(SP, 0), Immediate(3)),
                 // i;
@@ -638,7 +635,7 @@ mod test {
             ],
             1,
         );
-        expect_result(
+        expect_ir_result(
             "
             let i := 1;
             if true then
@@ -646,7 +643,42 @@ mod test {
             end
             i;
         ",
-            vec![],
+            vec![
+                // let i := 1;
+                Mov(PreDec(SP), Immediate(1)),
+                // if true then
+                BranchIf(Immediate(1), Never),
+                // i := 3
+                Mov(Offset(SP, 0), Immediate(3)),
+                // i;
+                Mov(PreDec(SP), Offset(SP, 0)),
+            ],
+            3,
+        );
+        expect_ir_result(
+            "
+            let i := 1;
+            let cond := true;
+            if cond then
+                i := 3;
+            end
+            i;
+        ",
+            vec![
+                // let i := 1;
+                Mov(PreDec(SP), Immediate(1)),
+                // let cond := true;
+                Mov(PreDec(SP), Immediate(1)),
+                // cond
+                Mov(PreDec(SP), Offset(SP, 0)),
+                Cmp(PostInc(SP), Immediate(1)),
+                // if ... then
+                BranchIf(Immediate(1), Zero),
+                // i := 3
+                Mov(Offset(SP, 1), Immediate(3)),
+                // i;
+                Mov(PreDec(SP), Offset(SP, 1)),
+            ],
             3,
         );
     }
@@ -656,7 +688,8 @@ mod test {
         expect_ir_result(
             "
             let i := 0;
-            if true then
+            let cond := true;
+            if cond then
                 i := 3;
             else
                 i := 4;
@@ -664,22 +697,22 @@ mod test {
             i;
         ",
             vec![
-                // let i := 0
+                // let i := 1;
                 Mov(PreDec(SP), Immediate(0)),
-                // true
+                // let cond := true;
                 Mov(PreDec(SP), Immediate(1)),
-                // if .. then
+                // if cond
+                Mov(PreDec(SP), Offset(SP, 0)),
                 Cmp(PostInc(SP), Immediate(1)),
+                // then
                 BranchIf(Immediate(2), Zero),
                 // i := 3
-                Mov(Offset(SP, 0), Immediate(3)),
-                // -> skip else
+                Mov(Offset(SP, 1), Immediate(3)),
                 BranchIf(Immediate(1), Always),
-                // else:
-                // i := 4;
-                Mov(Offset(SP, 0), Immediate(4)),
-                // i
-                Mov(PreDec(SP), Offset(SP, 0)),
+                // else: i := 4
+                Mov(Offset(SP, 1), Immediate(4)),
+                // i;
+                Mov(PreDec(SP), Offset(SP, 1)),
             ],
             3,
         );
@@ -703,9 +736,10 @@ mod test {
         expect_ir_result(
             "
             let i := 0;
-            if false then
+            let cmp := 20;
+            if cmp = 10 then
                 i := 3;
-            else if true then
+            else if cmp = 20 then
                 i := 4;
             else 
                 i := 5;
@@ -715,28 +749,32 @@ mod test {
             vec![
                 // let i := 0;
                 Mov(PreDec(SP), Immediate(0)),
-                // false
-                Mov(PreDec(SP), Immediate(0)),
-                // if .. then
+                // let cmp := 20;
+                Mov(PreDec(SP), Immediate(20)),
+                // if cmp = 10
+                Mov(PreDec(SP), Offset(SP, 0)),
+                Equal(Offset(SP, 0), Immediate(10)),
                 Cmp(PostInc(SP), Immediate(1)),
+                // then
                 BranchIf(Immediate(2), Zero),
                 // i := 3
-                Mov(Offset(SP, 0), Immediate(3)),
+                Mov(Offset(SP, 1), Immediate(3)),
                 // -> end
-                BranchIf(Immediate(6), Always),
-                // true
-                Mov(PreDec(SP), Immediate(1)),
-                // if .. then
+                BranchIf(Immediate(7), Always),
+                // else if cmp = 20
+                Mov(PreDec(SP), Offset(SP, 0)),
+                Equal(Offset(SP, 0), Immediate(20)),
                 Cmp(PostInc(SP), Immediate(1)),
+                // then
                 BranchIf(Immediate(2), Zero),
                 // i := 4
-                Mov(Offset(SP, 0), Immediate(4)),
-                //  -> end
+                Mov(Offset(SP, 1), Immediate(4)),
+                // -> end
                 BranchIf(Immediate(1), Always),
-                // i := 5
-                Mov(Offset(SP, 0), Immediate(5)),
+                // else i := 5
+                Mov(Offset(SP, 1), Immediate(5)),
                 // end: i
-                Mov(PreDec(SP), Offset(SP, 0)),
+                Mov(PreDec(SP), Offset(SP, 1)),
             ],
             4,
         );
@@ -891,11 +929,8 @@ mod test {
             vec![
                 // let x:= 1
                 Mov(PreDec(SP), Immediate(1)),
-                // true
-                Mov(PreDec(SP), Immediate(1)),
                 // if .. then
-                Cmp(PostInc(SP), Immediate(1)),
-                BranchIf(Immediate(3), Zero),
+                BranchIf(Immediate(3), Never),
                 // let x := 2; (new x)
                 Mov(PreDec(SP), Immediate(2)),
                 // x := 3;

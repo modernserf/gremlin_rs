@@ -185,6 +185,25 @@ impl Expr {
         memory.set_if(Dest::Block(block), IRCond::NotZero);
         Ok(Expr::resolved(Ty::bool(), block))
     }
+
+    pub fn resolve_branch_cond(self, memory: &mut Memory) -> IRCond {
+        Ty::bool().check(&self.ty).expect("bool");
+        match self.kind {
+            ExprKind::Constant(value) => {
+                if value == 1 {
+                    IRCond::Never // ie `if true then ... end` never branches at the `then`
+                } else {
+                    IRCond::Always
+                }
+            }
+            // TODO: ExprKind::Cond
+            _ => {
+                let res = self.resolve(memory, ExprTarget::Stack);
+                memory.cmp_bool(res.block)
+            }
+        }
+    }
+
     pub fn resolve(self, memory: &mut Memory, target: ExprTarget) -> ResolvedExpr {
         match self.kind {
             ExprKind::Resolved(block) => {

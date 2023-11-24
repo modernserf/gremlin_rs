@@ -254,10 +254,8 @@ pub struct WhileIndex {
 }
 
 impl Memory {
-    pub fn begin_cond(&mut self, expr: Expr, target: ExprTarget) -> CondIndex {
-        // TODO: expr.cond() that sets status register
-        let res = expr.resolve(self, target);
-        let ea = match res.block {
+    pub fn cmp_bool(&mut self, block: Block) -> IRCond {
+        let ea = match block {
             Block::Frame(slice) => {
                 assert!(
                     slice.offset == self.current_frame_offset,
@@ -269,10 +267,14 @@ impl Memory {
             block => block.to_ea(self.current_frame_offset, 0),
         };
         self.output.push(IR::Cmp(ea, EA::Immediate(1)));
-        //
+        IRCond::Zero
+    }
+
+    pub fn begin_cond(&mut self, expr: Expr) -> CondIndex {
+        // TODO: expr.cond() that sets status register
+        let cond = expr.resolve_branch_cond(self);
         let index = self.output.len();
-        self.output
-            .push(IR::BranchIf(EA::Immediate(-1), IRCond::Zero));
+        self.output.push(IR::BranchIf(EA::Immediate(-1), cond));
         CondIndex { index }
     }
     pub fn begin_else(&mut self, if_rec: CondIndex) -> CondIndex {
