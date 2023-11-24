@@ -180,15 +180,10 @@ impl Expr {
         target: ExprTarget,
     ) -> Compile<Expr> {
         let field = self.ty.oneof_member(field_name)?.clone();
-        let dest = Dest::Block(self.resolve(memory, target).block);
-        let out = memory.write(IR::BitTest, dest, Src::Immediate(field.index));
-        let ty = Ty::bool();
-        memory.write(
-            IR::Mov,
-            Dest::Block(out),
-            Src::Block(Block::Register(Register::Data)),
-        );
-        Ok(Expr::resolved(ty, out))
+        let block = self.resolve(memory, target).block;
+        memory.bit_test(block, Src::Immediate(field.index));
+        memory.set_if(Dest::Block(block), IRCond::NotZero);
+        Ok(Expr::resolved(Ty::bool(), block))
     }
     pub fn resolve(self, memory: &mut Memory, target: ExprTarget) -> ResolvedExpr {
         match self.kind {
@@ -251,8 +246,10 @@ impl ExprTarget {
             Self::Stack => memory.write(op, Dest::Stack(size), src),
             Self::Block(block) => memory.write(op, Dest::Block(block), src),
             Self::RefBlock(ptr_block) => {
-                let dest = memory.deref_to_dest(ptr_block, size);
-                memory.write(op, dest, src)
+                let (register, dest) = memory.deref_to_dest(ptr_block, size);
+                let block = memory.write(op, dest, src);
+                memory.free_register(register);
+                block
             }
         }
     }
@@ -273,13 +270,11 @@ impl ExprTarget {
         deref_ty: &Ty,
         focus: Slice,
     ) -> Block {
-        match &self {
-            Self::RefBlock(_) => todo!("both src & dest want to use pointer"),
-            _ => {}
-        };
         let size = deref_ty.size();
-        let src = memory.deref_to_src(ptr_block, focus);
-        self.write_op(memory, IR::Mov, src, size)
+        let (register, src) = memory.deref_to_src(ptr_block, focus);
+        let block = self.write_op(memory, IR::Mov, src, size);
+        memory.free_register(register);
+        block
     }
     fn maybe_move_block(self, memory: &mut Memory, block: Block) -> Block {
         match self {

@@ -2,8 +2,8 @@ pub type Word = i32;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Register {
-    Stack,
-    Data,
+    SP,
+    R0,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -24,6 +24,12 @@ pub enum EA {
     PreDec(Register),
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum IRCond {
+    Zero,
+    NotZero,
+}
+
 type IRDest = EA;
 type IRSrc = EA;
 pub type IROp = fn(IRDest, IRSrc) -> IR;
@@ -41,6 +47,7 @@ pub enum IR {
     Equal(IRDest, IRSrc),
     NotEqual(IRDest, IRSrc),
     BitTest(IRDest, IRSrc),
+    SetIf(IRDest, IRCond),
     BranchZero(IRDest, IRSrc),
     Call(Word),
     Return,
@@ -55,10 +62,22 @@ pub struct CompileResult {
     pub entry_point: Word,
 }
 
+pub struct Status {
+    // Carry, Overflow, Zero, Negative, Extend
+    zero: bool,
+}
+
+impl Status {
+    fn clear() -> Self {
+        Status { zero: false }
+    }
+}
+
 pub struct Runtime {
     r0: Word,
     sp: Word,
     ip: usize,
+    status: Status,
     memory: Vec<Word>,
 }
 
@@ -82,6 +101,7 @@ impl Runtime {
             sp: memory_size,
             ip: 0,
             memory: vec![0; memory_size as usize],
+            status: Status::clear(),
         }
     }
     fn run_program(&mut self, program: &[IR]) {
@@ -148,13 +168,18 @@ impl Runtime {
                 *dest_ptr = if value == *dest_ptr { 0 } else { 1 }
             }
 
-            // TODO: use a status register instead of r0
             IR::BitTest(dest, src) => {
                 let bit = self.get_src(*src);
                 let dest = *self.get_dest(*dest);
-                self.r0 = if (dest & (1 << bit)) > 0 { 1 } else { 0 }
+                self.status.zero = (dest & (1 << bit)) == 0;
+            }
+            IR::SetIf(dest, cond) => {
+                let result = if self.get_cond(*cond) { 1 } else { 0 };
+                let dest_ptr = self.get_dest(*dest);
+                *dest_ptr = result
             }
 
+            // TODO: replace with BranchIf(dest, cond)
             IR::BranchZero(dest, src) => {
                 let value = self.get_src(*src);
                 let displacement = self.get_branch_dest(*dest);
@@ -217,8 +242,8 @@ impl Runtime {
     }
     fn get_register(&mut self, register: Register) -> &mut Word {
         match register {
-            Register::Data => &mut self.r0,
-            Register::Stack => &mut self.sp,
+            Register::R0 => &mut self.r0,
+            Register::SP => &mut self.sp,
         }
     }
     fn get_effective_address(&mut self, src: EA) -> Word {
@@ -250,6 +275,12 @@ impl Runtime {
                 self.memory[addr as usize]
             }
             _ => unimplemented!(),
+        }
+    }
+    fn get_cond(&mut self, cond: IRCond) -> bool {
+        match cond {
+            IRCond::Zero => self.status.zero,
+            IRCond::NotZero => !self.status.zero,
         }
     }
 }

@@ -40,7 +40,7 @@ fn main() {
 #[cfg(test)]
 mod test {
     use super::*;
-    use super::{Register::*, EA::*, IR::*};
+    use super::{IRCond::*, Register::*, EA::*, IR::*};
 
     fn expect_ir(code: &str, ir: Vec<IR>) {
         assert_eq!(Parser::script(code), Ok(ir));
@@ -78,7 +78,7 @@ mod test {
 
     #[test]
     fn integers() {
-        expect_ir_result("123;", vec![Mov(PreDec(Stack), Immediate(123))], 123);
+        expect_ir_result("123;", vec![Mov(PreDec(SP), Immediate(123))], 123);
     }
 
     #[test]
@@ -88,7 +88,7 @@ mod test {
             123;
 
             ",
-            vec![Mov(PreDec(Stack), Immediate(123))],
+            vec![Mov(PreDec(SP), Immediate(123))],
         )
     }
 
@@ -96,7 +96,7 @@ mod test {
     fn comments() {
         expect_ir(
             "123; # This is a comment",
-            vec![Mov(PreDec(Stack), Immediate(123))],
+            vec![Mov(PreDec(SP), Immediate(123))],
         )
     }
 
@@ -107,8 +107,8 @@ mod test {
 
     #[test]
     fn bools() {
-        expect_ir("true;", vec![Mov(PreDec(Stack), Immediate(1))]);
-        expect_ir("false;", vec![Mov(PreDec(Stack), Immediate(0))]);
+        expect_ir("true;", vec![Mov(PreDec(SP), Immediate(1))]);
+        expect_ir("false;", vec![Mov(PreDec(SP), Immediate(0))]);
     }
 
     #[test]
@@ -120,9 +120,9 @@ mod test {
                 x;
             ",
             vec![
-                Mov(PreDec(Stack), Immediate(1)),
-                Mov(PreDec(Stack), Immediate(2)),
-                Mov(PreDec(Stack), Offset(Stack, 1)),
+                Mov(PreDec(SP), Immediate(1)),
+                Mov(PreDec(SP), Immediate(2)),
+                Mov(PreDec(SP), Offset(SP, 1)),
             ],
             1,
         );
@@ -134,7 +134,7 @@ mod test {
             "
                 let x : Int := 1;
             ",
-            vec![Mov(PreDec(Stack), Immediate(1))],
+            vec![Mov(PreDec(SP), Immediate(1))],
         );
         expect_err(
             "
@@ -154,10 +154,10 @@ mod test {
             x;
         ",
             vec![
-                Mov(PreDec(Stack), Immediate(1)),
-                Mov(PreDec(Stack), Immediate(3)),
-                Mov(Offset(Stack, 1), Offset(Stack, 0)),
-                Mov(PreDec(Stack), Offset(Stack, 1)),
+                Mov(PreDec(SP), Immediate(1)),
+                Mov(PreDec(SP), Immediate(3)),
+                Mov(Offset(SP, 1), Offset(SP, 0)),
+                Mov(PreDec(SP), Offset(SP, 1)),
             ],
             3,
         );
@@ -172,11 +172,11 @@ mod test {
             x + 3 + y;
         ",
             vec![
-                Mov(PreDec(Stack), Immediate(1)),        // [x: 1]
-                Mov(PreDec(Stack), Immediate(2)),        // [y: 2, x: 1]
-                Mov(PreDec(Stack), Offset(Stack, 1)),    // [1, y: 2, x: 1]
-                Add(Offset(Stack, 0), Immediate(3)),     // [4, y: 2, x: 1]
-                Add(Offset(Stack, 0), Offset(Stack, 1)), // [6, y: 2, x: 1]
+                Mov(PreDec(SP), Immediate(1)),     // [x: 1]
+                Mov(PreDec(SP), Immediate(2)),     // [y: 2, x: 1]
+                Mov(PreDec(SP), Offset(SP, 1)),    // [1, y: 2, x: 1]
+                Add(Offset(SP, 0), Immediate(3)),  // [4, y: 2, x: 1]
+                Add(Offset(SP, 0), Offset(SP, 1)), // [6, y: 2, x: 1]
             ],
             6,
         );
@@ -193,12 +193,12 @@ mod test {
         expect_ir_result(
             "volatile 3 * (volatile 4 + volatile 5);",
             vec![
-                Mov(PreDec(Stack), Immediate(3)),
-                Mov(PreDec(Stack), Immediate(4)),
-                Mov(PreDec(Stack), Immediate(5)),
-                Add(Offset(Stack, 1), Offset(Stack, 0)),
-                Mult(Offset(Stack, 2), Offset(Stack, 1)),
-                Add(Register(Stack), Immediate(2)),
+                Mov(PreDec(SP), Immediate(3)),
+                Mov(PreDec(SP), Immediate(4)),
+                Mov(PreDec(SP), Immediate(5)),
+                Add(Offset(SP, 1), Offset(SP, 0)),
+                Mult(Offset(SP, 2), Offset(SP, 1)),
+                Add(Register(SP), Immediate(2)),
             ],
             27,
         );
@@ -206,7 +206,7 @@ mod test {
 
     #[test]
     fn constant_folding() {
-        expect_ir_result("3 * (4 + 5);", vec![Mov(PreDec(Stack), Immediate(27))], 27);
+        expect_ir_result("3 * (4 + 5);", vec![Mov(PreDec(SP), Immediate(27))], 27);
     }
 
     #[test]
@@ -214,28 +214,28 @@ mod test {
         expect_ir_result(
             "volatile 4 + volatile 5 * volatile 3;",
             vec![
-                Mov(PreDec(Stack), Immediate(4)),
-                Mov(PreDec(Stack), Immediate(5)),
-                Mov(PreDec(Stack), Immediate(3)),
-                Mult(Offset(Stack, 1), Offset(Stack, 0)),
-                Add(Offset(Stack, 2), Offset(Stack, 1)),
-                Add(Register(Stack), Immediate(2)),
+                Mov(PreDec(SP), Immediate(4)),
+                Mov(PreDec(SP), Immediate(5)),
+                Mov(PreDec(SP), Immediate(3)),
+                Mult(Offset(SP, 1), Offset(SP, 0)),
+                Add(Offset(SP, 2), Offset(SP, 1)),
+                Add(Register(SP), Immediate(2)),
             ],
             19,
         );
-        expect_ir_result("4 + 5 * 3;", vec![Mov(PreDec(Stack), Immediate(19))], 19);
+        expect_ir_result("4 + 5 * 3;", vec![Mov(PreDec(SP), Immediate(19))], 19);
     }
 
     #[test]
     fn negation() {
-        expect_ir_result("-3;", vec![Mov(PreDec(Stack), Immediate(-3))], -3);
+        expect_ir_result("-3;", vec![Mov(PreDec(SP), Immediate(-3))], -3);
 
         expect_ir_result(
             "let a := 3; -a;",
             vec![
-                Mov(PreDec(Stack), Immediate(3)),
-                Mov(PreDec(Stack), Immediate(0)),
-                Sub(Offset(Stack, 0), Offset(Stack, 1)),
+                Mov(PreDec(SP), Immediate(3)),
+                Mov(PreDec(SP), Immediate(0)),
+                Sub(Offset(SP, 0), Offset(SP, 1)),
             ],
             -3,
         );
@@ -243,11 +243,11 @@ mod test {
         expect_ir_result(
             "-(volatile 3);",
             vec![
-                Mov(PreDec(Stack), Immediate(3)),
-                Mov(PreDec(Stack), Immediate(0)),
-                Sub(Offset(Stack, 0), Offset(Stack, 1)),
-                Mov(Offset(Stack, 1), Offset(Stack, 0)),
-                Add(Register(Stack), Immediate(1)),
+                Mov(PreDec(SP), Immediate(3)),
+                Mov(PreDec(SP), Immediate(0)),
+                Sub(Offset(SP, 0), Offset(SP, 1)),
+                Mov(Offset(SP, 1), Offset(SP, 0)),
+                Add(Register(SP), Immediate(1)),
             ],
             -3,
         );
@@ -263,14 +263,14 @@ mod test {
         ",
             vec![
                 // // let x := 1;
-                // Mov(PreDec(Stack), Immediate(1)),
+                // Mov(PreDec(SP), Immediate(1)),
                 // // let ptr := &x;
-                // LoadAddress(PreDec(Stack), Offset(Stack, 0)),
+                // LoadAddress(PreDec(SP), Offset(SP, 0)),
                 // // volatile ptr
-                // Mov(PreDec(Stack), Offset(Stack, 0)),
+                // Mov(PreDec(SP), Offset(SP, 0)),
                 // // []
-                // Mov(Register(Data), Offset(Stack, 0)),
-                // Mov(Offset(Stack, 0), Offset(Data, 0)),
+                // Mov(Register(R0), Offset(SP, 0)),
+                // Mov(Offset(SP, 0), Offset(R0, 0)),
             ],
             1,
         );
@@ -283,12 +283,12 @@ mod test {
         ",
             vec![
                 // let x := 1;
-                Mov(PreDec(Stack), Immediate(1)),
+                Mov(PreDec(SP), Immediate(1)),
                 // let ptr := &x;
-                LoadAddress(PreDec(Stack), Offset(Stack, 0)),
+                LoadAddress(PreDec(SP), Offset(SP, 0)),
                 // ptr[]
-                Mov(Register(Data), Offset(Stack, 0)),
-                Mov(PreDec(Stack), Offset(Data, 0)),
+                Mov(Register(R0), Offset(SP, 0)),
+                Mov(PreDec(SP), Offset(R0, 0)),
             ],
             1,
         );
@@ -305,14 +305,14 @@ mod test {
         ",
             vec![
                 // let x := 1;
-                Mov(PreDec(Stack), Immediate(1)),
+                Mov(PreDec(SP), Immediate(1)),
                 // let ptr := &x;
-                LoadAddress(PreDec(Stack), Offset(Stack, 0)),
+                LoadAddress(PreDec(SP), Offset(SP, 0)),
                 // ptr[] := 2;
-                Mov(Register(Data), Offset(Stack, 0)),
-                Mov(Offset(Data, 0), Immediate(2)),
+                Mov(Register(R0), Offset(SP, 0)),
+                Mov(Offset(R0, 0), Immediate(2)),
                 // x
-                Mov(PreDec(Stack), Offset(Stack, 1)),
+                Mov(PreDec(SP), Offset(SP, 1)),
             ],
             2,
         );
@@ -323,8 +323,8 @@ mod test {
         expect_ir_result(
             "(volatile true as Int) +  2;",
             vec![
-                Mov(PreDec(Stack), Immediate(1)),
-                Add(Offset(Stack, 0), Immediate(2)),
+                Mov(PreDec(SP), Immediate(1)),
+                Add(Offset(SP, 0), Immediate(2)),
             ],
             3,
         );
@@ -337,7 +337,7 @@ mod test {
                 type Word := Int;
                 let a : Word := 3;
             ",
-            vec![Mov(PreDec(Stack), Immediate(3))],
+            vec![Mov(PreDec(SP), Immediate(3))],
         )
     }
 
@@ -351,16 +351,16 @@ mod test {
         ",
             vec![
                 // // let p := Point { x: 1, y: 2 };
-                // Sub(Register(Stack), Immediate(2)),
-                // Mov(Offset(Stack, 0), Immediate(123)),
-                // Mov(Offset(Stack, 1), Immediate(456)),
+                // Sub(Register(SP), Immediate(2)),
+                // Mov(Offset(SP, 0), Immediate(123)),
+                // Mov(Offset(SP, 1), Immediate(456)),
                 // // volatile p
-                // Sub(Register(Stack), Immediate(2)),
-                // Mov(Offset(Stack, 0), Offset(Stack, 2)),
-                // Mov(Offset(Stack, 1), Offset(Stack, 3)),
+                // Sub(Register(SP), Immediate(2)),
+                // Mov(Offset(SP, 0), Offset(SP, 2)),
+                // Mov(Offset(SP, 1), Offset(SP, 3)),
                 // // .x
-                // Mov(Offset(Stack, 1), Offset(Stack, 0)),
-                // Add(Register(Stack), Immediate(1)),
+                // Mov(Offset(SP, 1), Offset(SP, 0)),
+                // Add(Register(SP), Immediate(1)),
             ],
             123,
         );
@@ -373,15 +373,15 @@ mod test {
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
-                Sub(Register(Stack), Immediate(2)),
-                Mov(Offset(Stack, 0), Immediate(123)),
-                Mov(Offset(Stack, 1), Immediate(456)),
+                Sub(Register(SP), Immediate(2)),
+                Mov(Offset(SP, 0), Immediate(123)),
+                Mov(Offset(SP, 1), Immediate(456)),
                 // volatile p
-                Sub(Register(Stack), Immediate(2)),
-                Mov(Offset(Stack, 0), Offset(Stack, 2)),
-                Mov(Offset(Stack, 1), Offset(Stack, 3)),
+                Sub(Register(SP), Immediate(2)),
+                Mov(Offset(SP, 0), Offset(SP, 2)),
+                Mov(Offset(SP, 1), Offset(SP, 3)),
                 // .y
-                Add(Register(Stack), Immediate(1)),
+                Add(Register(SP), Immediate(1)),
             ],
             456,
         );
@@ -394,11 +394,11 @@ mod test {
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
-                Sub(Register(Stack), Immediate(2)),
-                Mov(Offset(Stack, 0), Immediate(123)),
-                Mov(Offset(Stack, 1), Immediate(456)),
+                Sub(Register(SP), Immediate(2)),
+                Mov(Offset(SP, 0), Immediate(123)),
+                Mov(Offset(SP, 1), Immediate(456)),
                 // p.x
-                Mov(PreDec(Stack), Offset(Stack, 0)),
+                Mov(PreDec(SP), Offset(SP, 0)),
             ],
             123,
         );
@@ -413,10 +413,10 @@ mod test {
             p.y := 789;
         ",
             vec![
-                Sub(Register(Stack), Immediate(2)),
-                Mov(Offset(Stack, 0), Immediate(123)),
-                Mov(Offset(Stack, 1), Immediate(456)),
-                Mov(Offset(Stack, 1), Immediate(789)),
+                Sub(Register(SP), Immediate(2)),
+                Mov(Offset(SP, 0), Immediate(123)),
+                Mov(Offset(SP, 1), Immediate(456)),
+                Mov(Offset(SP, 1), Immediate(789)),
             ],
         );
     }
@@ -433,21 +433,21 @@ mod test {
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
-                Sub(Register(Stack), Immediate(2)),
-                Mov(Offset(Stack, 0), Immediate(1)),
-                Mov(Offset(Stack, 1), Immediate(2)),
+                Sub(Register(SP), Immediate(2)),
+                Mov(Offset(SP, 0), Immediate(1)),
+                Mov(Offset(SP, 1), Immediate(2)),
                 // let ptr := &p.x;
-                LoadAddress(PreDec(Stack), Offset(Stack, 0)),
+                LoadAddress(PreDec(SP), Offset(SP, 0)),
                 // p.x := 5;
-                Mov(Offset(Stack, 1), Immediate(5)),
+                Mov(Offset(SP, 1), Immediate(5)),
                 // volatile ptr
-                Mov(PreDec(Stack), Offset(Stack, 0)),
+                Mov(PreDec(SP), Offset(SP, 0)),
                 // []
-                Mov(Register(Data), Offset(Stack, 0)),
-                Mov(PreDec(Stack), Offset(Data, 0)),
+                Mov(Register(R0), Offset(SP, 0)),
+                Mov(PreDec(SP), Offset(R0, 0)),
                 // cleanup
-                Mov(Offset(Stack, 1), Offset(Stack, 0)),
-                Add(Register(Stack), Immediate(1)),
+                Mov(Offset(SP, 1), Offset(SP, 0)),
+                Add(Register(SP), Immediate(1)),
             ],
             5,
         );
@@ -462,16 +462,16 @@ mod test {
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
-                Sub(Register(Stack), Immediate(2)),
-                Mov(Offset(Stack, 0), Immediate(1)),
-                Mov(Offset(Stack, 1), Immediate(2)),
+                Sub(Register(SP), Immediate(2)),
+                Mov(Offset(SP, 0), Immediate(1)),
+                Mov(Offset(SP, 1), Immediate(2)),
                 // let ptr := &p.x;
-                LoadAddress(PreDec(Stack), Offset(Stack, 0)),
+                LoadAddress(PreDec(SP), Offset(SP, 0)),
                 // p.x := 5;
-                Mov(Offset(Stack, 1), Immediate(5)),
+                Mov(Offset(SP, 1), Immediate(5)),
                 // ptr[]
-                Mov(Register(Data), Offset(Stack, 0)),
-                Mov(PreDec(Stack), Offset(Data, 0)),
+                Mov(Register(R0), Offset(SP, 0)),
+                Mov(PreDec(SP), Offset(R0, 0)),
             ],
             5,
         );
@@ -488,14 +488,14 @@ mod test {
         ",
             vec![
                 // let p := Point { x: 1, y: 2 };
-                Sub(Register(Stack), Immediate(2)),
-                Mov(Offset(Stack, 0), Immediate(1)),
-                Mov(Offset(Stack, 1), Immediate(2)),
+                Sub(Register(SP), Immediate(2)),
+                Mov(Offset(SP, 0), Immediate(1)),
+                Mov(Offset(SP, 1), Immediate(2)),
                 // let ptr := &p;
-                LoadAddress(PreDec(Stack), Offset(Stack, 0)),
-                Mov(Register(Data), Offset(Stack, 0)),
+                LoadAddress(PreDec(SP), Offset(SP, 0)),
+                Mov(Register(R0), Offset(SP, 0)),
                 // ptr[].y
-                Mov(PreDec(Stack), Offset(Data, 1)),
+                Mov(PreDec(SP), Offset(R0, 1)),
             ],
             2,
         );
@@ -508,7 +508,7 @@ mod test {
             type TrafficLight := oneof {Red, Yellow, Green};
             TrafficLight.Yellow;
         ",
-            vec![Mov(PreDec(Stack), Immediate(1))],
+            vec![Mov(PreDec(SP), Immediate(1))],
             1,
         )
     }
@@ -522,10 +522,10 @@ mod test {
             flags.Zero;
         ",
             vec![
-                Mov(PreDec(Stack), Immediate(0b101)),
-                Mov(PreDec(Stack), Offset(Stack, 0)),
-                BitTest(Offset(Stack, 0), Immediate(2)),
-                Mov(Offset(Stack, 0), Register(Data)),
+                Mov(PreDec(SP), Immediate(0b101)),
+                Mov(PreDec(SP), Offset(SP, 0)),
+                BitTest(Offset(SP, 0), Immediate(2)),
+                SetIf(Offset(SP, 0), NotZero),
             ],
             1,
         );
@@ -540,22 +540,22 @@ mod test {
             ",
             vec![
                 //
-                Sub(Register(Stack), Immediate(4)),
-                Mov(Offset(Stack, 0), Immediate(10)),
-                Mov(Offset(Stack, 1), Immediate(20)),
-                Mov(Offset(Stack, 2), Immediate(30)),
-                Mov(Offset(Stack, 3), Immediate(40)),
+                Sub(Register(SP), Immediate(4)),
+                Mov(Offset(SP, 0), Immediate(10)),
+                Mov(Offset(SP, 1), Immediate(20)),
+                Mov(Offset(SP, 2), Immediate(30)),
+                Mov(Offset(SP, 3), Immediate(40)),
                 // xs
-                LoadAddress(PreDec(Stack), Offset(Stack, 0)),
+                LoadAddress(PreDec(SP), Offset(SP, 0)),
                 // [1]
-                Mov(PreDec(Stack), Immediate(1)),
-                Mult(Offset(Stack, 0), Immediate(1)),
-                Add(Offset(Stack, 1), Offset(Stack, 0)),
-                Mov(Register(Data), Offset(Stack, 1)),
-                Mov(PreDec(Stack), Offset(Data, 0)),
+                Mov(PreDec(SP), Immediate(1)),
+                Mult(Offset(SP, 0), Immediate(1)),
+                Add(Offset(SP, 1), Offset(SP, 0)),
+                Mov(Register(R0), Offset(SP, 1)),
+                Mov(PreDec(SP), Offset(R0, 0)),
                 // compact
-                Mov(Offset(Stack, 2), Offset(Stack, 0)),
-                Add(Register(Stack), Immediate(2)),
+                Mov(Offset(SP, 2), Offset(SP, 0)),
+                Add(Register(SP), Immediate(2)),
             ],
             20,
         );
@@ -567,17 +567,17 @@ mod test {
             ",
             vec![
                 // let xs := array[Int: 4]{10, 20, 30, 40};
-                Sub(Register(Stack), Immediate(4)),
-                Mov(Offset(Stack, 0), Immediate(10)),
-                Mov(Offset(Stack, 1), Immediate(20)),
-                Mov(Offset(Stack, 2), Immediate(30)),
-                Mov(Offset(Stack, 3), Immediate(40)),
+                Sub(Register(SP), Immediate(4)),
+                Mov(Offset(SP, 0), Immediate(10)),
+                Mov(Offset(SP, 1), Immediate(20)),
+                Mov(Offset(SP, 2), Immediate(30)),
+                Mov(Offset(SP, 3), Immediate(40)),
                 // &xs + 1
-                LoadAddress(PreDec(Stack), Offset(Stack, 0)),
-                Add(Offset(Stack, 0), Immediate(1)),
+                LoadAddress(PreDec(SP), Offset(SP, 0)),
+                Add(Offset(SP, 0), Immediate(1)),
                 // deref
-                Mov(Register(Data), Offset(Stack, 0)),
-                Mov(Offset(Stack, 0), Offset(Data, 0)),
+                Mov(Register(R0), Offset(SP, 0)),
+                Mov(Offset(SP, 0), Offset(R0, 0)),
             ],
             20,
         );
@@ -625,15 +625,15 @@ mod test {
         ",
             vec![
                 // let i := 1;
-                Mov(PreDec(Stack), Immediate(1)),
+                Mov(PreDec(SP), Immediate(1)),
                 // false
-                Mov(PreDec(Stack), Immediate(0)),
+                Mov(PreDec(SP), Immediate(0)),
                 // if .. then
-                BranchZero(Immediate(1), PostInc(Stack)),
+                BranchZero(Immediate(1), PostInc(SP)),
                 // i := 3
-                Mov(Offset(Stack, 0), Immediate(3)),
+                Mov(Offset(SP, 0), Immediate(3)),
                 // i;
-                Mov(PreDec(Stack), Offset(Stack, 0)),
+                Mov(PreDec(SP), Offset(SP, 0)),
             ],
             1,
         );
@@ -664,20 +664,20 @@ mod test {
         ",
             vec![
                 // let i := 0
-                Mov(PreDec(Stack), Immediate(0)),
+                Mov(PreDec(SP), Immediate(0)),
                 // true
-                Mov(PreDec(Stack), Immediate(1)),
+                Mov(PreDec(SP), Immediate(1)),
                 // if .. then
-                BranchZero(Immediate(2), PostInc(Stack)),
+                BranchZero(Immediate(2), PostInc(SP)),
                 // i := 3
-                Mov(Offset(Stack, 0), Immediate(3)),
+                Mov(Offset(SP, 0), Immediate(3)),
                 // -> skip else
                 BranchZero(Immediate(1), Immediate(0)),
                 // else:
                 // i := 4;
-                Mov(Offset(Stack, 0), Immediate(4)),
+                Mov(Offset(SP, 0), Immediate(4)),
                 // i
-                Mov(PreDec(Stack), Offset(Stack, 0)),
+                Mov(PreDec(SP), Offset(SP, 0)),
             ],
             3,
         );
@@ -712,27 +712,27 @@ mod test {
         ",
             vec![
                 // let i := 0;
-                Mov(PreDec(Stack), Immediate(0)),
+                Mov(PreDec(SP), Immediate(0)),
                 // false
-                Mov(PreDec(Stack), Immediate(0)),
+                Mov(PreDec(SP), Immediate(0)),
                 // if .. then
-                BranchZero(Immediate(2), PostInc(Stack)),
+                BranchZero(Immediate(2), PostInc(SP)),
                 // i := 3
-                Mov(Offset(Stack, 0), Immediate(3)),
+                Mov(Offset(SP, 0), Immediate(3)),
                 // -> end
                 BranchZero(Immediate(5), Immediate(0)),
                 // true
-                Mov(PreDec(Stack), Immediate(1)),
+                Mov(PreDec(SP), Immediate(1)),
                 // if .. then
-                BranchZero(Immediate(2), PostInc(Stack)),
+                BranchZero(Immediate(2), PostInc(SP)),
                 // i := 4
-                Mov(Offset(Stack, 0), Immediate(4)),
+                Mov(Offset(SP, 0), Immediate(4)),
                 //  -> end
                 BranchZero(Immediate(1), Immediate(0)),
                 // i := 5
-                Mov(Offset(Stack, 0), Immediate(5)),
+                Mov(Offset(SP, 0), Immediate(5)),
                 // end: i
-                Mov(PreDec(Stack), Offset(Stack, 0)),
+                Mov(PreDec(SP), Offset(SP, 0)),
             ],
             4,
         );
@@ -750,25 +750,25 @@ mod test {
         ",
             vec![
                 // let count := 0;
-                Mov(PreDec(Stack), Immediate(0)),
+                Mov(PreDec(SP), Immediate(0)),
                 // begin: count
-                Mov(PreDec(Stack), Offset(Stack, 0)),
+                Mov(PreDec(SP), Offset(SP, 0)),
                 // != 10
-                NotEqual(Offset(Stack, 0), Immediate(10)),
+                NotEqual(Offset(SP, 0), Immediate(10)),
                 // -> end
-                BranchZero(Immediate(5), PostInc(Stack)),
+                BranchZero(Immediate(5), PostInc(SP)),
                 // count
-                Mov(PreDec(Stack), Offset(Stack, 0)),
+                Mov(PreDec(SP), Offset(SP, 0)),
                 // + 1
-                Add(Offset(Stack, 0), Immediate(1)),
+                Add(Offset(SP, 0), Immediate(1)),
                 // count :=
-                Mov(Offset(Stack, 1), Offset(Stack, 0)),
+                Mov(Offset(SP, 1), Offset(SP, 0)),
                 // drop
-                Add(Register(Stack), Immediate(1)),
+                Add(Register(SP), Immediate(1)),
                 // -> begin
                 BranchZero(Immediate(-8), Immediate(0)),
                 // end: count
-                Mov(PreDec(Stack), Offset(Stack, 0)),
+                Mov(PreDec(SP), Offset(SP, 0)),
             ],
             10,
         );
@@ -799,27 +799,27 @@ mod test {
         ",
             vec![
                 // let result := 0;
-                Mov(PreDec(Stack), Immediate(1)),
+                Mov(PreDec(SP), Immediate(1)),
                 // let opt := Option.Some{value: 3};
-                Sub(Register(Stack), Immediate(2)),
-                Mov(Offset(Stack, 0), Immediate(0)),
-                Mov(Offset(Stack, 1), Immediate(3)),
+                Sub(Register(SP), Immediate(2)),
+                Mov(Offset(SP, 0), Immediate(0)),
+                Mov(Offset(SP, 1), Immediate(3)),
                 // opt (todo: don't need to force resolution)
-                Sub(Register(Stack), Immediate(2)),
-                Mov(Offset(Stack, 0), Offset(Stack, 2)),
-                Mov(Offset(Stack, 1), Offset(Stack, 3)),
+                Sub(Register(SP), Immediate(2)),
+                Mov(Offset(SP, 0), Offset(SP, 2)),
+                Mov(Offset(SP, 1), Offset(SP, 3)),
                 // match .. then
-                BranchZero(Offset(Stack, 0), Immediate(0)),
+                BranchZero(Offset(SP, 0), Immediate(0)),
                 BranchZero(Immediate(1), Immediate(0)),
                 BranchZero(Immediate(2), Immediate(0)),
                 // Some: result := value
-                Mov(Offset(Stack, 4), Offset(Stack, 1)),
+                Mov(Offset(SP, 4), Offset(SP, 1)),
                 BranchZero(Immediate(2), Immediate(0)),
                 // None: result := 10
-                Mov(Offset(Stack, 4), Immediate(10)),
+                Mov(Offset(SP, 4), Immediate(10)),
                 BranchZero(Immediate(0), Immediate(0)),
                 // end; result
-                Mov(PreDec(Stack), Offset(Stack, 4)),
+                Mov(PreDec(SP), Offset(SP, 4)),
             ],
             3,
         );
@@ -847,26 +847,26 @@ mod test {
         ",
             vec![
                 // let result := 0;
-                Mov(PreDec(Stack), Immediate(1)),
+                Mov(PreDec(SP), Immediate(1)),
                 // let opt := Option.None{};
-                Sub(Register(Stack), Immediate(2)),
-                Mov(Offset(Stack, 0), Immediate(1)),
+                Sub(Register(SP), Immediate(2)),
+                Mov(Offset(SP, 0), Immediate(1)),
                 // opt (todo: don't need to force resolution)
-                Sub(Register(Stack), Immediate(2)),
-                Mov(Offset(Stack, 0), Offset(Stack, 2)),
-                Mov(Offset(Stack, 1), Offset(Stack, 3)),
+                Sub(Register(SP), Immediate(2)),
+                Mov(Offset(SP, 0), Offset(SP, 2)),
+                Mov(Offset(SP, 1), Offset(SP, 3)),
                 // match .. then
-                BranchZero(Offset(Stack, 0), Immediate(0)),
+                BranchZero(Offset(SP, 0), Immediate(0)),
                 BranchZero(Immediate(1), Immediate(0)),
                 BranchZero(Immediate(2), Immediate(0)),
                 // Some: result := value
-                Mov(Offset(Stack, 4), Offset(Stack, 1)),
+                Mov(Offset(SP, 4), Offset(SP, 1)),
                 BranchZero(Immediate(2), Immediate(0)),
                 // None: result := 10
-                Mov(Offset(Stack, 4), Immediate(10)),
+                Mov(Offset(SP, 4), Immediate(10)),
                 BranchZero(Immediate(0), Immediate(0)),
                 // end; result
-                Mov(PreDec(Stack), Offset(Stack, 4)),
+                Mov(PreDec(SP), Offset(SP, 4)),
             ],
             10,
         );
@@ -885,19 +885,19 @@ mod test {
         ",
             vec![
                 // let x:= 1
-                Mov(PreDec(Stack), Immediate(1)),
+                Mov(PreDec(SP), Immediate(1)),
                 // true
-                Mov(PreDec(Stack), Immediate(1)),
+                Mov(PreDec(SP), Immediate(1)),
                 // if .. then
-                BranchZero(Immediate(3), PostInc(Stack)),
+                BranchZero(Immediate(3), PostInc(SP)),
                 // let x := 2; (new x)
-                Mov(PreDec(Stack), Immediate(2)),
+                Mov(PreDec(SP), Immediate(2)),
                 // x := 3;
-                Mov(Offset(Stack, 0), Immediate(3)),
+                Mov(Offset(SP, 0), Immediate(3)),
                 // drop scope
-                Add(Register(Stack), Immediate(1)),
+                Add(Register(SP), Immediate(1)),
                 // x
-                Mov(PreDec(Stack), Offset(Stack, 0)),
+                Mov(PreDec(SP), Offset(SP, 0)),
             ],
             1,
         );
@@ -921,11 +921,11 @@ mod test {
         ",
             vec![
                 // let x := Option.Some{value: 3};
-                Sub(Register(Stack), Immediate(2)),
-                Mov(Offset(Stack, 0), Immediate(0)),
-                Mov(Offset(Stack, 1), Immediate(3)),
+                Sub(Register(SP), Immediate(2)),
+                Mov(Offset(SP, 0), Immediate(0)),
+                Mov(Offset(SP, 1), Immediate(3)),
                 // drop & return
-                Add(Register(Stack), Immediate(2)),
+                Add(Register(SP), Immediate(2)),
                 Return,
             ],
         );
@@ -950,30 +950,30 @@ mod test {
             vec![
                 // add:
                 // left
-                Mov(PreDec(Stack), Offset(Stack, 2)), // [1, addr: 10, right: 2, left: 1, ret: 0 |...]
+                Mov(PreDec(SP), Offset(SP, 2)), // [1, addr: 10, right: 2, left: 1, ret: 0 |...]
                 // + right
-                Add(Offset(Stack, 0), Offset(Stack, 2)), // [3, addr, right, left, ret: 0 |...]
+                Add(Offset(SP, 0), Offset(SP, 2)), // [3, addr, right, left, ret: 0 |...]
                 // return _
-                Mov(Offset(Stack, 4), Offset(Stack, 0)), // [3, addr, right, left, ret: 3 |...]
-                Add(Register(Stack), Immediate(1)),      // [addr, right, left, ret: 3 |...]
-                Return,                                  // [right, left, ret: 3 |...]
+                Mov(Offset(SP, 4), Offset(SP, 0)), // [3, addr, right, left, ret: 3 |...]
+                Add(Register(SP), Immediate(1)),   // [addr, right, left, ret: 3 |...]
+                Return,                            // [right, left, ret: 3 |...]
                 // let result := add(
-                Sub(Register(Stack), Immediate(1)),
+                Sub(Register(SP), Immediate(1)),
                 // 1,
-                Mov(PreDec(Stack), Immediate(1)),
+                Mov(PreDec(SP), Immediate(1)),
                 // 2,
-                Mov(PreDec(Stack), Immediate(2)),
+                Mov(PreDec(SP), Immediate(2)),
                 // )
-                Call(0),                            // [right, left, ret: 3, addr]
-                Add(Register(Stack), Immediate(2)), // [ret: 3, addr]
+                Call(0),                         // [right, left, ret: 3, addr]
+                Add(Register(SP), Immediate(2)), // [ret: 3, addr]
                 // result
-                Mov(PreDec(Stack), Offset(Stack, 0)),
+                Mov(PreDec(SP), Offset(SP, 0)),
                 // if _ != 3
-                NotEqual(Offset(Stack, 0), Immediate(3)),
-                BranchZero(Immediate(1), PostInc(Stack)),
+                NotEqual(Offset(SP, 0), Immediate(3)),
+                BranchZero(Immediate(1), PostInc(SP)),
                 Panic,
                 // return
-                Add(Register(Stack), Immediate(1)), // [addr]
+                Add(Register(SP), Immediate(1)), // [addr]
                 Return,
             ],
         )

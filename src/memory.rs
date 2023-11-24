@@ -6,6 +6,7 @@ use crate::ty::*;
 pub struct Memory {
     output: Vec<IR>,
     pub current_frame_offset: Word,
+    free_registers: Vec<Register>,
 }
 
 impl Memory {
@@ -13,6 +14,7 @@ impl Memory {
         Self {
             current_frame_offset: 0,
             output: Vec::new(),
+            free_registers: vec![Register::R0],
         }
     }
     pub fn done(self) -> Vec<IR> {
@@ -29,6 +31,15 @@ impl Memory {
     }
     pub fn panic(&mut self) {
         self.output.push(IR::Panic);
+    }
+    pub fn take_register(&mut self) -> Option<Register> {
+        self.free_registers.pop()
+    }
+    pub fn free_register(&mut self, register: Register) {
+        if self.free_registers.contains(&register) {
+            panic!("register is already free")
+        }
+        self.free_registers.push(register)
     }
 }
 
@@ -86,7 +97,7 @@ impl Block {
     fn to_ea(self, current_frame_offset: Word, index: Word) -> EA {
         match &self {
             Self::Frame(slice) => {
-                EA::Offset(Register::Stack, current_frame_offset - slice.offset + index)
+                EA::Offset(Register::SP, current_frame_offset - slice.offset + index)
             }
             Self::Register(register) => {
                 assert_eq!(index, 0);
@@ -145,7 +156,7 @@ impl Memory {
                     self.write_to_block(op, block, src)
                 } else {
                     let ea_src = src.to_ea(self.current_frame_offset, 0);
-                    self.output.push(op(EA::PreDec(Register::Stack), ea_src));
+                    self.output.push(op(EA::PreDec(Register::SP), ea_src));
                     self.current_frame_offset += 1;
                     Block::frame(self.current_frame_offset, 1)
                 }
@@ -174,8 +185,8 @@ impl Memory {
         for i in 0..stack_slice.size {
             // copy high to low
             let base_stack_offset = self.current_frame_offset - stack_slice.offset - i;
-            let ea_src = EA::Offset(Register::Stack, base_stack_offset);
-            let ea_dest = EA::Offset(Register::Stack, base_stack_offset + to_shift);
+            let ea_src = EA::Offset(Register::SP, base_stack_offset);
+            let ea_dest = EA::Offset(Register::SP, base_stack_offset + to_shift);
 
             self.output.push(IR::Mov(ea_dest, ea_src));
         }
@@ -184,7 +195,7 @@ impl Memory {
         self.current_frame_offset += size;
         if size > 0 {
             self.output
-                .push(IR::Sub(EA::Register(Register::Stack), EA::Immediate(size)));
+                .push(IR::Sub(EA::Register(Register::SP), EA::Immediate(size)));
         }
         Block::frame(self.current_frame_offset, size)
     }
@@ -192,7 +203,7 @@ impl Memory {
         if to_remove > 0 {
             self.current_frame_offset -= to_remove;
             self.output.push(IR::Add(
-                EA::Register(Register::Stack),
+                EA::Register(Register::SP),
                 EA::Immediate(to_remove),
             ));
         }
@@ -211,22 +222,24 @@ impl Memory {
         self.compact(block, prev_frame_offset);
         self.current_frame_offset
     }
-    // TODO: handle register contention (e.g. writing from one pointer to another)
-    // a first approximation could be to just make another register
-    pub fn deref_to_dest(&mut self, ptr_block: Block, size: Word) -> Dest {
-        self.load_ptr(ptr_block);
-        Dest::Block(Block::Offset(Register::Data, Slice::with_size(size)))
+    pub fn deref_to_dest(&mut self, ptr_block: Block, size: Word) -> (Register, Dest) {
+        let register = self.load_ptr(ptr_block);
+        let dest = Dest::Block(Block::Offset(register, Slice::with_size(size)));
+        (register, dest)
     }
-    pub fn deref_to_src(&mut self, ptr_block: Block, focus: Slice) -> Src {
-        self.load_ptr(ptr_block);
-        Src::Block(Block::Offset(Register::Data, focus))
+    pub fn deref_to_src(&mut self, ptr_block: Block, focus: Slice) -> (Register, Src) {
+        let register = self.load_ptr(ptr_block);
+        let src = Src::Block(Block::Offset(register, focus));
+        (register, src)
     }
-    fn load_ptr(&mut self, ptr_block: Block) {
+    fn load_ptr(&mut self, ptr_block: Block) -> Register {
         assert_eq!(ptr_block.size(), 1);
+        let register = self.take_register().expect("free register");
         self.output.push(IR::Mov(
-            EA::Register(Register::Data),
+            EA::Register(register),
             ptr_block.to_ea(self.current_frame_offset, 0),
         ));
+        register
     }
 }
 
@@ -250,7 +263,7 @@ impl Memory {
                     "must be top of stack"
                 );
                 self.current_frame_offset -= 1;
-                EA::PostInc(Register::Stack)
+                EA::PostInc(Register::SP)
             }
             block => block.to_ea(self.current_frame_offset, 0),
         };
@@ -374,5 +387,24 @@ impl Memory {
             let displacement = (self.output.len() - index - 1) as Word;
             self.output[*index] = IR::BranchZero(EA::Immediate(displacement), EA::Immediate(0));
         }
+    }
+}
+
+// miscellaneous cond
+// TODO: take / free respective status registers
+impl Memory {
+    pub fn bit_test(&mut self, target: Block, src: Src) {
+        self.output.push(IR::BitTest(
+            target.to_ea(self.current_frame_offset, 0),
+            src.to_ea(self.current_frame_offset, 0),
+        ))
+    }
+    pub fn set_if(&mut self, dest: Dest, cond: IRCond) {
+        let ea = match dest {
+            Dest::Stack(_) => EA::PreDec(Register::SP),
+            Dest::Block(block) => block.to_ea(self.current_frame_offset, 0),
+        };
+
+        self.output.push(IR::SetIf(ea, cond))
     }
 }
