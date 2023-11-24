@@ -21,78 +21,6 @@ use crate::Compile;
 // .. [a, b * c] [+]
 // .. [a + (b * c)] []
 
-pub struct OpExpr {
-    op_stack: Vec<Op>,
-    operands: Vec<Expr>,
-    target: ExprTarget,
-}
-
-impl OpExpr {
-    pub fn new(left: Expr, target: ExprTarget) -> Self {
-        Self {
-            op_stack: Vec::new(),
-            operands: vec![left],
-            target,
-        }
-    }
-    pub fn simple(
-        memory: &mut Memory,
-        target: ExprTarget,
-        op: Op,
-        left: Expr,
-        right: Expr,
-    ) -> Compile<Expr> {
-        let mut expr = Self::new(left, target);
-        expr.next(memory, op, right)?;
-        expr.unwind(memory)
-    }
-    pub fn unwind(&mut self, memory: &mut Memory) -> Compile<Expr> {
-        while let Some(op) = self.op_stack.pop() {
-            self.apply_stack(memory, op)?;
-        }
-        Ok(self.operands.pop().expect("op result"))
-    }
-    pub fn next(&mut self, memory: &mut Memory, op: Op, right: Expr) -> Compile<()> {
-        match self.op_stack.pop() {
-            Some(last_op) => {
-                if last_op.precedence() > op.precedence() {
-                    self.op_stack.push(last_op);
-                    self.op_stack.push(op);
-                } else {
-                    self.apply_stack(memory, last_op)?;
-                    self.op_stack.push(op);
-                }
-            }
-            None => {
-                self.op_stack.push(op);
-            }
-        };
-        self.operands.push(right);
-        Ok(())
-    }
-    fn apply_stack(&mut self, memory: &mut Memory, op: Op) -> Compile<()> {
-        let right = self.operands.pop().expect("rhs");
-        let left = self.operands.pop().expect("lhs");
-        let result = self.apply_1(memory, op, left, right)?;
-        self.operands.push(result);
-        Ok(())
-    }
-    fn apply_1(&mut self, memory: &mut Memory, op: Op, left: Expr, right: Expr) -> Compile<Expr> {
-        let out_ty = op.check_ty(&left.ty, &right.ty)?;
-        match (&left.get_constant(), &right.get_constant()) {
-            (Some(l), Some(r)) => {
-                let value = op.inline(*l, *r);
-                Ok(Expr::constant(out_ty, value))
-            }
-            _ => {
-                let left = left.resolve(memory, ExprTarget::Stack);
-                right.op_rhs(memory, op, left.block);
-                Ok(Expr::resolved(out_ty, left.block))
-            }
-        }
-    }
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Op {
     Add,
@@ -103,7 +31,7 @@ pub enum Op {
 }
 
 impl Op {
-    fn precedence(&self) -> usize {
+    pub fn precedence(&self) -> usize {
         match self {
             Op::Add => 1,
             Op::Sub => 1,
@@ -112,7 +40,7 @@ impl Op {
             Op::NotEqual => 2,
         }
     }
-    fn check_ty(&self, left: &Ty, right: &Ty) -> Compile<Ty> {
+    pub fn check_ty(&self, left: &Ty, right: &Ty) -> Compile<Ty> {
         match self {
             Op::Add => self.arithmetic(left, right),
             Op::Sub => self.arithmetic(left, right),

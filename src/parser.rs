@@ -283,7 +283,7 @@ impl Parser {
             Some(expr) => expr,
             None => return Ok(None),
         };
-        let mut op_expr = OpExpr::new(left, ExprTarget::Stack);
+        let mut op_expr = self.compiler.op_begin(left);
 
         loop {
             match self.lexer.op()? {
@@ -291,9 +291,10 @@ impl Parser {
                     let right = self.expect_unary_op_expr()?;
                     self.compiler.op_next(&mut op_expr, op, right)?;
                 }
-                None => return self.compiler.op_unwind(op_expr).map(Some),
+                None => break,
             }
         }
+        self.compiler.op_end(op_expr).map(Some)
     }
 
     fn assign_expr(&mut self) -> CompileOpt<Expr> {

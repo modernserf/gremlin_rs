@@ -168,6 +168,7 @@ pub enum Dest {
 }
 
 impl Memory {
+    // TODO: this really only makes sense for mov, everything else should operate on a per-word basis
     pub fn write(&mut self, op: IROp, dest: Dest, src: Src) -> Block {
         match dest {
             Dest::Stack(size) => {

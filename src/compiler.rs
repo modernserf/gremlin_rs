@@ -356,6 +356,75 @@ impl SubContext {
     }
 }
 
+// Ops
+
+pub struct OpExpr {
+    op_stack: Vec<Op>,
+    operands: Vec<Expr>,
+}
+
+impl Compiler {
+    pub fn op_begin(&mut self, left: Expr) -> OpExpr {
+        OpExpr {
+            op_stack: Vec::new(),
+            operands: vec![left],
+        }
+    }
+    pub fn op_next(&mut self, op_expr: &mut OpExpr, op: Op, expr: Expr) -> Compile<()> {
+        match op_expr.op_stack.pop() {
+            Some(last_op) => {
+                if last_op.precedence() > op.precedence() {
+                    op_expr.op_stack.push(last_op);
+                    op_expr.op_stack.push(op);
+                } else {
+                    self.op_apply(op_expr, op)?;
+                    op_expr.op_stack.push(op);
+                }
+            }
+            None => {
+                op_expr.op_stack.push(op);
+            }
+        };
+        op_expr.operands.push(expr);
+        Ok(())
+    }
+    pub fn op_end(&mut self, mut op_expr: OpExpr) -> Compile<Expr> {
+        while let Some(op) = op_expr.op_stack.pop() {
+            self.op_apply(&mut op_expr, op)?;
+        }
+        Ok(op_expr.operands.pop().expect("op result"))
+    }
+    fn op_apply(&mut self, op_expr: &mut OpExpr, op: Op) -> Compile<()> {
+        let right = op_expr.operands.pop().expect("rhs");
+        let left = op_expr.operands.pop().expect("lhs");
+
+        let out_ty = op.check_ty(&left.ty, &right.ty)?;
+        let result = match (&left.get_constant(), &right.get_constant()) {
+            (Some(l), Some(r)) => {
+                let value = op.inline(*l, *r);
+                Ok(Expr::constant(out_ty, value))
+            }
+            _ => {
+                let left = left.resolve(&mut self.memory, ExprTarget::Stack);
+                right.op_rhs(&mut self.memory, op, left.block);
+                Ok(Expr::resolved(out_ty, left.block))
+            }
+        }?;
+        op_expr.operands.push(result);
+        Ok(())
+    }
+    pub fn negate_expr(&mut self, expr: Expr) -> Compile<Expr> {
+        self.op_simple(Op::Sub, Expr::constant(Ty::int(), 0), expr)
+    }
+    fn op_simple(&mut self, op: Op, left: Expr, right: Expr) -> Compile<Expr> {
+        let op_expr = OpExpr {
+            op_stack: vec![op],
+            operands: vec![left, right],
+        };
+        self.op_end(op_expr)
+    }
+}
+
 struct ScopeFrame {
     scope_index: ScopeIndex,
     scope: HashMap<String, ScopeRecord>,
@@ -425,22 +494,11 @@ impl Compiler {
         idx: Expr,
         item_ty: &Ty,
     ) -> Compile<Expr> {
-        let offset = OpExpr::simple(
-            &mut self.memory,
-            ExprTarget::Stack,
-            Op::Mul,
-            idx,
-            Expr::constant(Ty::int(), item_ty.size()),
-        )?;
+        let offset = self.op_simple(Op::Mul, idx, Expr::constant(Ty::int(), item_ty.size()))?;
         let ptr_ty = array_ptr.ty.clone();
-        let offset_ptr = OpExpr::simple(
-            &mut self.memory,
-            ExprTarget::Stack,
-            Op::Add,
-            array_ptr.cast_ty(Ty::int())?,
-            offset,
-        )?
-        .cast_ty(ptr_ty)?;
+        let offset_ptr = self
+            .op_simple(Op::Add, array_ptr.cast_ty(Ty::int())?, offset)?
+            .cast_ty(ptr_ty)?;
         // deref pointer
         offset_ptr.deref(&mut self.memory, ExprTarget::Stack)
     }
@@ -453,21 +511,7 @@ impl Compiler {
     pub fn bitset_field(&mut self, expr: Expr, field_name: &str) -> Compile<Expr> {
         expr.bitset_field(&field_name, &mut self.memory, ExprTarget::Stack)
     }
-    pub fn negate_expr(&mut self, expr: Expr) -> Compile<Expr> {
-        OpExpr::simple(
-            &mut self.memory,
-            ExprTarget::Stack,
-            Op::Sub,
-            Expr::constant(Ty::int(), 0),
-            expr,
-        )
-    }
-    pub fn op_next(&mut self, op_expr: &mut OpExpr, op: Op, expr: Expr) -> Compile<()> {
-        op_expr.next(&mut self.memory, op, expr)
-    }
-    pub fn op_unwind(&mut self, mut op_expr: OpExpr) -> Compile<Expr> {
-        op_expr.unwind(&mut self.memory)
-    }
+
     pub fn begin_cond(&mut self, cond: Expr) -> Compile<CondIndex> {
         Ty::bool().check(&cond.ty)?;
         Ok(self.memory.begin_cond(cond, ExprTarget::Stack))
