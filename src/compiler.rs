@@ -5,7 +5,6 @@ use crate::record::*;
 use crate::runtime::*;
 use crate::subroutine::*;
 use crate::ty::*;
-use crate::CompileError;
 use crate::{Compile, CompileError::*};
 use std::collections::HashMap;
 enum ModuleOrSub {
@@ -72,12 +71,11 @@ impl Compiler {
         Err(UnknownIdentifier(name.to_string()))
     }
     pub fn assign_expr(&mut self, name: String, expr: ResolvedExpr) {
-        self.memory.compact(expr.block);
-        self.memory.locals_offset = self.memory.current_frame_offset;
+        let frame_offset = self.memory.assign(expr.block);
         self.module_or_sub.sub().insert(
             name,
             ScopeRecord {
-                frame_offset: self.memory.locals_offset,
+                frame_offset,
                 ty: expr.ty,
             },
         );
