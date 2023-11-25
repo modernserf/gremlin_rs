@@ -59,6 +59,12 @@ impl Slice {
             size: field.ty.size(),
         }
     }
+    pub fn from_array_index(item_ty: &Ty, index: Word) -> Self {
+        Self {
+            size: item_ty.size(),
+            offset: item_ty.size() * index,
+        }
+    }
     fn focus(&self, other: Slice) -> Self {
         assert!(other.size <= self.size);
         Self {
@@ -115,12 +121,6 @@ impl Block {
     pub fn record_field(&self, field: &RecordField) -> Block {
         self.focus(Slice::from_record_field(field))
     }
-    pub fn array_index(&self, item_ty: &Ty, index: Word) -> Block {
-        self.focus(Slice {
-            size: item_ty.size(),
-            offset: item_ty.size() * index,
-        })
-    }
 }
 
 #[derive(Debug)]
@@ -168,6 +168,7 @@ impl Src {
     }
 }
 
+#[derive(Debug)]
 pub enum Dest {
     Block(Block),
     Stack,
@@ -282,10 +283,14 @@ impl Memory {
         self.compact(block, prev_frame_offset);
         self.current_frame_offset
     }
-    pub fn deref_to_dest(&mut self, ptr_block: Block, size: Word) -> (Register, Dest) {
+    pub fn deref_to_dest(&mut self, ptr_block: Block, focus: Slice) -> (Register, Dest) {
         let register = self.load_ptr(ptr_block);
-        let dest = Dest::Block(Block::Offset(register, Slice::with_size(size)));
+        let dest = Dest::Block(Block::Offset(register, focus));
         (register, dest)
+    }
+    pub fn deref_iter_to_dest(&mut self, block: Block, focus: Slice, deref_count: usize) {
+        // chase a pointer through multiple iterations, then apply focus
+        // if zero iterations just return block + focus
     }
     pub fn deref_to_src(&mut self, ptr_block: Block, focus: Slice) -> (Register, Src) {
         let register = self.load_ptr(ptr_block);

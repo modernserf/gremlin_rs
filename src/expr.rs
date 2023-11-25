@@ -12,23 +12,50 @@ pub struct Expr {
 }
 
 #[derive(Debug)]
+pub struct Reference {
+    // 0 = an identifier, 1 = a pointer
+    pub deref_level: usize,
+    // ref_level 0 = the location of the referent, 1 = the location of the pointer to the referent, etc
+    pub next: Block,
+    // segment of referent that we want (e.g. a particular struct field within a struct)
+    pub focus: Slice,
+}
+
+impl Reference {
+    // TODO: can a src/dest "own" a register
+    fn to_dest(self, memory: &mut Memory) -> (Dest, Option<Register>) {
+        match self.deref_level {
+            0 => (Dest::Block(self.next.focus(self.focus)), None),
+            1 => {
+                // TODO: how should multiple iterations of deref work?
+                let (register, dest) = memory.deref_to_dest(self.next, self.focus);
+                (dest, Some(register))
+            }
+            _ => unimplemented!(),
+        }
+    }
+    fn to_src(self, memory: &mut Memory) -> (Src, Option<Register>) {
+        match self.deref_level {
+            0 => (Src::Block(self.next.focus(self.focus)), None),
+            1 => {
+                let (register, src) = memory.deref_to_src(self.next, self.focus);
+                (src, Some(register))
+            }
+            _ => unimplemented!(),
+        }
+    }
+}
+
+#[derive(Debug)]
 enum ExprKind {
-    // a value in memory
-    Resolved(Block),
+    // a value in memory, not assigned to a variable
+    Block(Block),
     // a value known at compile time that has not yet been written to memory
     Constant(Word),
     // the result of a comparison that set the status register
     Cond(IRCond),
-
-    // a reference to a value in memory
-    Reference {
-        // 0 = an identifier, 1 = a pointer
-        deref_level: usize,
-        // ref_level 0 = the location of the referent, 1 = the location of the pointer to the referent, etc
-        next: Block,
-        // segment of referent that we want (e.g. a particular struct field within a struct)
-        focus: Slice,
-    },
+    // a value accessible through a variable (ie an "lvalue")
+    Reference(Reference),
     // a subroutine
     Sub(SubIndex),
 }
@@ -37,7 +64,7 @@ impl Expr {
     pub fn resolved(ty: Ty, block: Block) -> Self {
         Self {
             ty,
-            kind: ExprKind::Resolved(block),
+            kind: ExprKind::Block(block),
         }
     }
     pub fn constant(ty: Ty, value: Word) -> Self {
@@ -55,11 +82,11 @@ impl Expr {
     pub fn lvalue(ty: Ty, block: Block) -> Self {
         Self {
             ty,
-            kind: ExprKind::Reference {
+            kind: ExprKind::Reference(Reference {
                 deref_level: 0,
                 focus: Slice::with_size(block.size()),
                 next: block,
-            },
+            }),
         }
     }
     pub fn sub(ty: Ty, sub_index: SubIndex) -> Self {
@@ -70,17 +97,7 @@ impl Expr {
     }
     pub fn assign_ctx(self) -> Compile<ExprTarget> {
         match self.kind {
-            ExprKind::Reference {
-                deref_level,
-                next,
-                focus,
-            } => {
-                if deref_level > 0 {
-                    Ok(ExprTarget::RefBlock(next))
-                } else {
-                    Ok(ExprTarget::Block(next.focus(focus)))
-                }
-            }
+            ExprKind::Reference(r) => Ok(ExprTarget::Reference(r)),
             _ => Err(Expected("lvalue")),
         }
     }
@@ -101,23 +118,21 @@ impl Expr {
         let field = record.get(field_name, None)?;
         match self.kind {
             ExprKind::Constant(_) => unimplemented!(),
-            ExprKind::Resolved(block) => Ok(Self {
+            ExprKind::Block(block) => Ok(Self {
                 ty: field.ty.clone(),
-                kind: ExprKind::Reference {
+                kind: ExprKind::Reference(Reference {
                     deref_level: 0,
                     next: block,
                     focus: Slice::from_record_field(field),
-                },
+                }),
             }),
-            ExprKind::Reference {
-                deref_level, next, ..
-            } => Ok(Self {
+            ExprKind::Reference(r) => Ok(Self {
                 ty: field.ty.clone(),
-                kind: ExprKind::Reference {
-                    deref_level,
-                    next,
+                kind: ExprKind::Reference(Reference {
+                    deref_level: r.deref_level,
+                    next: r.next,
                     focus: Slice::from_record_field(field),
-                },
+                }),
             }),
             _ => unimplemented!(),
         }
@@ -125,8 +140,8 @@ impl Expr {
     //
     pub fn add_ref(self, memory: &mut Memory, target: ExprTarget) -> Compile<Self> {
         match self.kind {
-            ExprKind::Reference { next, .. } => {
-                let out = target.load_address(memory, next);
+            ExprKind::Reference(r) => {
+                let out = target.load_address(memory, r.next);
                 Ok(Self::resolved(self.ty.add_ref(), out))
             }
             _ => Err(InvalidRef),
@@ -135,21 +150,23 @@ impl Expr {
     pub fn deref(self, memory: &mut Memory, target: ExprTarget) -> Compile<Self> {
         let deref_ty = self.ty.deref()?;
         match self.kind {
-            ExprKind::Resolved(block) => {
-                let out = target.mov_deref(memory, block, Slice::with_size(deref_ty.size()));
+            ExprKind::Block(block) => {
+                let (register, src) = memory.deref_to_src(block, Slice::with_size(deref_ty.size()));
+                let out = target.mov(memory, src);
+                memory.free_register(register);
                 Ok(Self::resolved(deref_ty, out))
             }
-            ExprKind::Reference {
+            ExprKind::Reference(Reference {
                 deref_level,
                 next,
                 focus,
-            } => Ok(Self {
+            }) => Ok(Self {
                 ty: deref_ty,
-                kind: ExprKind::Reference {
+                kind: ExprKind::Reference(Reference {
                     deref_level: deref_level + 1,
                     next,
                     focus,
-                },
+                }),
             }),
             _ => unreachable!(),
         }
@@ -163,22 +180,25 @@ impl Expr {
             _ => {}
         };
 
+        // TODO: in (a < b) | (c < d), how do we ensure that we've saved a < b to stack
+        // by the time we execute c < d?
+
         // TODO: left doesnt need to be on stack, just needs to be addressable
-        let left = left.resolve(memory, ExprTarget::Stack);
+        let left = left.to_stack(memory);
         // fixme
         let dest = Src::Block(left.block);
         match self.kind {
-            ExprKind::Resolved(block) => op.apply(memory, ty, dest, Src::Block(block)),
+            ExprKind::Block(block) => op.apply(memory, ty, dest, Src::Block(block)),
             ExprKind::Constant(value) => op.apply(memory, ty, dest, Src::Immediate(value)),
             ExprKind::Cond(cond) => {
                 let block = memory.set_if(Dest::Stack, cond);
                 op.apply(memory, ty, dest, Src::Block(block))
             }
-            ExprKind::Reference {
+            ExprKind::Reference(Reference {
                 deref_level,
                 next,
                 focus,
-            } => {
+            }) => {
                 // TODO
                 assert!(deref_level == 0);
                 op.apply(memory, ty, dest, Src::Block(next.focus(focus)))
@@ -199,15 +219,23 @@ impl Expr {
             }
             ExprKind::Cond(cond) => cond,
             _ => {
-                let res = self.resolve(memory, ExprTarget::Stack);
+                let res = self.to_stack(memory);
                 memory.cmp_bool(res.block)
             }
         }
     }
 
-    pub fn resolve(self, memory: &mut Memory, target: ExprTarget) -> ResolvedExpr {
+    // expr resolved to stack has an addressable value, can be accumulated upon
+    pub fn to_stack(self, memory: &mut Memory) -> ResolvedExpr {
+        self.resolve_inner(memory, ExprTarget::Stack)
+    }
+
+    pub fn resolve(self, memory: &mut Memory, target: ExprTarget) {
+        self.resolve_inner(memory, target);
+    }
+    fn resolve_inner(self, memory: &mut Memory, target: ExprTarget) -> ResolvedExpr {
         match self.kind {
-            ExprKind::Resolved(block) => {
+            ExprKind::Block(block) => {
                 let block = target.maybe_move_block(memory, block);
                 ResolvedExpr { ty: self.ty, block }
             }
@@ -219,20 +247,13 @@ impl Expr {
                 let block = target.set_if(memory, cond);
                 ResolvedExpr { ty: self.ty, block }
             }
-            ExprKind::Reference {
-                deref_level,
-                next,
-                focus,
-            } => {
-                if deref_level == 0 {
-                    let block = target.mov(memory, Src::Block(next.focus(focus)));
-                    ResolvedExpr { ty: self.ty, block }
-                } else if deref_level == 1 {
-                    let block = target.mov_deref(memory, next, focus);
-                    ResolvedExpr { ty: self.ty, block }
-                } else {
-                    unimplemented!()
+            ExprKind::Reference(r) => {
+                let (src, register) = r.to_src(memory);
+                let block = target.mov(memory, src);
+                if let Some(register) = register {
+                    memory.free_register(register);
                 }
+                ResolvedExpr { ty: self.ty, block }
             }
             ExprKind::Sub(_) => unimplemented!(),
         }
@@ -260,52 +281,39 @@ impl ResolvedExpr {
 #[derive(Debug)]
 pub enum ExprTarget {
     Stack,
-    Block(Block),
-    RefBlock(Block),
+    Reference(Reference),
 }
 
 impl ExprTarget {
-    fn mov(self, memory: &mut Memory, src: Src) -> Block {
+    fn to_dest(self, memory: &mut Memory) -> (Dest, Option<Register>) {
         match self {
-            Self::Stack => memory.mov(Dest::Stack, src),
-            Self::Block(block) => memory.mov(Dest::Block(block), src),
-            Self::RefBlock(ptr_block) => {
-                let (register, dest) = memory.deref_to_dest(ptr_block, src.size());
-                let block = memory.mov(dest, src);
-                memory.free_register(register);
-                block
-            }
+            Self::Stack => (Dest::Stack, None),
+            Self::Reference(r) => r.to_dest(memory),
         }
     }
-    fn set_if(self, memory: &mut Memory, cond: IRCond) -> Block {
-        match self {
-            Self::Stack => memory.set_if(Dest::Stack, cond),
-            Self::Block(block) => memory.set_if(Dest::Block(block), cond),
-            Self::RefBlock(ptr_block) => {
-                let (register, dest) = memory.deref_to_dest(ptr_block, 1);
-                let block = memory.set_if(dest, cond);
-                memory.free_register(register);
-                block
-            }
+    fn mov(self, memory: &mut Memory, src: Src) -> Block {
+        let (dest, register) = self.to_dest(memory);
+        let block = memory.mov(dest, src);
+        if let Some(r) = register {
+            memory.free_register(r);
         }
+        block
+    }
+    fn set_if(self, memory: &mut Memory, cond: IRCond) -> Block {
+        let (dest, register) = self.to_dest(memory);
+        let block = memory.set_if(dest, cond);
+        if let Some(r) = register {
+            memory.free_register(r);
+        }
+        block
     }
     fn load_address(self, memory: &mut Memory, block: Block) -> Block {
         let src = Src::Block(block);
-        match self {
-            Self::Stack => memory.load_address(Dest::Stack, src),
-            Self::Block(block) => memory.load_address(Dest::Block(block), src),
-            Self::RefBlock(ptr_block) => {
-                let (register, dest) = memory.deref_to_dest(ptr_block, 1);
-                let block = memory.load_address(dest, src);
-                memory.free_register(register);
-                block
-            }
+        let (dest, register) = self.to_dest(memory);
+        let block = memory.load_address(dest, src);
+        if let Some(r) = register {
+            memory.free_register(r);
         }
-    }
-    fn mov_deref(self, memory: &mut Memory, ptr_block: Block, focus: Slice) -> Block {
-        let (register, src) = memory.deref_to_src(ptr_block, focus);
-        let block = self.mov(memory, src);
-        memory.free_register(register);
         block
     }
     fn maybe_move_block(self, memory: &mut Memory, block: Block) -> Block {

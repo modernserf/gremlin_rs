@@ -57,7 +57,11 @@ impl Parser {
 
         if let Some(case_id) = case {
             let case_field = record.case_field.as_ref().ok_or(Expected("case field"))?;
-            let field_ctx = ExprTarget::Block(block.record_field(case_field));
+            let field_ctx = ExprTarget::Reference(Reference {
+                deref_level: 0,
+                next: block,
+                focus: Slice::from_record_field(case_field),
+            });
             self.compiler
                 .resolve_expr(Expr::constant(Ty::int(), case_id), field_ctx);
         }
@@ -69,10 +73,14 @@ impl Parser {
             };
             self.lexer.expect_token(Token::Colon)?;
             let field = record.get(&field_name, case)?;
-            let field_ctx = ExprTarget::Block(block.record_field(field));
+            let field_ctx = ExprTarget::Reference(Reference {
+                deref_level: 0,
+                next: block,
+                focus: Slice::from_record_field(field),
+            });
             let expr = self.expect_expr()?;
-            let resolved = self.compiler.resolve_expr(expr, field_ctx);
-            field.ty.check(&resolved.ty)?;
+            field.ty.check(&expr.ty)?;
+            self.compiler.resolve_expr(expr, field_ctx);
 
             if self.lexer.token(Token::Comma)?.is_none() {
                 break;
@@ -118,12 +126,18 @@ impl Parser {
 
         let mut i = 0;
         loop {
-            let cell_ctx = ExprTarget::Block(block.array_index(&item_ty, i));
-            let expr = match self.expr()? {
-                Some(p) => self.compiler.resolve_expr(p, cell_ctx),
+            let cell_ctx = ExprTarget::Reference(Reference {
+                deref_level: 0,
+                next: block,
+                focus: Slice::from_array_index(&item_ty, i),
+            });
+            match self.expr()? {
+                Some(p) => {
+                    item_ty.check(&p.ty)?;
+                    self.compiler.resolve_expr(p, cell_ctx);
+                }
                 None => break,
             };
-            item_ty.check(&expr.ty)?;
             i += 1;
 
             if self.lexer.token(Token::Comma)?.is_none() {
@@ -264,9 +278,7 @@ impl Parser {
             Token::Volatile => {
                 self.lexer.advance();
                 let operand = self.expect_unary_op_expr()?;
-                self.compiler
-                    .resolve_expr(operand, ExprTarget::Stack)
-                    .to_expr()
+                self.compiler.resolve_stack(operand).to_expr()
             }
             _ => return self.postfix_expr(),
         };
@@ -305,8 +317,8 @@ impl Parser {
             return Ok(Some(left));
         }
         let expr = self.op_expr()?.ok_or(Expected("expr"))?;
-        let resolved = self.compiler.resolve_expr(expr, left.assign_ctx()?);
-        Ok(Some(resolved.to_expr()))
+        self.compiler.resolve_expr(expr, left.assign_ctx()?);
+        Ok(Some(ResolvedExpr::void().to_expr()))
     }
 
     fn as_expr(&mut self) -> CompileOpt<Expr> {
@@ -545,7 +557,7 @@ impl Parser {
 
         let frame_offset = self.compiler.begin_compact();
         let expr = self.expect_expr()?;
-        let resolved = self.compiler.resolve_expr(expr, ExprTarget::Stack);
+        let resolved = self.compiler.resolve_stack(expr);
         match bind_ty {
             Some(b) => b.check(&resolved.ty)?,
             None => {}
@@ -597,7 +609,7 @@ impl Parser {
                 let state = self.compiler.begin_compact();
                 match self.expr()? {
                     Some(expr) => {
-                        let res = self.compiler.resolve_expr(expr, ExprTarget::Stack);
+                        let res = self.compiler.resolve_stack(expr);
                         self.compiler.end_compact(state, res);
                         self.lexer.expect_token(Token::Semicolon)?;
                     }

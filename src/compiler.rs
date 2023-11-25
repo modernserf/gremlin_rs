@@ -196,7 +196,14 @@ impl Compiler {
         match expr {
             Some(expr) => {
                 sub.check_return(&expr.ty)?;
-                expr.resolve(&mut self.memory, ExprTarget::Block(sub.return_expr.block));
+                expr.resolve(
+                    &mut self.memory,
+                    ExprTarget::Reference(Reference {
+                        deref_level: 0,
+                        next: sub.return_expr.block,
+                        focus: Slice::with_size(sub.return_expr.block.size()),
+                    }),
+                );
             }
             None => {
                 sub.check_return(&Ty::void())?;
@@ -236,7 +243,7 @@ pub struct MatchCaseBuilder {
 
 impl Compiler {
     pub fn begin_match(&mut self, expr: Expr) -> Compile<MatchBuilder> {
-        let res = expr.resolve(&mut self.memory, ExprTarget::Stack);
+        let res = expr.to_stack(&mut self.memory);
         let record = res.ty.get_record()?;
         let case_field = record.case_field.as_ref().ok_or(Expected("case field"))?;
         let case_value = res.block.record_field(&case_field);
@@ -468,8 +475,11 @@ impl Compiler {
     pub fn allocate(&mut self, ty: &Ty) -> Block {
         self.memory.allocate(ty.size())
     }
-    pub fn resolve_expr(&mut self, expr: Expr, target: ExprTarget) -> ResolvedExpr {
+    pub fn resolve_expr(&mut self, expr: Expr, target: ExprTarget) {
         expr.resolve(&mut self.memory, target)
+    }
+    pub fn resolve_stack(&mut self, expr: Expr) -> ResolvedExpr {
+        expr.to_stack(&mut self.memory)
     }
     // get pointer to first item from array
     pub fn array_ptr(&mut self, array: Expr, item_ty: &Ty) -> Compile<Expr> {
@@ -500,7 +510,7 @@ impl Compiler {
     }
     pub fn bitset_field(&mut self, expr: Expr, field_name: &str) -> Compile<Expr> {
         let field = expr.ty.oneof_member(field_name)?.clone();
-        let block = self.resolve_expr(expr, ExprTarget::Stack).block;
+        let block = self.resolve_stack(expr).block;
         self.memory.bit_test(block, Src::Immediate(field.index));
         self.memory.set_if(Dest::Block(block), IRCond::NotZero);
         Ok(Expr::resolved(Ty::bool(), block))
