@@ -24,6 +24,20 @@ pub enum EA {
     PreDec(Register),
 }
 
+impl EA {
+    pub fn add_offset(self, offset: Word) -> Self {
+        match self {
+            Self::Offset(r, base) => Self::Offset(r, base + offset),
+            Self::Absolute(base) => Self::Absolute(base + offset),
+            Self::Index(r0, r1, base) => Self::Index(r0, r1, base + offset),
+            ea => {
+                assert!(offset == 0);
+                ea
+            }
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum IRCond {
     Zero,

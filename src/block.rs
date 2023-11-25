@@ -62,16 +62,11 @@ impl Block {
             _ => None,
         }
     }
-    pub fn to_ea(self, current_frame_offset: Word, index: Word) -> EA {
+    pub fn to_ea(self, current_frame_offset: Word) -> EA {
         match &self {
-            Self::Frame(slice) => {
-                EA::Offset(Register::SP, current_frame_offset - slice.offset + index)
-            }
-            Self::Register(register) => {
-                assert_eq!(index, 0);
-                EA::Register(*register)
-            }
-            Self::Offset(register, slice) => EA::Offset(*register, slice.offset + index),
+            Self::Frame(slice) => EA::Offset(Register::SP, current_frame_offset - slice.offset),
+            Self::Register(register) => EA::Register(*register),
+            Self::Offset(register, slice) => EA::Offset(*register, slice.offset),
         }
     }
     pub fn focus(&self, focus: Slice) -> Block {
