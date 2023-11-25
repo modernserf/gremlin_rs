@@ -23,57 +23,37 @@ impl Slice {
             size: other.size,
         }
     }
-    // a frame offset needs to be focused in the opposite direction,
-    // e.g. a struct field within a block will have a _lower_ frame offset
-    pub fn focus_inverse(&self, other: Slice) -> Self {
-        assert!(other.size <= self.size);
-        Self {
-            offset: self.offset - other.offset,
-            size: other.size,
-        }
-    }
 }
 
-// a location in memory, which may span multiple words
+// a location on the stack, which may span multiple words
 #[derive(Debug, Copy, Clone)]
-pub enum Block {
-    // relative to (imaginary) frame pointer, converted to stack-relative
-    Frame(Slice),
-    // relative to the address in the specified register
-    Offset(Register, Slice),
-    // a single word in a register
-    Register(Register),
+pub struct Block {
+    // relative to (imaginary) frame pointer
+    offset: Word,
+    size: Word,
 }
 
 impl Block {
-    pub fn frame(offset: Word, size: Word) -> Self {
-        Self::Frame(Slice { offset, size })
+    pub fn new(offset: Word, size: Word) -> Self {
+        Self { offset, size }
     }
     pub fn size(&self) -> Word {
-        match &self {
-            Self::Frame(slice) => slice.size,
-            Self::Register(_) => 1,
-            Self::Offset(_, slice) => slice.size,
-        }
+        self.size
     }
-    pub fn frame_slice(self) -> Option<Slice> {
-        match self {
-            Self::Frame(slice) => Some(slice),
-            _ => None,
-        }
+    pub fn frame_offset(&self) -> Word {
+        self.offset
     }
+    // invert frame offset to get stack offset
     pub fn to_ea(self, current_frame_offset: Word) -> EA {
-        match &self {
-            Self::Frame(slice) => EA::Offset(Register::SP, current_frame_offset - slice.offset),
-            Self::Register(register) => EA::Register(*register),
-            Self::Offset(register, slice) => EA::Offset(*register, slice.offset),
-        }
+        EA::Offset(Register::SP, current_frame_offset - self.offset)
     }
+    // a frame offset needs to be focused in the opposite direction of a slice,
+    // e.g. a struct field within a block will have a _lower_ frame offset
     pub fn focus(&self, focus: Slice) -> Block {
-        match &self {
-            Self::Frame(slice) => Self::Frame(slice.focus_inverse(focus)),
-            Self::Offset(register, slice) => Self::Offset(*register, slice.focus_direct(focus)),
-            _ => unimplemented!(),
+        assert!(focus.size <= self.size);
+        Self {
+            offset: self.offset - focus.offset,
+            size: focus.size,
         }
     }
 }

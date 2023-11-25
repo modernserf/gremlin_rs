@@ -50,7 +50,7 @@ impl Reference {
             0 => (Dest::Block(self.next.focus(self.focus)), None),
             deref_level => {
                 let register = memory.load_ptr_iter(self.next, deref_level);
-                let dest = Dest::Block(Block::Offset(register, self.focus));
+                let dest = Dest::Offset(register, self.focus);
                 (dest, Some(register))
             }
         }
@@ -60,7 +60,7 @@ impl Reference {
             0 => (Src::Block(self.next.focus(self.focus)), None),
             deref_level => {
                 let register = memory.load_ptr_iter(self.next, deref_level);
-                let src = Src::Block(Block::Offset(register, self.focus));
+                let src = Src::Offset(register, self.focus);
                 (src, Some(register))
             }
         }
@@ -161,7 +161,7 @@ impl Expr {
         match self.kind {
             ExprKind::Block(block) => {
                 let register = memory.load_ptr_iter(block, 1);
-                let src = Src::Block(Block::Offset(register, Slice::with_size(deref_ty.size())));
+                let src = Src::Offset(register, Slice::with_size(deref_ty.size()));
                 let out = target.mov(memory, src);
                 memory.free_register(register);
                 Ok(Self::resolved(deref_ty, out))
@@ -273,7 +273,7 @@ impl ResolvedExpr {
     pub fn void() -> Self {
         ResolvedExpr {
             ty: Ty::void(),
-            block: Block::Frame(Slice::with_size(0)),
+            block: Block::new(0, 0),
         }
     }
     pub fn to_expr(self) -> Expr {

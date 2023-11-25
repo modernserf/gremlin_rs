@@ -173,7 +173,7 @@ impl Compiler {
         // frame offset is negative for args & return slot
         let mut frame_offset = -(ty_sub.args_size() + 1);
         let return_expr = ResolvedExpr {
-            block: Block::frame(frame_offset, builder.return_type.size()),
+            block: Block::new(frame_offset, builder.return_type.size()),
             ty: builder.return_type,
         };
 
@@ -274,7 +274,7 @@ impl Compiler {
         self.module_or_sub.sub().insert(
             name,
             ScopeRecord {
-                frame_offset: block.frame_slice().expect("frame slice").offset,
+                frame_offset: block.frame_offset(),
                 ty: field.ty.clone(),
             },
         );
@@ -442,7 +442,7 @@ struct ScopeRecord {
 impl Compiler {
     pub fn get_expr(&mut self, name: &str) -> Compile<Expr> {
         if let Some(record) = self.module_or_sub.sub().get_local(name) {
-            let block = Block::frame(record.frame_offset, record.ty.size());
+            let block = Block::new(record.frame_offset, record.ty.size());
             return Ok(Expr::lvalue(record.ty.clone(), block));
         }
         if let Some(record) = self.module_scope.get(name) {
