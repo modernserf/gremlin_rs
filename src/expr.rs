@@ -9,7 +9,6 @@ use crate::{Compile, CompileError::*};
 pub struct Expr {
     pub ty: Ty,
     kind: ExprKind,
-    // ctx: ExprTarget,
 }
 
 #[derive(Debug)]
@@ -127,7 +126,7 @@ impl Expr {
     pub fn add_ref(self, memory: &mut Memory, target: ExprTarget) -> Compile<Self> {
         match self.kind {
             ExprKind::Reference { next, .. } => {
-                let out = target.write_ref(memory, next);
+                let out = target.load_address(memory, next);
                 Ok(Self::resolved(self.ty.add_ref(), out))
             }
             _ => Err(InvalidRef),
@@ -137,8 +136,7 @@ impl Expr {
         let deref_ty = self.ty.deref()?;
         match self.kind {
             ExprKind::Resolved(block) => {
-                let out =
-                    target.write_deref(memory, block, &deref_ty, Slice::with_size(deref_ty.size()));
+                let out = target.mov_deref(memory, block, Slice::with_size(deref_ty.size()));
                 Ok(Self::resolved(deref_ty, out))
             }
             ExprKind::Reference {
@@ -147,7 +145,6 @@ impl Expr {
                 focus,
             } => Ok(Self {
                 ty: deref_ty,
-                // ctx: self.ctx,
                 kind: ExprKind::Reference {
                     deref_level: deref_level + 1,
                     next,
@@ -174,7 +171,7 @@ impl Expr {
             ExprKind::Resolved(block) => op.apply(memory, ty, dest, Src::Block(block)),
             ExprKind::Constant(value) => op.apply(memory, ty, dest, Src::Immediate(value)),
             ExprKind::Cond(cond) => {
-                let block = memory.set_if(Dest::Stack(1), cond);
+                let block = memory.set_if(Dest::Stack, cond);
                 op.apply(memory, ty, dest, Src::Block(block))
             }
             ExprKind::Reference {
@@ -188,18 +185,6 @@ impl Expr {
             }
             ExprKind::Sub(_) => unreachable!(),
         }
-    }
-    pub fn bitset_field(
-        self,
-        field_name: &str,
-        memory: &mut Memory,
-        target: ExprTarget,
-    ) -> Compile<Expr> {
-        let field = self.ty.oneof_member(field_name)?.clone();
-        let block = self.resolve(memory, target).block;
-        memory.bit_test(block, Src::Immediate(field.index));
-        memory.set_if(Dest::Block(block), IRCond::NotZero);
-        Ok(Expr::resolved(Ty::bool(), block))
     }
 
     pub fn resolve_branch_cond(self, memory: &mut Memory) -> IRCond {
@@ -227,11 +212,11 @@ impl Expr {
                 ResolvedExpr { ty: self.ty, block }
             }
             ExprKind::Constant(value) => {
-                let block = target.write_const(memory, value);
+                let block = target.mov(memory, Src::Immediate(value));
                 ResolvedExpr { ty: self.ty, block }
             }
             ExprKind::Cond(cond) => {
-                let block = target.write_cond(memory, cond);
+                let block = target.set_if(memory, cond);
                 ResolvedExpr { ty: self.ty, block }
             }
             ExprKind::Reference {
@@ -240,10 +225,10 @@ impl Expr {
                 focus,
             } => {
                 if deref_level == 0 {
-                    let block = target.write_block(memory, next.focus(focus));
+                    let block = target.mov(memory, Src::Block(next.focus(focus)));
                     ResolvedExpr { ty: self.ty, block }
                 } else if deref_level == 1 {
-                    let block = target.write_deref(memory, next, &self.ty, focus);
+                    let block = target.mov_deref(memory, next, focus);
                     ResolvedExpr { ty: self.ty, block }
                 } else {
                     unimplemented!()
@@ -280,27 +265,21 @@ pub enum ExprTarget {
 }
 
 impl ExprTarget {
-    fn write_op(self, memory: &mut Memory, op: IROp, src: Src, size: Word) -> Block {
+    fn mov(self, memory: &mut Memory, src: Src) -> Block {
         match self {
-            Self::Stack => memory.write(op, Dest::Stack(size), src),
-            Self::Block(block) => memory.write(op, Dest::Block(block), src),
+            Self::Stack => memory.mov(Dest::Stack, src),
+            Self::Block(block) => memory.mov(Dest::Block(block), src),
             Self::RefBlock(ptr_block) => {
-                let (register, dest) = memory.deref_to_dest(ptr_block, size);
-                let block = memory.write(op, dest, src);
+                let (register, dest) = memory.deref_to_dest(ptr_block, src.size());
+                let block = memory.mov(dest, src);
                 memory.free_register(register);
                 block
             }
         }
     }
-    fn write_const(self, memory: &mut Memory, value: Word) -> Block {
-        self.write_op(memory, IR::Mov, Src::Immediate(value), 1)
-    }
-    fn write_block(self, memory: &mut Memory, block: Block) -> Block {
-        self.write_op(memory, IR::Mov, Src::Block(block), block.size())
-    }
-    fn write_cond(self, memory: &mut Memory, cond: IRCond) -> Block {
+    fn set_if(self, memory: &mut Memory, cond: IRCond) -> Block {
         match self {
-            Self::Stack => memory.set_if(Dest::Stack(1), cond),
+            Self::Stack => memory.set_if(Dest::Stack, cond),
             Self::Block(block) => memory.set_if(Dest::Block(block), cond),
             Self::RefBlock(ptr_block) => {
                 let (register, dest) = memory.deref_to_dest(ptr_block, 1);
@@ -310,27 +289,29 @@ impl ExprTarget {
             }
         }
     }
-    fn write_ref(self, memory: &mut Memory, block: Block) -> Block {
+    fn load_address(self, memory: &mut Memory, block: Block) -> Block {
         let src = Src::Block(block);
-        self.write_op(memory, IR::LoadAddress, src, 1)
+        match self {
+            Self::Stack => memory.load_address(Dest::Stack, src),
+            Self::Block(block) => memory.load_address(Dest::Block(block), src),
+            Self::RefBlock(ptr_block) => {
+                let (register, dest) = memory.deref_to_dest(ptr_block, 1);
+                let block = memory.load_address(dest, src);
+                memory.free_register(register);
+                block
+            }
+        }
     }
-    fn write_deref(
-        self,
-        memory: &mut Memory,
-        ptr_block: Block,
-        deref_ty: &Ty,
-        focus: Slice,
-    ) -> Block {
-        let size = deref_ty.size();
+    fn mov_deref(self, memory: &mut Memory, ptr_block: Block, focus: Slice) -> Block {
         let (register, src) = memory.deref_to_src(ptr_block, focus);
-        let block = self.write_op(memory, IR::Mov, src, size);
+        let block = self.mov(memory, src);
         memory.free_register(register);
         block
     }
     fn maybe_move_block(self, memory: &mut Memory, block: Block) -> Block {
         match self {
             Self::Stack => block,
-            _ => self.write_block(memory, block),
+            _ => self.mov(memory, Src::Block(block)),
         }
     }
 }

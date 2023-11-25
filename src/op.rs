@@ -30,6 +30,12 @@ pub enum Op {
     NotEqual,
 }
 
+#[derive(Debug)]
+pub enum OpKind {
+    Accumulate(IROp),
+    Cmp(IRCond),
+}
+
 impl Op {
     pub fn precedence(&self) -> usize {
         match self {
@@ -80,20 +86,26 @@ impl Op {
         }
     }
 
+    fn op_kind(&self) -> OpKind {
+        match self {
+            Op::Add => OpKind::Accumulate(IR::Add),
+            Op::Sub => OpKind::Accumulate(IR::Sub),
+            Op::Mul => OpKind::Accumulate(IR::Mult),
+            Op::Equal => OpKind::Cmp(IRCond::Zero),
+            Op::NotEqual => OpKind::Cmp(IRCond::NotZero),
+        }
+    }
+
     pub fn apply(&self, memory: &mut Memory, ty: Ty, left: Src, right: Src) -> Expr {
-        let block = match self {
-            Op::Add => memory.write(IR::Add, left.as_dest(), right),
-            Op::Sub => memory.write(IR::Sub, left.as_dest(), right),
-            Op::Mul => memory.write(IR::Mult, left.as_dest(), right),
-            Op::Equal => {
-                memory.write_cmp(left, right);
-                return Expr::cond(IRCond::Zero);
+        match self.op_kind() {
+            OpKind::Accumulate(ir_op) => {
+                let block = memory.accumulate(ir_op, left.as_dest(), right);
+                Expr::resolved(ty, block)
             }
-            Op::NotEqual => {
-                memory.write_cmp(left, right);
-                return Expr::cond(IRCond::NotZero);
+            OpKind::Cmp(cond) => {
+                memory.cmp(left, right);
+                Expr::cond(cond)
             }
-        };
-        Expr::resolved(ty, block)
+        }
     }
 }

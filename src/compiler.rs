@@ -499,7 +499,11 @@ impl Compiler {
         expr.deref(&mut self.memory, ExprTarget::Stack)
     }
     pub fn bitset_field(&mut self, expr: Expr, field_name: &str) -> Compile<Expr> {
-        expr.bitset_field(&field_name, &mut self.memory, ExprTarget::Stack)
+        let field = expr.ty.oneof_member(field_name)?.clone();
+        let block = self.resolve_expr(expr, ExprTarget::Stack).block;
+        self.memory.bit_test(block, Src::Immediate(field.index));
+        self.memory.set_if(Dest::Block(block), IRCond::NotZero);
+        Ok(Expr::resolved(Ty::bool(), block))
     }
 
     pub fn begin_cond(&mut self, cond: Expr) -> Compile<CondIndex> {

@@ -130,6 +130,12 @@ pub enum Src {
 }
 
 impl Src {
+    pub fn size(&self) -> Word {
+        match &self {
+            Self::Block(block) => block.size(),
+            Self::Immediate(_) => 1,
+        }
+    }
     fn to_ea(&self, current_frame_offset: Word, index: Word) -> EA {
         match &self {
             Self::Block(block) => block.to_ea(current_frame_offset, index),
@@ -164,40 +170,73 @@ impl Src {
 
 pub enum Dest {
     Block(Block),
-    Stack(Word),
+    Stack,
 }
 
 impl Memory {
-    // TODO: this really only makes sense for mov, everything else should operate on a per-word basis
-    pub fn write(&mut self, op: IROp, dest: Dest, src: Src) -> Block {
+    pub fn accumulate(&mut self, op: IROp, dest: Dest, src: Src) -> Block {
+        let ea_src = src.to_ea(self.current_frame_offset, 0);
         match dest {
-            Dest::Stack(size) => {
+            Dest::Stack => {
+                self.output.push(op(EA::PreDec(Register::SP), ea_src));
+                self.current_frame_offset += 1;
+                Block::frame(self.current_frame_offset, 1)
+            }
+            Dest::Block(block) => {
+                let ea_dest = block.to_ea(self.current_frame_offset, 0);
+                self.output.push(op(ea_dest, ea_src));
+                block
+            }
+        }
+    }
+    pub fn mov(&mut self, dest: Dest, src: Src) -> Block {
+        match dest {
+            Dest::Stack => {
+                let size = src.size();
                 if size != 1 {
                     let block = self.allocate(size);
-                    self.write_to_block(op, block, src)
+                    self.mov_inner(block, src)
                 } else {
                     let ea_src = src.to_ea(self.current_frame_offset, 0);
-                    self.output.push(op(EA::PreDec(Register::SP), ea_src));
+                    self.output.push(IR::Mov(EA::PreDec(Register::SP), ea_src));
                     self.current_frame_offset += 1;
                     Block::frame(self.current_frame_offset, 1)
                 }
             }
-            Dest::Block(block) => self.write_to_block(op, block, src),
+            Dest::Block(block) => self.mov_inner(block, src),
         }
     }
-    fn write_to_block(&mut self, op: IROp, dest: Block, src: Src) -> Block {
+    fn mov_inner(&mut self, dest: Block, src: Src) -> Block {
+        assert_eq!(dest.size(), src.size());
         for i in 0..dest.size() {
             let ea_src = src.to_ea(self.current_frame_offset, i);
             let ea_dest = dest.to_ea(self.current_frame_offset, i);
 
-            if ea_src == ea_dest && op == IR::Mov {
+            if ea_src == ea_dest {
                 continue;
             }
 
-            self.output.push(op(ea_dest, ea_src));
+            self.output.push(IR::Mov(ea_dest, ea_src));
         }
         dest
     }
+    pub fn load_address(&mut self, dest: Dest, src: Src) -> Block {
+        let ea_src = src.to_ea(self.current_frame_offset, 0);
+        match dest {
+            Dest::Stack => {
+                self.output
+                    .push(IR::LoadAddress(EA::PreDec(Register::SP), ea_src));
+                self.current_frame_offset += 1;
+                Block::frame(self.current_frame_offset, 1)
+            }
+            Dest::Block(block) => {
+                let ea_dest = block.to_ea(self.current_frame_offset, 0);
+                self.output.push(IR::LoadAddress(ea_dest, ea_src));
+                block
+            }
+        }
+    }
+
     // move a slice "up" the stack in-place
     fn shift(&mut self, stack_slice: Slice, to_shift: Word) {
         if to_shift == 0 {
@@ -276,7 +315,6 @@ pub struct WhileIndex {
 
 impl Memory {
     pub fn begin_cond(&mut self, expr: Expr) -> CondIndex {
-        // TODO: expr.cond() that sets status register
         let cond = expr.resolve_branch_cond(self);
         let index = self.output.len();
         self.output.push(IR::BranchIf(EA::Immediate(-1), cond));
@@ -412,7 +450,7 @@ impl Memory {
     }
     pub fn set_if(&mut self, dest: Dest, cond: IRCond) -> Block {
         let (ea, out) = match dest {
-            Dest::Stack(_) => (
+            Dest::Stack => (
                 EA::PreDec(Register::SP),
                 Block::frame(self.current_frame_offset + 1, 1),
             ),
@@ -427,7 +465,7 @@ impl Memory {
         self.output.push(IR::Cmp(ea, EA::Immediate(1)));
         IRCond::Zero
     }
-    pub fn write_cmp(&mut self, left: Src, right: Src) {
+    pub fn cmp(&mut self, left: Src, right: Src) {
         let right = right.to_ea(self.current_frame_offset, 0);
         let left = left.to_pop_ea(&mut self.current_frame_offset);
         self.output.push(IR::Cmp(left, right))
