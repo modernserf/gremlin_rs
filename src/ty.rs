@@ -18,6 +18,12 @@ impl Ty {
             ref_level: 0,
         }
     }
+    pub fn var(name: String) -> Self {
+        Self {
+            kind: TyKind::Var(name),
+            ref_level: 0,
+        }
+    }
     pub fn int() -> Self {
         Self {
             kind: TyKind::Int,
@@ -32,7 +38,7 @@ impl Ty {
     }
     pub fn record(data: TyRecord) -> Self {
         Self {
-            kind: TyKind::Struct(Rc::new(data)),
+            kind: TyKind::Record(Rc::new(data)),
             ref_level: 0,
         }
     }
@@ -95,12 +101,42 @@ impl Ty {
             TyKind::Void => 0,
             TyKind::Int => 1,
             TyKind::Bool => 1,
-            TyKind::Struct(s) => s.size,
+            TyKind::Record(s) => s.size,
             TyKind::OneOf(_) => 1,
             // TODO: large bitsets
             TyKind::BitSet(_) => 1,
             TyKind::Array(a) => a.ty.size() * a.capacity,
             TyKind::Sub(_) => 1,
+            TyKind::Var(_) => unimplemented!(),
+        }
+    }
+    pub fn resolve_var(self, name: &str, ty: &Ty) -> Ty {
+        match self.kind {
+            TyKind::Var(mine) => {
+                if name == mine {
+                    let mut ty = ty.clone();
+                    ty.ref_level += self.ref_level;
+                    ty
+                } else {
+                    Ty {
+                        kind: TyKind::Var(mine),
+                        ref_level: self.ref_level,
+                    }
+                }
+            }
+            TyKind::Record(fields) => Ty {
+                kind: TyKind::Record(Rc::new(fields.resolve_var(name, ty))),
+                ref_level: self.ref_level,
+            },
+            TyKind::Array(xs) => Ty {
+                kind: TyKind::Array(Rc::new(xs.resolve_var(name, ty))),
+                ref_level: self.ref_level,
+            },
+            TyKind::Sub(xs) => Ty {
+                kind: TyKind::Sub(Rc::new(xs.resolve_var(name, ty))),
+                ref_level: self.ref_level,
+            },
+            _ => self,
         }
     }
     pub fn get_sub(&self) -> Compile<Rc<TySub>> {
@@ -120,7 +156,7 @@ impl Ty {
     }
     pub fn get_record(&self) -> Compile<Rc<TyRecord>> {
         match &self.kind {
-            TyKind::Struct(fs) => Ok(fs.clone()),
+            TyKind::Record(fs) => Ok(fs.clone()),
             _ => Err(Expected("struct case")),
         }
     }
@@ -149,7 +185,8 @@ enum TyKind {
     Void,
     Int,
     Bool,
-    Struct(Rc<TyRecord>),
+    Var(String),
+    Record(Rc<TyRecord>),
     OneOf(Rc<TyOneOf>),
     BitSet(Rc<TyOneOf>),
     Array(Rc<TyArray>),
@@ -160,6 +197,11 @@ enum TyKind {
 pub struct TyOneOf {
     id: usize,
     members: HashMap<String, TyOneOfMember>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TyOneOfMember {
+    pub index: Word,
 }
 
 impl TyOneOf {
@@ -186,9 +228,19 @@ struct TyArray {
     capacity: Word,
 }
 
+impl TyArray {
+    pub fn resolve_var(&self, name: &str, ty: &Ty) -> Self {
+        Self {
+            ty: self.ty.clone().resolve_var(name, ty),
+            capacity: self.capacity,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TyRecord {
     id: usize,
+    // TODO: a record with a var does not have a fixed size
     pub size: Word,
     pub fields: HashMap<(RecordCase, String), RecordField>,
     pub cases: HashMap<String, Word>,
@@ -252,6 +304,9 @@ impl TyRecord {
     pub fn get_case(&self, k: &str) -> Compile<Word> {
         self.cases.get(k).copied().ok_or(Expected("case"))
     }
+    pub fn resolve_var(&self, name: &str, ty: &Ty) -> Self {
+        unimplemented!()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -271,11 +326,6 @@ impl RecordField {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TyOneOfMember {
-    pub index: Word,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TySub {
     pub params: Vec<Ty>,
     pub ret: Ty,
@@ -287,5 +337,49 @@ impl TySub {
     }
     pub fn args_size(&self) -> Word {
         self.params.iter().map(|p| p.size()).sum::<Word>()
+    }
+    pub fn resolve_var(&self, name: &str, ty: &Ty) -> Self {
+        Self {
+            params: self
+                .params
+                .iter()
+                .map(|p| p.clone().resolve_var(name, ty))
+                .collect(),
+            ret: self.ret.clone().resolve_var(name, ty),
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn resolve_var() {
+        let t = Ty::var("T".to_string());
+
+        // sub[T] foo(a: &T, b: Int) ...
+        let sub = Ty::sub(TySub {
+            params: vec![t.clone().add_ref(), Ty::int()],
+            ret: Ty::void(),
+        });
+
+        // T = Bool, sub = sub foo(a: &Bool, b: Int) ...
+        assert_eq!(
+            sub.clone().resolve_var("T", &Ty::bool()),
+            Ty::sub(TySub {
+                params: vec![Ty::bool().add_ref(), Ty::int()],
+                ret: Ty::void()
+            })
+        );
+
+        // T = &Bool, sub = sub foo(a: &&Bool, b: Int) ...
+        assert_eq!(
+            sub.clone().resolve_var("T", &Ty::bool().add_ref()),
+            Ty::sub(TySub {
+                params: vec![Ty::bool().add_ref().add_ref(), Ty::int()],
+                ret: Ty::void()
+            })
+        );
     }
 }
