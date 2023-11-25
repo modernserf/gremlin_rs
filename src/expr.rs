@@ -13,7 +13,7 @@ pub struct Expr {
 
 #[derive(Debug)]
 pub struct Reference {
-    // 0 = an identifier, 1 = a pointer
+    // 0 = an identifier, 1 = a pointer, 2 = a pointer to a pointer...
     pub deref_level: usize,
     // ref_level 0 = the location of the referent, 1 = the location of the pointer to the referent, etc
     pub next: Block,
@@ -22,26 +22,47 @@ pub struct Reference {
 }
 
 impl Reference {
-    // TODO: can a src/dest "own" a register
+    pub fn block(block: Block) -> Self {
+        Self {
+            deref_level: 0,
+            next: block,
+            focus: Slice::with_size(block.size()),
+        }
+    }
+    pub fn focus(self, focus: Slice) -> Self {
+        Self {
+            deref_level: self.deref_level,
+            next: self.next,
+            focus: self.focus.focus_direct(focus), // hmmm
+        }
+    }
+    pub fn inc_deref(self) -> Self {
+        Self {
+            deref_level: self.deref_level + 1,
+            next: self.next,
+            focus: self.focus,
+        }
+    }
+
+    // TODO: can a src/dest "own" a register, so that it can be automatically released after use?
     fn to_dest(self, memory: &mut Memory) -> (Dest, Option<Register>) {
         match self.deref_level {
             0 => (Dest::Block(self.next.focus(self.focus)), None),
-            1 => {
-                // TODO: how should multiple iterations of deref work?
-                let (register, dest) = memory.deref_to_dest(self.next, self.focus);
+            deref_level => {
+                let register = memory.load_ptr_iter(self.next, deref_level);
+                let dest = Dest::Block(Block::Offset(register, self.focus));
                 (dest, Some(register))
             }
-            _ => unimplemented!(),
         }
     }
     fn to_src(self, memory: &mut Memory) -> (Src, Option<Register>) {
         match self.deref_level {
             0 => (Src::Block(self.next.focus(self.focus)), None),
-            1 => {
-                let (register, src) = memory.deref_to_src(self.next, self.focus);
+            deref_level => {
+                let register = memory.load_ptr_iter(self.next, deref_level);
+                let src = Src::Block(Block::Offset(register, self.focus));
                 (src, Some(register))
             }
-            _ => unimplemented!(),
         }
     }
 }
@@ -82,11 +103,7 @@ impl Expr {
     pub fn lvalue(ty: Ty, block: Block) -> Self {
         Self {
             ty,
-            kind: ExprKind::Reference(Reference {
-                deref_level: 0,
-                focus: Slice::with_size(block.size()),
-                next: block,
-            }),
+            kind: ExprKind::Reference(Reference::block(block)),
         }
     }
     pub fn sub(ty: Ty, sub_index: SubIndex) -> Self {
@@ -120,19 +137,11 @@ impl Expr {
             ExprKind::Constant(_) => unimplemented!(),
             ExprKind::Block(block) => Ok(Self {
                 ty: field.ty.clone(),
-                kind: ExprKind::Reference(Reference {
-                    deref_level: 0,
-                    next: block,
-                    focus: field.to_slice(),
-                }),
+                kind: ExprKind::Reference(Reference::block(block).focus(field.to_slice())),
             }),
             ExprKind::Reference(r) => Ok(Self {
                 ty: field.ty.clone(),
-                kind: ExprKind::Reference(Reference {
-                    deref_level: r.deref_level,
-                    next: r.next,
-                    focus: field.to_slice(),
-                }),
+                kind: ExprKind::Reference(r.focus(field.to_slice())),
             }),
             _ => unimplemented!(),
         }
@@ -151,22 +160,15 @@ impl Expr {
         let deref_ty = self.ty.deref()?;
         match self.kind {
             ExprKind::Block(block) => {
-                let (register, src) = memory.deref_to_src(block, Slice::with_size(deref_ty.size()));
+                let register = memory.load_ptr_iter(block, 1);
+                let src = Src::Block(Block::Offset(register, Slice::with_size(deref_ty.size())));
                 let out = target.mov(memory, src);
                 memory.free_register(register);
                 Ok(Self::resolved(deref_ty, out))
             }
-            ExprKind::Reference(Reference {
-                deref_level,
-                next,
-                focus,
-            }) => Ok(Self {
+            ExprKind::Reference(r) => Ok(Self {
                 ty: deref_ty,
-                kind: ExprKind::Reference(Reference {
-                    deref_level: deref_level + 1,
-                    next,
-                    focus,
-                }),
+                kind: ExprKind::Reference(r.inc_deref()),
             }),
             _ => unreachable!(),
         }

@@ -203,27 +203,17 @@ impl Memory {
         self.compact(block, prev_frame_offset);
         self.current_frame_offset
     }
-    pub fn deref_to_dest(&mut self, ptr_block: Block, focus: Slice) -> (Register, Dest) {
-        let register = self.load_ptr(ptr_block);
-        let dest = Dest::Block(Block::Offset(register, focus));
-        (register, dest)
-    }
-    pub fn deref_iter_to_dest(&mut self, block: Block, focus: Slice, deref_count: usize) {
-        // chase a pointer through multiple iterations, then apply focus
-        // if zero iterations just return block + focus
-    }
-    pub fn deref_to_src(&mut self, ptr_block: Block, focus: Slice) -> (Register, Src) {
-        let register = self.load_ptr(ptr_block);
-        let src = Src::Block(Block::Offset(register, focus));
-        (register, src)
-    }
-    fn load_ptr(&mut self, ptr_block: Block) -> Register {
+    pub fn load_ptr_iter(&mut self, ptr_block: Block, deref_count: usize) -> Register {
         assert_eq!(ptr_block.size(), 1);
         let register = self.take_register().expect("free register");
-        self.output.push(IR::Mov(
-            EA::Register(register),
-            ptr_block.to_ea(self.current_frame_offset, 0),
-        ));
+        let mut src_ea = ptr_block.to_ea(self.current_frame_offset, 0);
+
+        // TODO: Can you actually do MOV A0 <- (A0)?
+        for _ in 0..deref_count {
+            self.output.push(IR::Mov(EA::Register(register), src_ea));
+            src_ea = EA::Register(register);
+        }
+
         register
     }
 }

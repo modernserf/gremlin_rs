@@ -58,11 +58,8 @@ impl Parser {
 
         if let Some(case_id) = case {
             let case_field = record.case_field.as_ref().ok_or(Expected("case field"))?;
-            let field_ctx = ExprTarget::Reference(Reference {
-                deref_level: 0,
-                next: block,
-                focus: case_field.to_slice(),
-            });
+            let field_ctx =
+                ExprTarget::Reference(Reference::block(block).focus(case_field.to_slice()));
             self.compiler
                 .resolve_expr(Expr::constant(Ty::int(), case_id), field_ctx);
         }
@@ -74,11 +71,7 @@ impl Parser {
             };
             self.lexer.expect_token(Token::Colon)?;
             let field = record.get(&field_name, case)?;
-            let field_ctx = ExprTarget::Reference(Reference {
-                deref_level: 0,
-                next: block,
-                focus: field.to_slice(),
-            });
+            let field_ctx = ExprTarget::Reference(Reference::block(block).focus(field.to_slice()));
             let expr = self.expect_expr()?;
             field.ty.check(&expr.ty)?;
             self.compiler.resolve_expr(expr, field_ctx);
@@ -127,11 +120,9 @@ impl Parser {
 
         let mut i = 0;
         loop {
-            let cell_ctx = ExprTarget::Reference(Reference {
-                deref_level: 0,
-                next: block,
-                focus: Slice::from_array_index(&item_ty, i),
-            });
+            let cell_ctx = ExprTarget::Reference(
+                Reference::block(block).focus(Slice::from_array_index(&item_ty, i)),
+            );
             match self.expr()? {
                 Some(p) => {
                     item_ty.check(&p.ty)?;

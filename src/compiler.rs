@@ -199,11 +199,7 @@ impl Compiler {
                 sub.check_return(&expr.ty)?;
                 expr.resolve(
                     &mut self.memory,
-                    ExprTarget::Reference(Reference {
-                        deref_level: 0,
-                        next: sub.return_expr.block,
-                        focus: Slice::with_size(sub.return_expr.block.size()),
-                    }),
+                    ExprTarget::Reference(Reference::block(sub.return_expr.block)),
                 );
             }
             None => {
@@ -536,9 +532,6 @@ impl Compiler {
     pub fn debug_stack(&mut self) {
         self.memory.debug_stack()
     }
-    // pub fn compact(&mut self, block: Block) {
-    //     self.memory.compact(block)
-    // }
     pub fn panic(&mut self) {
         self.memory.panic();
     }

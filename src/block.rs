@@ -1,7 +1,7 @@
 use crate::runtime::*;
 use crate::ty::*;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Slice {
     pub offset: Word,
     pub size: Word,
@@ -17,7 +17,15 @@ impl Slice {
             offset: item_ty.size() * index,
         }
     }
-    fn focus(&self, other: Slice) -> Self {
+    pub fn focus_direct(&self, other: Slice) -> Self {
+        Self {
+            offset: self.offset + other.offset,
+            size: other.size,
+        }
+    }
+    // a frame offset needs to be focused in the opposite direction,
+    // e.g. a struct field within a block will have a _lower_ frame offset
+    pub fn focus_inverse(&self, other: Slice) -> Self {
         assert!(other.size <= self.size);
         Self {
             offset: self.offset - other.offset,
@@ -68,7 +76,8 @@ impl Block {
     }
     pub fn focus(&self, focus: Slice) -> Block {
         match &self {
-            Self::Frame(slice) => Self::Frame(slice.focus(focus)),
+            Self::Frame(slice) => Self::Frame(slice.focus_inverse(focus)),
+            Self::Offset(register, slice) => Self::Offset(*register, slice.focus_direct(focus)),
             _ => unimplemented!(),
         }
     }
