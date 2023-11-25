@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::block::*;
 use crate::runtime::*;
 use crate::{Compile, CompileError::*};
 
@@ -258,6 +259,15 @@ pub struct RecordField {
     pub ty: Ty,
     pub offset: Word,
     pub case: Option<Word>,
+}
+
+impl RecordField {
+    pub fn to_slice(&self) -> Slice {
+        Slice {
+            offset: self.offset,
+            size: self.ty.size(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

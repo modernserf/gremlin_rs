@@ -1,3 +1,4 @@
+use crate::block::*;
 use crate::compiler::*;
 use crate::expr::*;
 use crate::lexer::*;
@@ -60,7 +61,7 @@ impl Parser {
             let field_ctx = ExprTarget::Reference(Reference {
                 deref_level: 0,
                 next: block,
-                focus: Slice::from_record_field(case_field),
+                focus: case_field.to_slice(),
             });
             self.compiler
                 .resolve_expr(Expr::constant(Ty::int(), case_id), field_ctx);
@@ -76,7 +77,7 @@ impl Parser {
             let field_ctx = ExprTarget::Reference(Reference {
                 deref_level: 0,
                 next: block,
-                focus: Slice::from_record_field(field),
+                focus: field.to_slice(),
             });
             let expr = self.expect_expr()?;
             field.ty.check(&expr.ty)?;

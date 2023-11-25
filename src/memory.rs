@@ -1,6 +1,6 @@
+use crate::block::*;
 use crate::expr::*;
 use crate::runtime::*;
-use crate::ty::*;
 
 #[derive(Debug)]
 pub struct Memory {
@@ -43,86 +43,6 @@ impl Memory {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct Slice {
-    pub offset: Word,
-    pub size: Word,
-}
-
-impl Slice {
-    pub fn with_size(size: Word) -> Self {
-        Self { offset: 0, size }
-    }
-    pub fn from_record_field(field: &RecordField) -> Self {
-        Self {
-            offset: field.offset,
-            size: field.ty.size(),
-        }
-    }
-    pub fn from_array_index(item_ty: &Ty, index: Word) -> Self {
-        Self {
-            size: item_ty.size(),
-            offset: item_ty.size() * index,
-        }
-    }
-    fn focus(&self, other: Slice) -> Self {
-        assert!(other.size <= self.size);
-        Self {
-            offset: self.offset - other.offset,
-            size: other.size,
-        }
-    }
-}
-
-// a location in memory
-#[derive(Debug, Copy, Clone)]
-pub enum Block {
-    // relative to (imaginary) frame pointer, converted to stack-relative
-    Frame(Slice),
-    Register(Register),
-    Offset(Register, Slice),
-}
-
-impl Block {
-    pub fn frame(offset: Word, size: Word) -> Self {
-        Self::Frame(Slice { offset, size })
-    }
-    pub fn size(&self) -> Word {
-        match &self {
-            Self::Frame(slice) => slice.size,
-            Self::Register(_) => 1,
-            Self::Offset(_, slice) => slice.size,
-        }
-    }
-    pub fn frame_slice(self) -> Option<Slice> {
-        match self {
-            Self::Frame(slice) => Some(slice),
-            _ => None,
-        }
-    }
-    fn to_ea(self, current_frame_offset: Word, index: Word) -> EA {
-        match &self {
-            Self::Frame(slice) => {
-                EA::Offset(Register::SP, current_frame_offset - slice.offset + index)
-            }
-            Self::Register(register) => {
-                assert_eq!(index, 0);
-                EA::Register(*register)
-            }
-            Self::Offset(register, slice) => EA::Offset(*register, slice.offset + index),
-        }
-    }
-    pub fn focus(&self, focus: Slice) -> Block {
-        match &self {
-            Self::Frame(slice) => Self::Frame(slice.focus(focus)),
-            _ => unimplemented!(),
-        }
-    }
-    pub fn record_field(&self, field: &RecordField) -> Block {
-        self.focus(Slice::from_record_field(field))
-    }
-}
-
 #[derive(Debug)]
 pub enum Src {
     Block(Block),
@@ -147,11 +67,11 @@ impl Src {
     }
     // TODO: only pop new stack values, not lvalues
     // this should probably be handled by expr
-    fn to_pop_ea(&self, current_frame_offset: &mut Word) -> EA {
+    fn to_pop_ea(&self, memory: &mut Memory) -> EA {
         match &self {
-            Self::Block(block) => match block.to_ea(*current_frame_offset, 0) {
+            Self::Block(block) => match block.to_ea(memory.current_frame_offset, 0) {
                 EA::Offset(Register::SP, 0) => {
-                    *current_frame_offset -= 1;
+                    memory.current_frame_offset -= 1;
                     EA::PostInc(Register::SP)
                 }
                 ea => ea,
@@ -466,13 +386,13 @@ impl Memory {
         out
     }
     pub fn cmp_bool(&mut self, block: Block) -> IRCond {
-        let ea = Src::Block(block).to_pop_ea(&mut self.current_frame_offset);
+        let ea = Src::Block(block).to_pop_ea(self);
         self.output.push(IR::Cmp(ea, EA::Immediate(1)));
         IRCond::Zero
     }
     pub fn cmp(&mut self, left: Src, right: Src) {
         let right = right.to_ea(self.current_frame_offset, 0);
-        let left = left.to_pop_ea(&mut self.current_frame_offset);
+        let left = left.to_pop_ea(self);
         self.output.push(IR::Cmp(left, right))
     }
 }

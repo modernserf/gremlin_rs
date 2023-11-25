@@ -1,3 +1,4 @@
+use crate::block::*;
 use crate::expr::*;
 use crate::memory::*;
 use crate::op::*;
@@ -246,7 +247,7 @@ impl Compiler {
         let res = expr.to_stack(&mut self.memory);
         let record = res.ty.get_record()?;
         let case_field = record.case_field.as_ref().ok_or(Expected("case field"))?;
-        let case_value = res.block.record_field(&case_field);
+        let case_value = res.block.focus(case_field.to_slice());
         let case_index = self.memory.begin_match(case_value, record.cases.len());
         Ok(MatchBuilder {
             record,
@@ -272,7 +273,7 @@ impl Compiler {
     }
     pub fn add_case_binding(&mut self, case: &mut MatchCaseBuilder, name: String) -> Compile<()> {
         let field = case.record.get(&name, Some(case.case_id))?;
-        let block = case.parent_block.record_field(field);
+        let block = case.parent_block.focus(field.to_slice());
 
         self.module_or_sub.sub().insert(
             name,

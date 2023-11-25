@@ -1,3 +1,4 @@
+mod block;
 mod compiler;
 mod expr;
 mod lexer;

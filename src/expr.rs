@@ -1,8 +1,8 @@
+use crate::block::*;
 use crate::memory::*;
 use crate::op::Op;
 use crate::runtime::*;
 use crate::ty::*;
-
 use crate::{Compile, CompileError::*};
 
 #[derive(Debug)]
@@ -123,7 +123,7 @@ impl Expr {
                 kind: ExprKind::Reference(Reference {
                     deref_level: 0,
                     next: block,
-                    focus: Slice::from_record_field(field),
+                    focus: field.to_slice(),
                 }),
             }),
             ExprKind::Reference(r) => Ok(Self {
@@ -131,7 +131,7 @@ impl Expr {
                 kind: ExprKind::Reference(Reference {
                     deref_level: r.deref_level,
                     next: r.next,
-                    focus: Slice::from_record_field(field),
+                    focus: field.to_slice(),
                 }),
             }),
             _ => unimplemented!(),
@@ -172,38 +172,39 @@ impl Expr {
         }
     }
     pub fn op_rhs(self, memory: &mut Memory, ty: Ty, op: Op, left: Expr) -> Expr {
-        match (&left.kind, &self.kind) {
-            (ExprKind::Constant(l), ExprKind::Constant(r)) => {
-                let value = op.inline(*l, *r);
-                return Expr::constant(ty, value);
-            }
-            _ => {}
-        };
-
         // TODO: in (a < b) | (c < d), how do we ensure that we've saved a < b to stack
         // by the time we execute c < d?
 
-        // TODO: left doesnt need to be on stack, just needs to be addressable
-        let left = left.to_stack(memory);
-        // fixme
-        let dest = Src::Block(left.block);
-        match self.kind {
-            ExprKind::Block(block) => op.apply(memory, ty, dest, Src::Block(block)),
-            ExprKind::Constant(value) => op.apply(memory, ty, dest, Src::Immediate(value)),
-            ExprKind::Cond(cond) => {
-                let block = memory.set_if(Dest::Stack, cond);
-                op.apply(memory, ty, dest, Src::Block(block))
+        match (&left.kind, self.kind) {
+            (ExprKind::Constant(l), ExprKind::Constant(r)) => {
+                let value = op.inline(*l, r);
+                Expr::constant(ty, value)
             }
-            ExprKind::Reference(Reference {
-                deref_level,
-                next,
-                focus,
-            }) => {
+            (_, ExprKind::Constant(r)) => {
+                let left = Src::Block(left.to_stack(memory).block);
+                op.apply(memory, ty, left, Src::Immediate(r))
+            }
+            (_, ExprKind::Block(r)) => {
+                // TODO: try popping left
+                let left = Src::Block(left.to_stack(memory).block);
+                op.apply(memory, ty, left, Src::Block(r))
+            }
+            (_, ExprKind::Cond(r)) => {
+                let left = Src::Block(left.to_stack(memory).block);
+                let right = Src::Block(memory.set_if(Dest::Stack, r));
+                op.apply(memory, ty, left, right)
+            }
+            (_, ExprKind::Reference(r)) => {
+                let left = Src::Block(left.to_stack(memory).block);
                 // TODO
-                assert!(deref_level == 0);
-                op.apply(memory, ty, dest, Src::Block(next.focus(focus)))
+                let (src, register) = r.to_src(memory);
+                let out = op.apply(memory, ty, left, src);
+                if let Some(register) = register {
+                    memory.free_register(register);
+                }
+                out
             }
-            ExprKind::Sub(_) => unreachable!(),
+            _ => unreachable!(),
         }
     }
 
