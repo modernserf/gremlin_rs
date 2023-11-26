@@ -1,9 +1,100 @@
+use crate::block::*;
+use crate::lexer::*;
+use crate::runtime::*;
+use crate::{Compile, CompileError::*, CompileOpt};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::block::*;
-use crate::runtime::*;
-use crate::{Compile, CompileError::*};
+pub struct TypeExprParser<'lexer, 'ty_scope> {
+    lexer: &'lexer mut Lexer,
+    ty_scope: &'ty_scope mut TyScope,
+}
+
+impl<'lexer, 'ty_scope> TypeExprParser<'lexer, 'ty_scope> {
+    pub fn new(lexer: &'lexer mut Lexer, ty_scope: &'ty_scope mut TyScope) -> Self {
+        Self { lexer, ty_scope }
+    }
+
+    fn record_items(&mut self, fields: &mut TyRecord, case: Option<Word>) -> Compile<()> {
+        self.lexer.expect_token(Token::CurlyLeft)?;
+        loop {
+            if self.lexer.token(Token::Case)?.is_some() {
+                let case_name = self
+                    .lexer
+                    .type_ident_token()?
+                    .ok_or(Expected("case identifier"))?;
+
+                let case_id = fields.insert_case(case_name)?;
+                self.record_items(fields, Some(case_id))?;
+                self.lexer.token(Token::Comma)?;
+                continue;
+            }
+
+            let key = match self.lexer.ident_token()? {
+                Some(s) => s,
+                None => break,
+            };
+            self.lexer.expect_token(Token::Colon)?;
+            let ty = self.expect_type_expr()?;
+            fields.insert(key, ty, case)?;
+
+            if self.lexer.token(Token::Comma)?.is_none() {
+                break;
+            }
+        }
+        self.lexer.expect_token(Token::CurlyRight)?;
+        Ok(())
+    }
+
+    fn record_ty(&mut self) -> Compile<Ty> {
+        let mut fields = TyRecord::new(self.ty_scope.new_type_id());
+        self.record_items(&mut fields, None)?;
+        Ok(Ty::record(fields))
+    }
+
+    fn oneof_ty(&mut self) -> Compile<Ty> {
+        let mut data = TyOneOf::new(self.ty_scope.new_type_id());
+        self.lexer.expect_token(Token::CurlyLeft)?;
+        let mut i = 0;
+        while let Some(key) = self.lexer.type_ident_token()? {
+            // TODO: allow setting numeric values for oneof members
+            // `oneof {Jan := 1, Feb, Mar, Apr}`
+            // enforce that numbers are increasing order
+
+            data.insert(key, i)?;
+            i += 1;
+
+            if self.lexer.token(Token::Comma)?.is_none() {
+                break;
+            }
+        }
+        self.lexer.expect_token(Token::CurlyRight)?;
+
+        Ok(Ty::oneof(data))
+    }
+
+    pub fn type_expr(&mut self) -> CompileOpt<Ty> {
+        match self.lexer.peek()? {
+            Token::TypeIdentifier(ident) => {
+                self.lexer.advance();
+                self.ty_scope.get(&ident).map(Some)
+            }
+            Token::Record => {
+                self.lexer.advance();
+                self.record_ty().map(Some)
+            }
+            Token::OneOf => {
+                self.lexer.advance();
+                self.oneof_ty().map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub fn expect_type_expr(&mut self) -> Compile<Ty> {
+        self.type_expr()?.ok_or(Expected("type expr"))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ty {

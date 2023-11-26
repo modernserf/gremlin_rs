@@ -1,9 +1,326 @@
 use crate::block::*;
+use crate::lexer::*;
 use crate::memory::*;
 use crate::op::Op;
 use crate::runtime::*;
+use crate::stmt::*;
 use crate::ty::*;
-use crate::{Compile, CompileError::*};
+use crate::{Compile, CompileError::*, CompileOpt};
+
+pub struct ExprParser<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope> {
+    lexer: &'lexer mut Lexer,
+    compiler: &'compiler mut StmtCompiler<'memory, 'module_scope>,
+    ty_scope: &'ty_scope mut TyScope,
+}
+
+impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
+    ExprParser<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
+{
+    pub fn new(
+        lexer: &'lexer mut Lexer,
+        compiler: &'compiler mut StmtCompiler<'memory, 'module_scope>,
+        ty_scope: &'ty_scope mut TyScope,
+    ) -> Self {
+        Self {
+            lexer,
+            compiler,
+            ty_scope,
+        }
+    }
+
+    fn expect_type_expr(&mut self) -> Compile<Ty> {
+        let mut p = TypeExprParser::new(self.lexer, self.ty_scope);
+        let ty = p.expect_type_expr()?;
+        Ok(ty)
+    }
+
+    fn bitset_expr(&mut self, ty: Ty) -> Compile<Expr> {
+        let mut value = 0;
+        while let Some(key) = self.lexer.type_ident_token()? {
+            let field = ty.oneof_member(&key)?;
+            // TODO: check for dupes
+            value |= 1 << field.index;
+
+            if self.lexer.token(Token::Comma)?.is_none() {
+                break;
+            }
+        }
+        Ok(Expr::constant(ty.into_bitset()?, value))
+    }
+
+    fn record_expr(&mut self, ty: Ty, case: Option<Word>) -> Compile<Expr> {
+        let block = self.compiler.allocate(&ty);
+        let record = ty.get_record()?;
+
+        if let Some(case_id) = case {
+            let case_field = record.case_field.as_ref().ok_or(Expected("case field"))?;
+            let field_ctx =
+                ExprTarget::Reference(Reference::block(block).focus(case_field.to_slice()));
+            self.compiler
+                .resolve_expr(Expr::constant(Ty::int(), case_id), field_ctx);
+        }
+
+        while let Some(field_name) = self.lexer.ident_token()? {
+            self.lexer.expect_token(Token::Colon)?;
+            let field = record.get(&field_name, case)?;
+            let field_ctx = ExprTarget::Reference(Reference::block(block).focus(field.to_slice()));
+            let expr = self.expect_expr()?;
+            field.ty.check(&expr.ty)?;
+            self.compiler.resolve_expr(expr, field_ctx);
+
+            if self.lexer.token(Token::Comma)?.is_none() {
+                break;
+            }
+        }
+        Ok(Expr::resolved(ty, block))
+    }
+
+    fn oneof_member_expr(&mut self, name: &str) -> Compile<Expr> {
+        let ty = self.ty_scope.get(name)?;
+
+        self.lexer.expect_token(Token::Dot)?;
+        let key = self
+            .lexer
+            .type_ident_token()?
+            .ok_or(Expected("type identifier"))?;
+
+        match self.lexer.peek()? {
+            Token::CurlyLeft => {
+                self.lexer.advance();
+                let case = ty.get_record()?.get_case(&key)?;
+                let out = self.record_expr(ty, Some(case))?;
+                self.lexer.expect_token(Token::CurlyRight)?;
+                Ok(out)
+            }
+            _ => {
+                let member = ty.oneof_member(&key)?;
+                Ok(Expr::constant(ty.clone(), member.index))
+            }
+        }
+    }
+
+    fn array_expr(&mut self) -> Compile<Expr> {
+        self.lexer.expect_token(Token::SqLeft)?;
+        let item_ty = self.expect_type_expr()?;
+        self.lexer.expect_token(Token::Colon)?;
+        let capacity = self.lexer.int_token()?.ok_or(Expected("array size"))?;
+        self.lexer.expect_token(Token::SqRight)?;
+        self.lexer.expect_token(Token::CurlyLeft)?;
+
+        let ty = Ty::array(item_ty.clone(), capacity);
+        let block = self.compiler.allocate(&ty);
+
+        let mut i = 0;
+        loop {
+            let cell_ctx = ExprTarget::Reference(
+                Reference::block(block).focus(Slice::from_array_index(&item_ty, i)),
+            );
+            match self.expr()? {
+                Some(p) => {
+                    item_ty.check(&p.ty)?;
+                    self.compiler.resolve_expr(p, cell_ctx);
+                }
+                None => break,
+            };
+            i += 1;
+
+            if self.lexer.token(Token::Comma)?.is_none() {
+                break;
+            };
+        }
+        if capacity != i {
+            return Err(Expected("array count"));
+        }
+
+        self.lexer.expect_token(Token::CurlyRight)?;
+        Ok(Expr::resolved(ty, block))
+    }
+
+    fn base_expr(&mut self) -> CompileOpt<Expr> {
+        let res = match self.lexer.peek()? {
+            Token::ParLeft => {
+                self.lexer.advance();
+                let expr = self.expect_expr()?;
+                self.lexer.expect_token(Token::ParRight)?;
+                expr
+            }
+            Token::TypeIdentifier(name) => {
+                self.lexer.advance();
+                match self.lexer.peek()? {
+                    Token::Dot => self.oneof_member_expr(&name)?,
+                    Token::CurlyLeft => {
+                        self.lexer.advance();
+                        let ty = self.ty_scope.get(&name)?;
+                        let out = match self.lexer.peek()? {
+                            Token::TypeIdentifier(_) => self.bitset_expr(ty)?,
+                            Token::Identifier(_) => self.record_expr(ty, None)?,
+                            _ => unimplemented!(),
+                        };
+                        self.lexer.expect_token(Token::CurlyRight)?;
+                        out
+                    }
+                    _ => return Err(Expected("struct or bitset")),
+                }
+            }
+            Token::Array => {
+                self.lexer.advance();
+                self.array_expr()?
+            }
+            Token::Integer(int) => {
+                self.lexer.advance();
+                Expr::constant(Ty::int(), int)
+            }
+            Token::True => {
+                self.lexer.advance();
+                Expr::constant(Ty::bool(), 1)
+            }
+            Token::False => {
+                self.lexer.advance();
+                Expr::constant(Ty::bool(), 0)
+            }
+            Token::Identifier(name) => {
+                self.lexer.advance();
+                self.compiler.get_expr(&name)?
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(res))
+    }
+
+    fn array_index(&mut self, array: Expr) -> Compile<Expr> {
+        let item_ty = array.ty.index_ty(&Ty::int())?.clone();
+        let array_ptr = self.compiler.array_ptr(array, &item_ty)?;
+        let idx = self.expect_expr()?;
+        self.compiler
+            .add_index_to_array_ptr(array_ptr, idx, &item_ty)
+    }
+
+    fn postfix_expr(&mut self) -> CompileOpt<Expr> {
+        let mut left = match self.base_expr()? {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+        loop {
+            match self.lexer.peek()? {
+                Token::SqLeft => {
+                    self.lexer.advance();
+                    if self.lexer.token(Token::SqRight)?.is_some() {
+                        left = self.compiler.deref_expr(left)?
+                    } else {
+                        left = self.array_index(left)?;
+                        self.lexer.expect_token(Token::SqRight)?;
+                    }
+                }
+                Token::Dot => {
+                    self.lexer.advance();
+                    left = match self.lexer.peek()? {
+                        Token::Identifier(field_name) => {
+                            self.lexer.advance();
+                            left.record_field(&field_name)?
+                        }
+                        Token::TypeIdentifier(field_name) => {
+                            self.lexer.advance();
+                            self.compiler.bitset_field(left, &field_name)?
+                        }
+                        _ => return Err(Expected("field")),
+                    }
+                }
+                Token::ParLeft => {
+                    self.lexer.advance();
+                    let mut builder = self.compiler.begin_call(left)?;
+                    loop {
+                        match self.expr()? {
+                            Some(expr) => {
+                                self.compiler.call_arg(&mut builder, expr)?;
+                            }
+                            None => break,
+                        };
+                        if self.lexer.token(Token::Comma)?.is_none() {
+                            break;
+                        }
+                    }
+                    self.lexer.expect_token(Token::ParRight)?;
+                    left = self.compiler.end_call(builder)?;
+                }
+                _ => return Ok(Some(left)),
+            };
+        }
+    }
+
+    fn unary_op_expr(&mut self) -> CompileOpt<Expr> {
+        let out = match self.lexer.peek()? {
+            Token::Minus => {
+                self.lexer.advance();
+                let expr = self.expect_unary_op_expr()?;
+                self.compiler.negate_expr(expr)?
+            }
+            Token::Ampersand => {
+                self.lexer.advance();
+                let expr = self.expect_unary_op_expr()?;
+                self.compiler.add_ref_expr(expr)?
+            }
+            Token::Volatile => {
+                self.lexer.advance();
+                let operand = self.expect_unary_op_expr()?;
+                self.compiler.resolve_stack(operand).into_expr()
+            }
+            _ => return self.postfix_expr(),
+        };
+        Ok(Some(out))
+    }
+
+    fn expect_unary_op_expr(&mut self) -> Compile<Expr> {
+        self.unary_op_expr()?.ok_or(Expected("expr"))
+    }
+
+    fn op_expr(&mut self) -> CompileOpt<Expr> {
+        let left = match self.unary_op_expr()? {
+            Some(expr) => expr,
+            None => return Ok(None),
+        };
+        let mut op_expr = self.compiler.op_begin(left);
+
+        while let Some(op) = self.lexer.op()? {
+            self.compiler.op_next(&mut op_expr, op)?;
+            let right = self.expect_unary_op_expr()?;
+            self.compiler.op_push(&mut op_expr, right);
+        }
+        self.compiler.op_end(op_expr).map(Some)
+    }
+
+    fn assign_expr(&mut self) -> CompileOpt<Expr> {
+        let left = match self.op_expr()? {
+            Some(x) => x,
+            None => return Ok(None),
+        };
+        if self.lexer.token(Token::ColonEq)?.is_none() {
+            return Ok(Some(left));
+        }
+        let expr = self.op_expr()?.ok_or(Expected("expr"))?;
+        self.compiler.resolve_expr(expr, left.assign_ctx()?);
+        Ok(Some(ResolvedExpr::void().into_expr()))
+    }
+
+    fn as_expr(&mut self) -> CompileOpt<Expr> {
+        let value = match self.assign_expr()? {
+            Some(x) => x,
+            None => return Ok(None),
+        };
+        if self.lexer.token(Token::As)?.is_none() {
+            return Ok(Some(value));
+        }
+        let ty = self.expect_type_expr()?;
+        Ok(Some(value.cast_ty(ty)?))
+    }
+
+    pub fn expr(&mut self) -> CompileOpt<Expr> {
+        self.as_expr()
+    }
+
+    fn expect_expr(&mut self) -> Compile<Expr> {
+        self.expr()?.ok_or(Expected("expr"))
+    }
+}
 
 #[derive(Debug)]
 pub struct Expr {

@@ -1,102 +1,254 @@
 use crate::block::*;
 use crate::expr::*;
+use crate::lexer::*;
 use crate::memory::*;
+use crate::module::*;
 use crate::op::*;
 use crate::runtime::*;
 use crate::ty::*;
-use crate::{Compile, CompileError::*};
+use crate::{Compile, CompileError::*, CompileOpt};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-pub struct ModuleCompiler {
-    memory: Memory,
-    module_scope: HashMap<String, ModuleRecord>,
+pub struct StmtParser<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope> {
+    lexer: &'lexer mut Lexer,
+    pub compiler: &'compiler mut StmtCompiler<'memory, 'module_scope>,
+    ty_scope: &'ty_scope mut TyScope,
 }
 
-pub struct ModuleRecord {
-    ty: Ty,
-    sub_index: SubIndex,
-}
-
-impl ModuleCompiler {
-    pub fn init() -> Self {
+impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
+    StmtParser<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
+{
+    pub fn new(
+        lexer: &'lexer mut Lexer,
+        compiler: &'compiler mut StmtCompiler<'memory, 'module_scope>,
+        ty_scope: &'ty_scope mut TyScope,
+    ) -> Self {
         Self {
-            module_scope: HashMap::new(),
-            memory: Memory::new(),
+            lexer,
+            compiler,
+            ty_scope,
         }
     }
-    pub fn resolve(self) -> Compile<CompileResult> {
-        let entry_point = self
-            .module_scope
-            .get("main")
-            .ok_or(Expected("main"))?
-            .sub_index;
-        Ok(self.memory.done_program(entry_point))
-    }
-    pub fn script_scope(&mut self) -> StmtCompiler {
-        StmtCompiler::from_module(
-            &mut self.memory,
-            &mut self.module_scope,
-            ResolvedExpr::void(),
-        )
-    }
-}
 
-pub struct SubBuilder {
-    name: String,
-    params: Vec<(String, Ty)>,
-    return_type: Ty,
-}
-
-impl SubBuilder {
-    pub fn new(name: String) -> Self {
-        Self {
-            name,
-            params: Vec::new(),
-            return_type: Ty::void(),
+    pub fn block(&mut self) -> Compile<()> {
+        loop {
+            if self.stmt()?.is_none() {
+                return Ok(());
+            }
         }
     }
-    pub fn add_param(&mut self, name: String, ty: Ty) {
-        self.params.push((name, ty));
-    }
-    pub fn returns(&mut self, ty: Ty) {
-        self.return_type = ty;
-    }
-}
 
-impl ModuleCompiler {
-    pub fn begin_sub(&mut self, builder: SubBuilder) -> StmtCompiler {
-        let params = builder.params.iter().map(|(_, ty)| ty.clone()).collect();
-        let ty_sub = TySub::new(params, builder.return_type.clone());
-        // frame offset is negative for args & return slot
-        let mut frame_offset = -(ty_sub.args_size() + 1);
-        let return_expr = ResolvedExpr {
-            block: Block::new(frame_offset, builder.return_type.size()),
-            ty: builder.return_type,
+    fn expr(&mut self) -> CompileOpt<Expr> {
+        let mut expr_parser = ExprParser::new(self.lexer, self.compiler, self.ty_scope);
+        let expr = expr_parser.expr()?;
+        Ok(expr)
+    }
+
+    fn expect_expr(&mut self) -> Compile<Expr> {
+        self.expr()?.ok_or(Expected("expr"))
+    }
+
+    // ### Bindings, TypeExprs, etc.
+
+    fn binding(&mut self) -> CompileOpt<String> {
+        self.lexer.ident_token()
+    }
+
+    fn type_expr(&mut self) -> CompileOpt<Ty> {
+        let mut p = TypeExprParser::new(self.lexer, self.ty_scope);
+        let ty = p.type_expr()?;
+        Ok(ty)
+    }
+
+    fn expect_type_expr(&mut self) -> Compile<Ty> {
+        self.type_expr()?.ok_or(Expected("type expr"))
+    }
+
+    // ### Statements
+
+    fn type_binding(&mut self) -> CompileOpt<String> {
+        self.lexer.type_ident_token()
+    }
+
+    // TODO: remove statement-level typedefs?
+    fn type_def_stmt(&mut self) -> Compile<()> {
+        let tb = self.type_binding()?.ok_or(Expected("type binding"))?;
+        self.lexer.expect_token(Token::ColonEq)?;
+        let te = self.expect_type_expr()?;
+        self.ty_scope.assign(tb, te);
+        self.lexer.expect_token(Token::Semicolon)?;
+        Ok(())
+    }
+
+    fn if_cond(&mut self) -> Compile<CondIndex> {
+        let expr = self.expect_expr()?;
+        self.compiler.begin_cond(expr)
+    }
+
+    // TODO: if as expr
+    fn if_stmt(&mut self) -> Compile<()> {
+        let mut elses = Vec::new();
+        let mut if_rec = self.if_cond()?;
+        self.lexer.expect_token(Token::Then)?;
+        self.compiler.push_scope();
+        self.block()?;
+        self.compiler.pop_scope();
+        loop {
+            if self.lexer.token(Token::Else)?.is_none() {
+                break;
+            }
+
+            if self.lexer.token(Token::If)?.is_some() {
+                elses.push(self.compiler.begin_else(if_rec));
+                if_rec = self.if_cond()?;
+                self.lexer.expect_token(Token::Then)?;
+                self.compiler.push_scope();
+                self.block()?;
+                self.compiler.pop_scope();
+            } else {
+                if_rec = self.compiler.begin_else(if_rec);
+                self.compiler.push_scope();
+                self.block()?;
+                self.compiler.pop_scope();
+                break;
+            }
+        }
+        self.lexer.expect_token(Token::End)?;
+        self.compiler.end_if(if_rec);
+        for rec in elses {
+            self.compiler.end_if(rec);
+        }
+        Ok(())
+    }
+
+    // TODO: expand into generalized struct destructuring
+    fn match_bindings(&mut self, case: &mut MatchCaseBuilder) -> Compile<()> {
+        if self.lexer.token(Token::CurlyLeft)?.is_none() {
+            return Ok(());
+        }
+        while let Some(binding) = self.lexer.ident_token()? {
+            self.compiler.add_case_binding(case, binding)?;
+            if self.lexer.token(Token::Comma)?.is_none() {
+                break;
+            }
+        }
+        self.lexer.expect_token(Token::CurlyRight)?;
+        self.lexer.expect_token(Token::Colon)?;
+        Ok(())
+    }
+
+    fn match_stmt(&mut self) -> Compile<()> {
+        let target = self.expect_expr()?;
+        self.lexer.expect_token(Token::Then)?;
+        let mut match_builder = self.compiler.begin_match(target)?;
+
+        loop {
+            if self.lexer.token(Token::Case)?.is_none() {
+                break;
+            }
+            let tag = self
+                .lexer
+                .type_ident_token()?
+                .ok_or(Expected("match case"))?;
+            let mut case = self.compiler.begin_match_case(&mut match_builder, &tag)?;
+            self.compiler.push_scope();
+            self.match_bindings(&mut case)?;
+            self.block()?;
+            self.compiler.pop_scope();
+            self.compiler.end_match_case(&mut match_builder);
+        }
+        self.lexer.expect_token(Token::End)?;
+        self.compiler.end_match(match_builder);
+        Ok(())
+    }
+
+    fn while_stmt(&mut self) -> Compile<()> {
+        let while_idx = self.compiler.begin_while();
+        let cond = self.if_cond()?;
+        self.lexer.expect_token(Token::Loop)?;
+        self.compiler.push_scope();
+        self.block()?;
+        self.compiler.pop_scope();
+        self.lexer.expect_token(Token::End)?;
+        self.compiler.end_while(while_idx, cond);
+        Ok(())
+    }
+
+    fn let_stmt(&mut self) -> Compile<()> {
+        let binding = self.binding()?.ok_or(Expected("binding"))?;
+        let bind_ty = if self.lexer.token(Token::Colon)?.is_some() {
+            let ty = self.expect_type_expr()?;
+            Some(ty)
+        } else {
+            None
         };
+        self.lexer.expect_token(Token::ColonEq)?;
 
-        let ty = Ty::sub(ty_sub);
-        let sub_index = self.memory.sub();
-        self.module_scope
-            .insert(builder.name, ModuleRecord { ty, sub_index });
-
-        let mut stmt_compiler =
-            StmtCompiler::from_module(&mut self.memory, &mut self.module_scope, return_expr);
-
-        for (key, ty) in builder.params {
-            frame_offset += ty.size();
-            stmt_compiler.insert_scope_record(key, ScopeRecord { frame_offset, ty });
+        let frame_offset = self.compiler.begin_compact();
+        let expr = self.expect_expr()?;
+        let resolved = self.compiler.resolve_stack(expr);
+        if let Some(b) = bind_ty {
+            b.check(&resolved.ty)?;
         }
-
-        debug_assert!(frame_offset == -1);
-        stmt_compiler
+        self.compiler.assign_expr(binding, resolved, frame_offset);
+        self.lexer.expect_token(Token::Semicolon)?;
+        Ok(())
     }
-    pub fn done(self) -> Vec<IR> {
-        self.memory.done()
+    fn stmt(&mut self) -> CompileOpt<()> {
+        match self.lexer.peek()? {
+            Token::Let => {
+                self.lexer.advance();
+                self.let_stmt()?;
+            }
+            Token::Type => {
+                self.lexer.advance();
+                self.type_def_stmt()?;
+            }
+            Token::If => {
+                self.lexer.advance();
+                self.if_stmt()?;
+            }
+            Token::Match => {
+                self.lexer.advance();
+                self.match_stmt()?;
+            }
+            Token::While => {
+                self.lexer.advance();
+                self.while_stmt()?;
+            }
+            Token::Debug => {
+                self.lexer.advance();
+                self.compiler.debug_stack();
+                self.lexer.expect_token(Token::Semicolon)?;
+            }
+            Token::Return => {
+                self.lexer.advance();
+                let maybe_expr = self.expr()?;
+                self.compiler.return_sub(maybe_expr)?;
+                self.lexer.expect_token(Token::Semicolon)?;
+            }
+            Token::Panic => {
+                self.lexer.advance();
+                self.compiler.panic();
+                self.lexer.expect_token(Token::Semicolon)?;
+            }
+
+            _ => {
+                let state = self.compiler.begin_compact();
+                match self.expr()? {
+                    Some(expr) => {
+                        let res = self.compiler.resolve_stack(expr);
+                        self.compiler.end_compact(state, res);
+                        self.lexer.expect_token(Token::Semicolon)?;
+                    }
+                    None => return Ok(None),
+                };
+            }
+        };
+        Ok(Some(()))
     }
 }
-
-// Stmt side
 
 pub struct StmtCompiler<'memory, 'module_scope> {
     memory: &'memory mut Memory,
@@ -141,7 +293,7 @@ impl<'memory, 'module_scope> StmtCompiler<'memory, 'module_scope> {
         }
         None
     }
-    fn insert_scope_record(&mut self, key: String, value: ScopeRecord) {
+    pub fn insert_scope_record(&mut self, key: String, value: ScopeRecord) {
         let len = self.scope.len();
         self.scope[len - 1].scope.insert(key, value);
     }
@@ -168,7 +320,7 @@ pub struct CallBuilder {
     current_arg: usize,
 }
 
-impl<'a, 'b> StmtCompiler<'a, 'b> {
+impl StmtCompiler<'_, '_> {
     pub fn begin_call(&mut self, callee: Expr) -> Compile<CallBuilder> {
         let sub_index = callee.sub_index()?;
         let ty_sub = callee.ty.get_sub()?;
@@ -203,7 +355,7 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
     }
 }
 
-impl<'a, 'b> StmtCompiler<'a, 'b> {
+impl StmtCompiler<'_, '_> {
     pub fn return_sub(&mut self, expr: Option<Expr>) -> Compile<()> {
         match expr {
             Some(expr) => {
@@ -252,7 +404,7 @@ pub struct MatchCaseBuilder {
     parent_block: Block,
 }
 
-impl<'a, 'b> StmtCompiler<'a, 'b> {
+impl StmtCompiler<'_, '_> {
     pub fn begin_match(&mut self, expr: Expr) -> Compile<MatchBuilder> {
         let res = expr.resolve_to_stack(self.memory);
         let record = res.ty.get_record()?;
@@ -313,14 +465,15 @@ pub struct OpExpr {
     operands: Vec<Expr>,
 }
 
-impl<'a, 'b> StmtCompiler<'a, 'b> {
+impl StmtCompiler<'_, '_> {
     pub fn op_begin(&mut self, left: Expr) -> OpExpr {
         OpExpr {
             op_stack: Vec::new(),
             operands: vec![left],
         }
     }
-    pub fn op_next(&mut self, op_expr: &mut OpExpr, op: Op, expr: Expr) -> Compile<()> {
+    // TODO: somewhere here need to
+    pub fn op_next(&mut self, op_expr: &mut OpExpr, op: Op) -> Compile<()> {
         match op_expr.op_stack.pop() {
             Some(last_op) => {
                 if last_op.precedence() > op.precedence() {
@@ -335,9 +488,13 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
                 op_expr.op_stack.push(op);
             }
         };
-        op_expr.operands.push(expr);
         Ok(())
     }
+
+    pub fn op_push(&mut self, op_expr: &mut OpExpr, expr: Expr) {
+        op_expr.operands.push(expr);
+    }
+
     pub fn op_end(&mut self, mut op_expr: OpExpr) -> Compile<Expr> {
         while let Some(op) = op_expr.op_stack.pop() {
             self.op_apply(&mut op_expr, op)?;
@@ -380,12 +537,12 @@ impl ScopeFrame {
 }
 
 #[derive(Debug)]
-struct ScopeRecord {
-    frame_offset: Word,
-    ty: Ty,
+pub struct ScopeRecord {
+    pub frame_offset: Word,
+    pub ty: Ty,
 }
 
-impl<'a, 'b> StmtCompiler<'a, 'b> {
+impl StmtCompiler<'_, '_> {
     pub fn get_expr(&mut self, name: &str) -> Compile<Expr> {
         if let Some(record) = self.get_local(name) {
             let block = Block::new(record.frame_offset, record.ty.size());
@@ -475,7 +632,7 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
     }
 }
 
-impl<'a, 'b> StmtCompiler<'a, 'b> {
+impl StmtCompiler<'_, '_> {
     pub fn begin_compact(&mut self) -> Word {
         self.memory.current_frame_offset
     }

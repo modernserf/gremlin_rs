@@ -1,16 +1,16 @@
 mod block;
-mod compiler;
 mod expr;
 mod lexer;
 mod memory;
+mod module;
 mod op;
-mod parser;
 mod runtime;
+mod stmt;
 mod ty;
 
 use crate::lexer::*;
+use crate::module::*;
 use crate::op::*;
-use crate::parser::*;
 use crate::runtime::*;
 use crate::ty::*;
 
