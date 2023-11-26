@@ -7,18 +7,29 @@ use crate::runtime::*;
 use crate::ty::*;
 use crate::{Compile, CompileError::*, CompileOpt};
 
-pub struct ExprParser<'a, 'b> {
-    lexer: &'a mut Lexer,
-    compiler: &'b mut Compiler,
+pub struct ExprParser<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope> {
+    lexer: &'lexer mut Lexer,
+    compiler: &'compiler mut StmtCompiler<'memory, 'module_scope>,
+    ty_scope: &'ty_scope mut TyScope,
 }
 
-impl<'a, 'b> ExprParser<'a, 'b> {
-    fn new(lexer: &'a mut Lexer, compiler: &'b mut Compiler) -> Self {
-        Self { lexer, compiler }
+impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
+    ExprParser<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
+{
+    fn new(
+        lexer: &'lexer mut Lexer,
+        compiler: &'compiler mut StmtCompiler<'memory, 'module_scope>,
+        ty_scope: &'ty_scope mut TyScope,
+    ) -> Self {
+        Self {
+            lexer,
+            compiler,
+            ty_scope,
+        }
     }
 
     fn expect_type_expr(&mut self) -> Compile<Ty> {
-        let mut p = TypeExprParser::new(&mut self.lexer, &mut self.compiler);
+        let mut p = TypeExprParser::new(&mut self.lexer, &mut self.ty_scope);
         let ty = p.expect_type_expr()?;
         Ok(ty)
     }
@@ -73,7 +84,7 @@ impl<'a, 'b> ExprParser<'a, 'b> {
     }
 
     fn oneof_member_expr(&mut self, name: &str) -> Compile<Expr> {
-        let ty = self.compiler.get_ty(name)?;
+        let ty = self.ty_scope.get(name)?;
 
         self.lexer.expect_token(Token::Dot)?;
         let key = self
@@ -147,7 +158,7 @@ impl<'a, 'b> ExprParser<'a, 'b> {
                     Token::Dot => self.oneof_member_expr(&name)?,
                     Token::CurlyLeft => {
                         self.lexer.advance();
-                        let ty = self.compiler.get_ty(&name)?;
+                        let ty = self.ty_scope.get(&name)?;
                         let out = match self.lexer.peek()? {
                             Token::TypeIdentifier(_) => self.bitset_expr(ty)?,
                             Token::Identifier(_) => self.record_expr(ty, None)?,
@@ -323,14 +334,14 @@ impl<'a, 'b> ExprParser<'a, 'b> {
     }
 }
 
-pub struct TypeExprParser<'a, 'b> {
-    lexer: &'a mut Lexer,
-    compiler: &'b mut Compiler,
+pub struct TypeExprParser<'lexer, 'ty_scope> {
+    lexer: &'lexer mut Lexer,
+    ty_scope: &'ty_scope mut TyScope,
 }
 
-impl<'a, 'b> TypeExprParser<'a, 'b> {
-    fn new(lexer: &'a mut Lexer, compiler: &'b mut Compiler) -> Self {
-        Self { lexer, compiler }
+impl<'lexer, 'ty_scope> TypeExprParser<'lexer, 'ty_scope> {
+    fn new(lexer: &'lexer mut Lexer, ty_scope: &'ty_scope mut TyScope) -> Self {
+        Self { lexer, ty_scope }
     }
 
     fn record_items(&mut self, fields: &mut TyRecord, case: Option<Word>) -> Compile<()> {
@@ -365,13 +376,13 @@ impl<'a, 'b> TypeExprParser<'a, 'b> {
     }
 
     fn record_ty(&mut self) -> Compile<Ty> {
-        let mut fields = self.compiler.new_record_ty();
+        let mut fields = TyRecord::new(self.ty_scope.new_type_id());
         self.record_items(&mut fields, None)?;
         Ok(Ty::record(fields))
     }
 
     fn oneof_ty(&mut self) -> Compile<Ty> {
-        let mut data = self.compiler.new_oneof_ty();
+        let mut data = TyOneOf::new(self.ty_scope.new_type_id());
         self.lexer.expect_token(Token::CurlyLeft)?;
         let mut i = 0;
         loop {
@@ -400,7 +411,7 @@ impl<'a, 'b> TypeExprParser<'a, 'b> {
         match self.lexer.peek()? {
             Token::TypeIdentifier(ident) => {
                 self.lexer.advance();
-                self.compiler.get_ty(&ident).map(Some)
+                self.ty_scope.get(&ident).map(Some)
             }
             Token::Record => {
                 self.lexer.advance();
@@ -419,18 +430,29 @@ impl<'a, 'b> TypeExprParser<'a, 'b> {
     }
 }
 
-pub struct StmtParser<'a, 'b> {
-    lexer: &'a mut Lexer,
-    compiler: &'b mut Compiler,
+pub struct StmtParser<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope> {
+    lexer: &'lexer mut Lexer,
+    compiler: &'compiler mut StmtCompiler<'memory, 'module_scope>,
+    ty_scope: &'ty_scope mut TyScope,
 }
 
-impl<'a, 'b> StmtParser<'a, 'b> {
-    fn new(lexer: &'a mut Lexer, compiler: &'b mut Compiler) -> Self {
-        Self { lexer, compiler }
+impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
+    StmtParser<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
+{
+    fn new(
+        lexer: &'lexer mut Lexer,
+        compiler: &'compiler mut StmtCompiler<'memory, 'module_scope>,
+        ty_scope: &'ty_scope mut TyScope,
+    ) -> Self {
+        Self {
+            lexer,
+            compiler,
+            ty_scope,
+        }
     }
 
-    fn expr(&mut self) -> CompileOpt<Expr> {
-        let mut expr_parser = ExprParser::new(&mut self.lexer, &mut self.compiler);
+    fn expr<'t>(&'t mut self) -> CompileOpt<Expr> {
+        let mut expr_parser = ExprParser::new(self.lexer, self.compiler, self.ty_scope);
         let expr = expr_parser.expr()?;
         Ok(expr)
     }
@@ -446,7 +468,7 @@ impl<'a, 'b> StmtParser<'a, 'b> {
     }
 
     fn type_expr(&mut self) -> CompileOpt<Ty> {
-        let mut p = TypeExprParser::new(&mut self.lexer, &mut self.compiler);
+        let mut p = TypeExprParser::new(&mut self.lexer, &mut self.ty_scope);
         let ty = p.type_expr()?;
         Ok(ty)
     }
@@ -466,7 +488,7 @@ impl<'a, 'b> StmtParser<'a, 'b> {
         let tb = self.type_binding()?.ok_or(Expected("type binding"))?;
         self.lexer.expect_token(Token::ColonEq)?;
         let te = self.expect_type_expr()?;
-        self.compiler.assign_ty(tb, te);
+        self.ty_scope.assign(tb, te);
         self.lexer.expect_token(Token::Semicolon)?;
         Ok(())
     }
@@ -654,39 +676,40 @@ impl<'a, 'b> StmtParser<'a, 'b> {
 }
 
 pub struct ModuleParser {
-    compiler: Compiler,
+    compiler: ModuleCompiler,
     lexer: Lexer,
+    ty_scope: TyScope,
 }
 
 impl ModuleParser {
     pub fn program(input: &str) -> Compile<CompileResult> {
-        let mut parse = Self::new(Lexer::new(input), Compiler::new());
+        let mut parse = Self::new(Lexer::new(input), ModuleCompiler::init(), TyScope::new());
         parse.module()?;
         parse.lexer.expect_token(Token::EndOfInput)?;
         parse.compiler.resolve()
     }
     #[allow(dead_code)]
     pub fn script(input: &str) -> Compile<Vec<IR>> {
-        let mut parse = Self::new(Lexer::new(input), Compiler::new());
-        parse.compiler.script_scope();
-        parse.block()?;
-        parse.lexer.expect_token(Token::EndOfInput)?;
-        Ok(parse.compiler.done())
+        let mut p = Self::new(Lexer::new(input), ModuleCompiler::init(), TyScope::new());
+        let mut stmt_compiler = p.compiler.script_scope();
+        let mut sp = StmtParser::new(&mut p.lexer, &mut stmt_compiler, &mut p.ty_scope);
+        sp.block()?;
+        sp.lexer.expect_token(Token::EndOfInput)?;
+        let res = p.compiler.done();
+        Ok(res)
     }
-    fn new(lexer: Lexer, compiler: Compiler) -> Self {
-        Self { lexer, compiler }
+    fn new(lexer: Lexer, compiler: ModuleCompiler, ty_scope: TyScope) -> Self {
+        Self {
+            lexer,
+            compiler,
+            ty_scope,
+        }
     }
 
     fn expect_type_expr(&mut self) -> Compile<Ty> {
-        let mut p = TypeExprParser::new(&mut self.lexer, &mut self.compiler);
+        let mut p = TypeExprParser::new(&mut self.lexer, &mut self.ty_scope);
         let ty = p.expect_type_expr()?;
         Ok(ty)
-    }
-
-    fn block(&mut self) -> Compile<()> {
-        let mut sp = StmtParser::new(&mut self.lexer, &mut self.compiler);
-        sp.block()?;
-        Ok(())
     }
 
     fn type_binding(&mut self) -> CompileOpt<String> {
@@ -698,7 +721,7 @@ impl ModuleParser {
         let tb = self.type_binding()?.ok_or(Expected("type binding"))?;
         self.lexer.expect_token(Token::ColonEq)?;
         let te = self.expect_type_expr()?;
-        self.compiler.assign_ty(tb, te);
+        self.ty_scope.assign(tb, te);
         self.lexer.expect_token(Token::Semicolon)?;
         Ok(())
     }
@@ -737,9 +760,11 @@ impl ModuleParser {
         let mut builder = SubBuilder::new(name);
         self.sub_params(&mut builder)?;
         self.lexer.expect_token(Token::Do)?;
-        self.compiler.begin_sub(builder);
-        self.block()?;
-        self.compiler.end_sub()?;
+
+        let mut stmt_compiler = self.compiler.begin_sub(builder);
+        let mut sp = StmtParser::new(&mut self.lexer, &mut stmt_compiler, &mut self.ty_scope);
+        sp.block()?;
+        sp.compiler.end_sub()?;
         self.lexer.expect_token(Token::End)?;
         Ok(())
     }

@@ -383,3 +383,35 @@ mod test {
         );
     }
 }
+
+pub struct TyScope {
+    data: HashMap<String, Ty>,
+    next_type_id: usize,
+}
+
+impl TyScope {
+    pub fn new() -> Self {
+        Self {
+            data: HashMap::from_iter(
+                vec![("Int", Ty::int()), ("Bool", Ty::bool())]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v)),
+            ),
+            next_type_id: 1,
+        }
+    }
+    pub fn get(&self, key: &str) -> Compile<Ty> {
+        self.data
+            .get(key)
+            .cloned()
+            .ok_or_else(|| UnknownTypeIdentifier(key.to_string()))
+    }
+    pub fn assign(&mut self, key: String, record: Ty) {
+        self.data.insert(key, record);
+    }
+    pub fn new_type_id(&mut self) -> usize {
+        let id = self.next_type_id;
+        self.next_type_id += 1;
+        id
+    }
+}

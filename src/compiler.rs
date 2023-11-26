@@ -8,30 +8,22 @@ use crate::{Compile, CompileError::*};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-pub struct Compiler {
+pub struct ModuleCompiler {
     memory: Memory,
-    ty_scope: TyScope,
     module_scope: HashMap<String, ModuleRecord>,
-    module_or_sub: ModuleOrSub,
 }
 
-impl Default for Compiler {
-    fn default() -> Self {
-        Self::new()
-    }
+pub struct ModuleRecord {
+    ty: Ty,
+    sub_index: SubIndex,
 }
 
-impl Compiler {
-    pub fn new() -> Self {
+impl ModuleCompiler {
+    pub fn init() -> Self {
         Self {
             module_scope: HashMap::new(),
-            ty_scope: TyScope::new(),
             memory: Memory::new(),
-            module_or_sub: ModuleOrSub::Module,
         }
-    }
-    pub fn done(self) -> Vec<IR> {
-        self.memory.done()
     }
     pub fn resolve(self) -> Compile<CompileResult> {
         let entry_point = self
@@ -41,56 +33,118 @@ impl Compiler {
             .sub_index;
         Ok(self.memory.done_program(entry_point))
     }
-    pub fn script_scope(&mut self) {
-        self.module_or_sub = ModuleOrSub::Sub(SubContext::new(ResolvedExpr::void()))
+    pub fn script_scope(&mut self) -> StmtCompiler {
+        StmtCompiler::from_module(
+            &mut self.memory,
+            &mut self.module_scope,
+            ResolvedExpr::void(),
+        )
     }
 }
 
-// TODO: either use block scope or forbid in blocks
-struct TyScope {
-    data: HashMap<String, Ty>,
-    next_type_id: usize,
+pub struct SubBuilder {
+    name: String,
+    params: Vec<(String, Ty)>,
+    return_type: Ty,
 }
 
-impl TyScope {
-    fn new() -> Self {
+impl SubBuilder {
+    pub fn new(name: String) -> Self {
         Self {
-            data: HashMap::from_iter(
-                vec![("Int", Ty::int()), ("Bool", Ty::bool())]
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v)),
-            ),
-            next_type_id: 1,
+            name,
+            params: Vec::new(),
+            return_type: Ty::void(),
         }
     }
-    fn get(&self, key: &str) -> Compile<Ty> {
-        self.data
-            .get(key)
-            .cloned()
-            .ok_or_else(|| UnknownTypeIdentifier(key.to_string()))
+    pub fn add_param(&mut self, name: String, ty: Ty) {
+        self.params.push((name, ty));
     }
-    fn assign(&mut self, key: String, record: Ty) {
-        self.data.insert(key, record);
-    }
-    fn new_type_id(&mut self) -> usize {
-        let id = self.next_type_id;
-        self.next_type_id += 1;
-        id
+    pub fn returns(&mut self, ty: Ty) {
+        self.return_type = ty;
     }
 }
 
-impl Compiler {
-    pub fn new_record_ty(&mut self) -> TyRecord {
-        TyRecord::new(self.ty_scope.new_type_id())
+impl ModuleCompiler {
+    pub fn begin_sub(&mut self, builder: SubBuilder) -> StmtCompiler {
+        let params = builder.params.iter().map(|(_, ty)| ty.clone()).collect();
+        let ty_sub = TySub::new(params, builder.return_type.clone());
+        // frame offset is negative for args & return slot
+        let mut frame_offset = -(ty_sub.args_size() + 1);
+        let return_expr = ResolvedExpr {
+            block: Block::new(frame_offset, builder.return_type.size()),
+            ty: builder.return_type,
+        };
+
+        let ty = Ty::sub(ty_sub);
+        let sub_index = self.memory.sub();
+        self.module_scope
+            .insert(builder.name, ModuleRecord { ty, sub_index });
+
+        let mut stmt_compiler =
+            StmtCompiler::from_module(&mut self.memory, &mut self.module_scope, return_expr);
+
+        for (key, ty) in builder.params {
+            frame_offset += ty.size();
+            stmt_compiler.insert_scope_record(key, ScopeRecord { frame_offset, ty });
+        }
+
+        debug_assert!(frame_offset == -1);
+        stmt_compiler
     }
-    pub fn new_oneof_ty(&mut self) -> TyOneOf {
-        TyOneOf::new(self.ty_scope.new_type_id())
+    pub fn done(self) -> Vec<IR> {
+        self.memory.done()
     }
-    pub fn get_ty(&mut self, name: &str) -> Compile<Ty> {
-        self.ty_scope.get(name)
+}
+
+// Stmt side
+
+pub struct StmtCompiler<'memory, 'module_scope> {
+    memory: &'memory mut Memory,
+    module_scope: &'module_scope mut HashMap<String, ModuleRecord>,
+    scope: Vec<ScopeFrame>,
+    return_expr: ResolvedExpr,
+    did_return: bool,
+}
+
+impl<'memory, 'module_scope> StmtCompiler<'memory, 'module_scope> {
+    pub fn from_module(
+        memory: &'memory mut Memory,
+        module_scope: &'module_scope mut HashMap<String, ModuleRecord>,
+        return_expr: ResolvedExpr,
+    ) -> Self {
+        Self {
+            memory,
+            module_scope,
+            scope: vec![ScopeFrame::new(ScopeIndex::root())],
+            return_expr,
+            did_return: false,
+        }
     }
-    pub fn assign_ty(&mut self, name: String, ty: Ty) {
-        self.ty_scope.assign(name, ty);
+
+    pub fn check_return(&mut self, ty: &Ty) -> Compile<()> {
+        self.did_return = true;
+        self.return_expr.ty.check(ty)
+    }
+
+    pub fn push_scope(&mut self) {
+        self.scope.push(ScopeFrame::new(self.memory.begin_scope()));
+    }
+    pub fn pop_scope(&mut self) {
+        let last_frame = self.scope.pop().expect("scope frame");
+        self.memory.end_scope(last_frame.scope_index);
+    }
+    fn get_local(&self, key: &str) -> Option<&ScopeRecord> {
+        for frame in self.scope.iter().rev() {
+            match frame.scope.get(key) {
+                Some(rec) => return Some(rec),
+                None => {}
+            };
+        }
+        None
+    }
+    fn insert_scope_record(&mut self, key: String, value: ScopeRecord) {
+        let len = self.scope.len();
+        self.scope[len - 1].scope.insert(key, value);
     }
 }
 
@@ -115,7 +169,7 @@ pub struct CallBuilder {
     current_arg: usize,
 }
 
-impl Compiler {
+impl<'a, 'b> StmtCompiler<'a, 'b> {
     pub fn begin_call(&mut self, callee: Expr) -> Compile<CallBuilder> {
         let sub_index = callee.sub_index()?;
         let ty_sub = callee.ty.get_sub()?;
@@ -150,66 +204,18 @@ impl Compiler {
     }
 }
 
-pub struct SubBuilder {
-    name: String,
-    params: Vec<(String, Ty)>,
-    return_type: Ty,
-}
-
-impl SubBuilder {
-    pub fn new(name: String) -> Self {
-        Self {
-            name,
-            params: Vec::new(),
-            return_type: Ty::void(),
-        }
-    }
-    pub fn add_param(&mut self, name: String, ty: Ty) {
-        self.params.push((name, ty));
-    }
-    pub fn returns(&mut self, ty: Ty) {
-        self.return_type = ty;
-    }
-}
-
-impl Compiler {
-    pub fn begin_sub(&mut self, builder: SubBuilder) {
-        let params = builder.params.iter().map(|(_, ty)| ty.clone()).collect();
-        let ty_sub = TySub::new(params, builder.return_type.clone());
-        // frame offset is negative for args & return slot
-        let mut frame_offset = -(ty_sub.args_size() + 1);
-        let return_expr = ResolvedExpr {
-            block: Block::new(frame_offset, builder.return_type.size()),
-            ty: builder.return_type,
-        };
-
-        let ty = Ty::sub(ty_sub);
-        let sub_index = self.memory.sub();
-        self.module_scope
-            .insert(builder.name, ModuleRecord { ty, sub_index });
-        let mut context = SubContext::new(return_expr);
-
-        for (key, ty) in builder.params {
-            frame_offset += ty.size();
-            context.insert(key, ScopeRecord { frame_offset, ty });
-        }
-
-        self.module_or_sub = ModuleOrSub::Sub(context);
-
-        debug_assert!(frame_offset == -1);
-    }
+impl<'a, 'b> StmtCompiler<'a, 'b> {
     pub fn return_sub(&mut self, expr: Option<Expr>) -> Compile<()> {
-        let sub = self.module_or_sub.sub();
         match expr {
             Some(expr) => {
-                sub.check_return(&expr.ty)?;
+                self.check_return(&expr.ty)?;
                 expr.resolve(
                     &mut self.memory,
-                    ExprTarget::Reference(Reference::block(sub.return_expr.block)),
+                    ExprTarget::Reference(Reference::block(self.return_expr.block)),
                 );
             }
             None => {
-                sub.check_return(&Ty::void())?;
+                self.check_return(&Ty::void())?;
             }
         };
         self.memory.return_sub();
@@ -220,11 +226,14 @@ impl Compiler {
         Ok(())
     }
     pub fn end_sub(&mut self) -> Compile<()> {
-        let old_module = std::mem::replace(&mut self.module_or_sub, ModuleOrSub::Module);
-        match old_module {
-            ModuleOrSub::Sub(t) => t.resolve(self)?,
-            _ => unimplemented!(),
-        };
+        if !self.did_return {
+            if self.return_expr.ty == Ty::void() {
+                self.return_sub_default()?;
+            } else {
+                return Err(Expected("return"));
+            }
+        }
+
         Ok(())
     }
 }
@@ -244,7 +253,7 @@ pub struct MatchCaseBuilder {
     parent_block: Block,
 }
 
-impl Compiler {
+impl<'a, 'b> StmtCompiler<'a, 'b> {
     pub fn begin_match(&mut self, expr: Expr) -> Compile<MatchBuilder> {
         let res = expr.to_stack(&mut self.memory);
         let record = res.ty.get_record()?;
@@ -277,7 +286,7 @@ impl Compiler {
         let field = case.record.get(&name, Some(case.case_id))?;
         let block = case.parent_block.focus(field.to_slice());
 
-        self.module_or_sub.sub().insert(
+        self.insert_scope_record(
             name,
             ScopeRecord {
                 frame_offset: block.frame_offset(),
@@ -298,74 +307,6 @@ impl Compiler {
     }
 }
 
-enum ModuleOrSub {
-    Module,
-    Sub(SubContext),
-}
-
-impl ModuleOrSub {
-    fn sub(&mut self) -> &mut SubContext {
-        match self {
-            Self::Module => unimplemented!(),
-            Self::Sub(ctx) => ctx,
-        }
-    }
-}
-
-struct ModuleRecord {
-    ty: Ty,
-    sub_index: SubIndex,
-}
-
-struct SubContext {
-    scope: Vec<ScopeFrame>,
-    return_expr: ResolvedExpr,
-    did_return: bool,
-}
-
-impl SubContext {
-    fn new(return_expr: ResolvedExpr) -> Self {
-        Self {
-            scope: vec![ScopeFrame::new(ScopeIndex::root())],
-            return_expr,
-            did_return: false,
-        }
-    }
-    fn get_local(&self, key: &str) -> Option<&ScopeRecord> {
-        for frame in self.scope.iter().rev() {
-            match frame.scope.get(key) {
-                Some(rec) => return Some(rec),
-                None => {}
-            };
-        }
-        None
-    }
-    fn insert(&mut self, key: String, value: ScopeRecord) {
-        let len = self.scope.len();
-        self.scope[len - 1].scope.insert(key, value);
-    }
-    pub fn push_scope(&mut self, memory: &Memory) {
-        self.scope.push(ScopeFrame::new(memory.begin_scope()));
-    }
-    pub fn pop_scope(&mut self) -> ScopeFrame {
-        self.scope.pop().expect("scope frame")
-    }
-    pub fn check_return(&mut self, ty: &Ty) -> Compile<()> {
-        self.did_return = true;
-        self.return_expr.ty.check(ty)
-    }
-    pub fn resolve(&self, compiler: &mut Compiler) -> Compile<()> {
-        if self.did_return {
-            return Ok(());
-        };
-        if self.return_expr.ty == Ty::void() {
-            compiler.return_sub_default()?;
-            return Ok(());
-        };
-        return Err(Expected("return"));
-    }
-}
-
 // Ops
 
 pub struct OpExpr {
@@ -373,7 +314,7 @@ pub struct OpExpr {
     operands: Vec<Expr>,
 }
 
-impl Compiler {
+impl<'a, 'b> StmtCompiler<'a, 'b> {
     pub fn op_begin(&mut self, left: Expr) -> OpExpr {
         OpExpr {
             op_stack: Vec::new(),
@@ -445,9 +386,9 @@ struct ScopeRecord {
     ty: Ty,
 }
 
-impl Compiler {
+impl<'a, 'b> StmtCompiler<'a, 'b> {
     pub fn get_expr(&mut self, name: &str) -> Compile<Expr> {
-        if let Some(record) = self.module_or_sub.sub().get_local(name) {
+        if let Some(record) = self.get_local(name) {
             let block = Block::new(record.frame_offset, record.ty.size());
             return Ok(Expr::lvalue(record.ty.clone(), block));
         }
@@ -459,20 +400,13 @@ impl Compiler {
     }
     pub fn assign_expr(&mut self, name: String, expr: ResolvedExpr, prev_frame_offset: Word) {
         let frame_offset = self.memory.assign(expr.block, prev_frame_offset);
-        self.module_or_sub.sub().insert(
+        self.insert_scope_record(
             name,
             ScopeRecord {
                 frame_offset,
                 ty: expr.ty,
             },
         );
-    }
-    pub fn push_scope(&mut self) {
-        self.module_or_sub.sub().push_scope(&self.memory);
-    }
-    pub fn pop_scope(&mut self) {
-        let last_frame = self.module_or_sub.sub().pop_scope();
-        self.memory.end_scope(last_frame.scope_index);
     }
     pub fn allocate(&mut self, ty: &Ty) -> Block {
         self.memory.allocate(ty.size())
@@ -542,7 +476,7 @@ impl Compiler {
     }
 }
 
-impl Compiler {
+impl<'a, 'b> StmtCompiler<'a, 'b> {
     pub fn begin_compact(&mut self) -> Word {
         self.memory.current_frame_offset
     }
