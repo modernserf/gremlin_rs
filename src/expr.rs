@@ -1,24 +1,28 @@
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use crate::block::*;
 use crate::lexer::*;
 use crate::memory::*;
+use crate::module::ModuleRecord;
 use crate::op::Op;
 use crate::runtime::*;
 use crate::stmt::*;
 use crate::ty::*;
 use crate::{Compile, CompileError::*, CompileOpt};
 
-pub struct ExprParser<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope> {
+pub struct ExprParser<'lexer, 'compiler, 'memory, 'module_scope, 'scope, 'ty_scope> {
     lexer: &'lexer mut Lexer,
-    compiler: &'compiler mut StmtCompiler<'memory, 'module_scope>,
+    compiler: &'compiler mut ExprCompiler<'memory, 'module_scope, 'scope>,
     ty_scope: &'ty_scope mut TyScope,
 }
 
-impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
-    ExprParser<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
+impl<'lexer, 'compiler, 'memory, 'module_scope, 'scope, 'ty_scope>
+    ExprParser<'lexer, 'compiler, 'memory, 'module_scope, 'scope, 'ty_scope>
 {
     pub fn new(
         lexer: &'lexer mut Lexer,
-        compiler: &'compiler mut StmtCompiler<'memory, 'module_scope>,
+        compiler: &'compiler mut ExprCompiler<'memory, 'module_scope, 'scope>,
         ty_scope: &'ty_scope mut TyScope,
     ) -> Self {
         Self {
@@ -331,11 +335,11 @@ pub struct Expr {
 #[derive(Debug)]
 pub struct Reference {
     // 0 = an identifier, 1 = a pointer, 2 = a pointer to a pointer...
-    pub deref_level: usize,
+    deref_level: usize,
     // ref_level 0 = the location of the referent, 1 = the location of the pointer to the referent, etc
-    pub next: Block,
+    next: Block,
     // segment of referent that we want (e.g. a particular struct field within a struct)
-    pub focus: Slice,
+    focus: Slice,
 }
 
 impl Reference {
@@ -593,7 +597,7 @@ impl ResolvedExpr {
             block: Block::new(0, 0),
         }
     }
-    pub fn into_expr(self) -> Expr {
+    fn into_expr(self) -> Expr {
         Expr::resolved(self.ty, self.block)
     }
 }
@@ -641,5 +645,208 @@ impl ExprTarget {
             Self::Stack => block,
             _ => self.mov(memory, Src::Block(block)),
         }
+    }
+}
+
+pub struct ExprCompiler<'memory, 'module_scope, 'scope> {
+    memory: &'memory mut Memory,
+    module_scope: &'module_scope mut HashMap<String, ModuleRecord>,
+    scope: &'scope Vec<ScopeFrame>,
+}
+
+// Calling convention
+// [return value, args..., return addr, locals...] top
+// caller:
+// Sub(SP, sizeof return)
+// Mov(Push, arg) ...
+// JSR sub
+// ...
+// Add(SP, sizeof args)
+// callee:
+// ...
+// Mov(SP+return, result)
+// Add(SP, sizeof locals)
+// RTS
+
+pub struct CallBuilder {
+    sub_index: SubIndex,
+    ty_sub: Rc<TySub>,
+    return_block: Block,
+    current_arg: usize,
+}
+
+impl<'memory, 'module_scope, 'scope> ExprCompiler<'memory, 'module_scope, 'scope> {
+    pub fn new(
+        memory: &'memory mut Memory,
+        module_scope: &'module_scope mut HashMap<String, ModuleRecord>,
+        scope: &'scope Vec<ScopeFrame>,
+    ) -> Self {
+        Self {
+            memory,
+            module_scope,
+            scope,
+        }
+    }
+
+    pub fn begin_call(&mut self, callee: Expr) -> Compile<CallBuilder> {
+        let sub_index = callee.sub_index()?;
+        let ty_sub = callee.ty.get_sub()?;
+        let return_block = self.memory.allocate(ty_sub.ret.size());
+        Ok(CallBuilder {
+            sub_index,
+            ty_sub,
+            return_block,
+            current_arg: 0,
+        })
+    }
+    pub fn call_arg(&mut self, builder: &mut CallBuilder, arg: Expr) -> Compile<()> {
+        let params = &builder.ty_sub.params;
+        if builder.current_arg > params.len() {
+            return Err(Expected("fewer params"));
+        }
+        params[builder.current_arg].check(&arg.ty)?;
+        arg.resolve(self.memory, ExprTarget::Stack);
+        builder.current_arg += 1;
+        Ok(())
+    }
+    pub fn end_call(&mut self, builder: CallBuilder) -> Compile<Expr> {
+        if builder.current_arg != builder.ty_sub.params.len() {
+            return Err(Expected("more params"));
+        }
+        self.memory
+            .call_sub(builder.sub_index, builder.ty_sub.args_size());
+        Ok(Expr::resolved(
+            builder.ty_sub.ret.clone(),
+            builder.return_block,
+        ))
+    }
+}
+
+// Ops
+
+pub struct OpExpr {
+    op_stack: Vec<Op>,
+    operands: Vec<Expr>,
+}
+
+impl ExprCompiler<'_, '_, '_> {
+    pub fn op_begin(&mut self, left: Expr) -> OpExpr {
+        OpExpr {
+            op_stack: Vec::new(),
+            operands: vec![left],
+        }
+    }
+    // TODO: somewhere here need to
+    pub fn op_next(&mut self, op_expr: &mut OpExpr, op: Op) -> Compile<()> {
+        match op_expr.op_stack.pop() {
+            Some(last_op) => {
+                if last_op.precedence() > op.precedence() {
+                    op_expr.op_stack.push(last_op);
+                    op_expr.op_stack.push(op);
+                } else {
+                    self.op_apply(op_expr, op)?;
+                    op_expr.op_stack.push(op);
+                }
+            }
+            None => {
+                op_expr.op_stack.push(op);
+            }
+        };
+        Ok(())
+    }
+
+    pub fn op_push(&mut self, op_expr: &mut OpExpr, expr: Expr) {
+        op_expr.operands.push(expr);
+    }
+
+    pub fn op_end(&mut self, mut op_expr: OpExpr) -> Compile<Expr> {
+        while let Some(op) = op_expr.op_stack.pop() {
+            self.op_apply(&mut op_expr, op)?;
+        }
+        Ok(op_expr.operands.pop().expect("op result"))
+    }
+    fn op_apply(&mut self, op_expr: &mut OpExpr, op: Op) -> Compile<()> {
+        let right = op_expr.operands.pop().expect("rhs");
+        let left = op_expr.operands.pop().expect("lhs");
+
+        let out_ty = op.check_ty(&left.ty, &right.ty)?;
+        let result = right.op_rhs(self.memory, out_ty, op, left);
+        op_expr.operands.push(result);
+        Ok(())
+    }
+    pub fn negate_expr(&mut self, expr: Expr) -> Compile<Expr> {
+        self.op_simple(Op::Sub, Expr::constant(Ty::int(), 0), expr)
+    }
+    fn op_simple(&mut self, op: Op, left: Expr, right: Expr) -> Compile<Expr> {
+        let op_expr = OpExpr {
+            op_stack: vec![op],
+            operands: vec![left, right],
+        };
+        self.op_end(op_expr)
+    }
+}
+
+impl ExprCompiler<'_, '_, '_> {
+    pub fn get_expr(&mut self, name: &str) -> Compile<Expr> {
+        if let Some(record) = self.get_local(name) {
+            let block = Block::new(record.frame_offset, record.ty.size());
+            return Ok(Expr::lvalue(record.ty.clone(), block));
+        }
+        if let Some(record) = self.module_scope.get(name) {
+            return Ok(Expr::sub(record.ty.clone(), record.sub_index));
+        }
+
+        Err(UnknownIdentifier(name.to_string()))
+    }
+    fn get_local(&self, key: &str) -> Option<&ScopeRecord> {
+        for frame in self.scope.iter().rev() {
+            if let Some(rec) = frame.scope.get(key) {
+                return Some(rec);
+            }
+        }
+        None
+    }
+    pub fn allocate(&mut self, ty: &Ty) -> Block {
+        self.memory.allocate(ty.size())
+    }
+    pub fn resolve_expr(&mut self, expr: Expr, target: ExprTarget) {
+        expr.resolve(self.memory, target)
+    }
+    pub fn resolve_stack(&mut self, expr: Expr) -> ResolvedExpr {
+        expr.resolve_to_stack(self.memory)
+    }
+    // get pointer to first item from array
+    pub fn array_ptr(&mut self, array: Expr, item_ty: &Ty) -> Compile<Expr> {
+        array
+            .add_ref(self.memory, ExprTarget::Stack)?
+            .cast_ty(item_ty.add_ref())
+    }
+    // add (index * size) to value of pointer
+    pub fn add_index_to_array_ptr(
+        &mut self,
+        array_ptr: Expr,
+        idx: Expr,
+        item_ty: &Ty,
+    ) -> Compile<Expr> {
+        let offset = self.op_simple(Op::Mul, idx, Expr::constant(Ty::int(), item_ty.size()))?;
+        let ptr_ty = array_ptr.ty.clone();
+        let offset_ptr = self
+            .op_simple(Op::Add, array_ptr.cast_ty(Ty::int())?, offset)?
+            .cast_ty(ptr_ty)?;
+        // deref pointer
+        offset_ptr.deref(self.memory, ExprTarget::Stack)
+    }
+    pub fn add_ref_expr(&mut self, expr: Expr) -> Compile<Expr> {
+        expr.add_ref(self.memory, ExprTarget::Stack)
+    }
+    pub fn deref_expr(&mut self, expr: Expr) -> Compile<Expr> {
+        expr.deref(self.memory, ExprTarget::Stack)
+    }
+    pub fn bitset_field(&mut self, expr: Expr, field_name: &str) -> Compile<Expr> {
+        let field = expr.ty.oneof_member(field_name)?.clone();
+        let block = expr.resolve_to_stack(self.memory).block;
+        self.memory.bit_test(block, Src::Immediate(field.index));
+        self.memory.set_if(Dest::Block(block), IRCond::NotZero);
+        Ok(Expr::resolved(Ty::bool(), block))
     }
 }

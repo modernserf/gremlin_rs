@@ -3,7 +3,6 @@ use crate::expr::*;
 use crate::lexer::*;
 use crate::memory::*;
 use crate::module::*;
-use crate::op::*;
 use crate::runtime::*;
 use crate::ty::*;
 use crate::{Compile, CompileError::*, CompileOpt};
@@ -40,7 +39,12 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
     }
 
     fn expr(&mut self) -> CompileOpt<Expr> {
-        let mut expr_parser = ExprParser::new(self.lexer, self.compiler, self.ty_scope);
+        let mut expr_compiler = ExprCompiler::new(
+            self.compiler.memory,
+            self.compiler.module_scope,
+            &mut self.compiler.scope,
+        );
+        let mut expr_parser = ExprParser::new(self.lexer, &mut expr_compiler, self.ty_scope);
         let expr = expr_parser.expr()?;
         Ok(expr)
     }
@@ -187,7 +191,7 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
 
         let frame_offset = self.compiler.begin_compact();
         let expr = self.expect_expr()?;
-        let resolved = self.compiler.resolve_stack(expr);
+        let resolved = expr.resolve_to_stack(self.compiler.memory);
         if let Some(b) = bind_ty {
             b.check(&resolved.ty)?;
         }
@@ -238,7 +242,7 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
                 let state = self.compiler.begin_compact();
                 match self.expr()? {
                     Some(expr) => {
-                        let res = self.compiler.resolve_stack(expr);
+                        let res = expr.resolve_to_stack(self.compiler.memory);
                         self.compiler.end_compact(state, res);
                         self.lexer.expect_token(Token::Semicolon)?;
                     }
@@ -273,25 +277,17 @@ impl<'memory, 'module_scope> StmtCompiler<'memory, 'module_scope> {
         }
     }
 
-    pub fn check_return(&mut self, ty: &Ty) -> Compile<()> {
+    fn check_return(&mut self, ty: &Ty) -> Compile<()> {
         self.did_return = true;
         self.return_expr.ty.check(ty)
     }
 
-    pub fn push_scope(&mut self) {
+    fn push_scope(&mut self) {
         self.scope.push(ScopeFrame::new(self.memory.begin_scope()));
     }
-    pub fn pop_scope(&mut self) {
+    fn pop_scope(&mut self) {
         let last_frame = self.scope.pop().expect("scope frame");
         self.memory.end_scope(last_frame.scope_index);
-    }
-    fn get_local(&self, key: &str) -> Option<&ScopeRecord> {
-        for frame in self.scope.iter().rev() {
-            if let Some(rec) = frame.scope.get(key) {
-                return Some(rec);
-            }
-        }
-        None
     }
     pub fn insert_scope_record(&mut self, key: String, value: ScopeRecord) {
         let len = self.scope.len();
@@ -299,64 +295,8 @@ impl<'memory, 'module_scope> StmtCompiler<'memory, 'module_scope> {
     }
 }
 
-// Calling convention
-// [return value, args..., return addr, locals...] top
-// caller:
-// Sub(SP, sizeof return)
-// Mov(Push, arg) ...
-// JSR sub
-// ...
-// Add(SP, sizeof args)
-// callee:
-// ...
-// Mov(SP+return, result)
-// Add(SP, sizeof locals)
-// RTS
-
-pub struct CallBuilder {
-    sub_index: SubIndex,
-    ty_sub: Rc<TySub>,
-    return_block: Block,
-    current_arg: usize,
-}
-
 impl StmtCompiler<'_, '_> {
-    pub fn begin_call(&mut self, callee: Expr) -> Compile<CallBuilder> {
-        let sub_index = callee.sub_index()?;
-        let ty_sub = callee.ty.get_sub()?;
-        let return_block = self.memory.allocate(ty_sub.ret.size());
-        Ok(CallBuilder {
-            sub_index,
-            ty_sub,
-            return_block,
-            current_arg: 0,
-        })
-    }
-    pub fn call_arg(&mut self, builder: &mut CallBuilder, arg: Expr) -> Compile<()> {
-        let params = &builder.ty_sub.params;
-        if builder.current_arg > params.len() {
-            return Err(Expected("fewer params"));
-        }
-        params[builder.current_arg].check(&arg.ty)?;
-        self.resolve_expr(arg, ExprTarget::Stack);
-        builder.current_arg += 1;
-        Ok(())
-    }
-    pub fn end_call(&mut self, builder: CallBuilder) -> Compile<Expr> {
-        if builder.current_arg != builder.ty_sub.params.len() {
-            return Err(Expected("more params"));
-        }
-        self.memory
-            .call_sub(builder.sub_index, builder.ty_sub.args_size());
-        Ok(Expr::resolved(
-            builder.ty_sub.ret.clone(),
-            builder.return_block,
-        ))
-    }
-}
-
-impl StmtCompiler<'_, '_> {
-    pub fn return_sub(&mut self, expr: Option<Expr>) -> Compile<()> {
+    fn return_sub(&mut self, expr: Option<Expr>) -> Compile<()> {
         match expr {
             Some(expr) => {
                 self.check_return(&expr.ty)?;
@@ -372,14 +312,10 @@ impl StmtCompiler<'_, '_> {
         self.memory.return_sub();
         Ok(())
     }
-    pub fn return_sub_default(&mut self) -> Compile<()> {
-        self.memory.return_sub();
-        Ok(())
-    }
     pub fn end_sub(&mut self) -> Compile<()> {
         if !self.did_return {
             if self.return_expr.ty == Ty::void() {
-                self.return_sub_default()?;
+                self.memory.return_sub();
             } else {
                 return Err(Expected("return"));
             }
@@ -405,7 +341,7 @@ pub struct MatchCaseBuilder {
 }
 
 impl StmtCompiler<'_, '_> {
-    pub fn begin_match(&mut self, expr: Expr) -> Compile<MatchBuilder> {
+    fn begin_match(&mut self, expr: Expr) -> Compile<MatchBuilder> {
         let res = expr.resolve_to_stack(self.memory);
         let record = res.ty.get_record()?;
         let case_field = record.case_field.as_ref().ok_or(Expected("case field"))?;
@@ -418,7 +354,7 @@ impl StmtCompiler<'_, '_> {
             end_addrs: Vec::new(),
         })
     }
-    pub fn begin_match_case(
+    fn begin_match_case(
         &mut self,
         builder: &mut MatchBuilder,
         tag: &str,
@@ -433,7 +369,7 @@ impl StmtCompiler<'_, '_> {
             parent_block: builder.block,
         })
     }
-    pub fn add_case_binding(&mut self, case: &mut MatchCaseBuilder, name: String) -> Compile<()> {
+    fn add_case_binding(&mut self, case: &mut MatchCaseBuilder, name: String) -> Compile<()> {
         let field = case.record.get(&name, Some(case.case_id))?;
         let block = case.parent_block.focus(field.to_slice());
 
@@ -446,10 +382,10 @@ impl StmtCompiler<'_, '_> {
         );
         Ok(())
     }
-    pub fn end_match_case(&mut self, builder: &mut MatchBuilder) {
+    fn end_match_case(&mut self, builder: &mut MatchBuilder) {
         builder.end_addrs.push(self.memory.end_case());
     }
-    pub fn end_match(&mut self, builder: MatchBuilder) {
+    fn end_match(&mut self, builder: MatchBuilder) {
         self.memory.set_jump_end_targets(
             builder.case_index,
             builder.record.cases.len(),
@@ -458,73 +394,9 @@ impl StmtCompiler<'_, '_> {
     }
 }
 
-// Ops
-
-pub struct OpExpr {
-    op_stack: Vec<Op>,
-    operands: Vec<Expr>,
-}
-
-impl StmtCompiler<'_, '_> {
-    pub fn op_begin(&mut self, left: Expr) -> OpExpr {
-        OpExpr {
-            op_stack: Vec::new(),
-            operands: vec![left],
-        }
-    }
-    // TODO: somewhere here need to
-    pub fn op_next(&mut self, op_expr: &mut OpExpr, op: Op) -> Compile<()> {
-        match op_expr.op_stack.pop() {
-            Some(last_op) => {
-                if last_op.precedence() > op.precedence() {
-                    op_expr.op_stack.push(last_op);
-                    op_expr.op_stack.push(op);
-                } else {
-                    self.op_apply(op_expr, op)?;
-                    op_expr.op_stack.push(op);
-                }
-            }
-            None => {
-                op_expr.op_stack.push(op);
-            }
-        };
-        Ok(())
-    }
-
-    pub fn op_push(&mut self, op_expr: &mut OpExpr, expr: Expr) {
-        op_expr.operands.push(expr);
-    }
-
-    pub fn op_end(&mut self, mut op_expr: OpExpr) -> Compile<Expr> {
-        while let Some(op) = op_expr.op_stack.pop() {
-            self.op_apply(&mut op_expr, op)?;
-        }
-        Ok(op_expr.operands.pop().expect("op result"))
-    }
-    fn op_apply(&mut self, op_expr: &mut OpExpr, op: Op) -> Compile<()> {
-        let right = op_expr.operands.pop().expect("rhs");
-        let left = op_expr.operands.pop().expect("lhs");
-
-        let out_ty = op.check_ty(&left.ty, &right.ty)?;
-        let result = right.op_rhs(self.memory, out_ty, op, left);
-        op_expr.operands.push(result);
-        Ok(())
-    }
-    pub fn negate_expr(&mut self, expr: Expr) -> Compile<Expr> {
-        self.op_simple(Op::Sub, Expr::constant(Ty::int(), 0), expr)
-    }
-    fn op_simple(&mut self, op: Op, left: Expr, right: Expr) -> Compile<Expr> {
-        let op_expr = OpExpr {
-            op_stack: vec![op],
-            operands: vec![left, right],
-        };
-        self.op_end(op_expr)
-    }
-}
-
-struct ScopeFrame {
+pub struct ScopeFrame {
     scope_index: ScopeIndex,
-    scope: HashMap<String, ScopeRecord>,
+    pub scope: HashMap<String, ScopeRecord>,
 }
 
 impl ScopeFrame {
@@ -543,17 +415,6 @@ pub struct ScopeRecord {
 }
 
 impl StmtCompiler<'_, '_> {
-    pub fn get_expr(&mut self, name: &str) -> Compile<Expr> {
-        if let Some(record) = self.get_local(name) {
-            let block = Block::new(record.frame_offset, record.ty.size());
-            return Ok(Expr::lvalue(record.ty.clone(), block));
-        }
-        if let Some(record) = self.module_scope.get(name) {
-            return Ok(Expr::sub(record.ty.clone(), record.sub_index));
-        }
-
-        Err(UnknownIdentifier(name.to_string()))
-    }
     pub fn assign_expr(&mut self, name: String, expr: ResolvedExpr, prev_frame_offset: Word) {
         let frame_offset = self.memory.assign(expr.block, prev_frame_offset);
         self.insert_scope_record(
@@ -564,79 +425,35 @@ impl StmtCompiler<'_, '_> {
             },
         );
     }
-    pub fn allocate(&mut self, ty: &Ty) -> Block {
-        self.memory.allocate(ty.size())
-    }
-    pub fn resolve_expr(&mut self, expr: Expr, target: ExprTarget) {
-        expr.resolve(self.memory, target)
-    }
-    pub fn resolve_stack(&mut self, expr: Expr) -> ResolvedExpr {
-        expr.resolve_to_stack(self.memory)
-    }
-    // get pointer to first item from array
-    pub fn array_ptr(&mut self, array: Expr, item_ty: &Ty) -> Compile<Expr> {
-        array
-            .add_ref(self.memory, ExprTarget::Stack)?
-            .cast_ty(item_ty.add_ref())
-    }
-    // add (index * size) to value of pointer
-    pub fn add_index_to_array_ptr(
-        &mut self,
-        array_ptr: Expr,
-        idx: Expr,
-        item_ty: &Ty,
-    ) -> Compile<Expr> {
-        let offset = self.op_simple(Op::Mul, idx, Expr::constant(Ty::int(), item_ty.size()))?;
-        let ptr_ty = array_ptr.ty.clone();
-        let offset_ptr = self
-            .op_simple(Op::Add, array_ptr.cast_ty(Ty::int())?, offset)?
-            .cast_ty(ptr_ty)?;
-        // deref pointer
-        offset_ptr.deref(self.memory, ExprTarget::Stack)
-    }
-    pub fn add_ref_expr(&mut self, expr: Expr) -> Compile<Expr> {
-        expr.add_ref(self.memory, ExprTarget::Stack)
-    }
-    pub fn deref_expr(&mut self, expr: Expr) -> Compile<Expr> {
-        expr.deref(self.memory, ExprTarget::Stack)
-    }
-    pub fn bitset_field(&mut self, expr: Expr, field_name: &str) -> Compile<Expr> {
-        let field = expr.ty.oneof_member(field_name)?.clone();
-        let block = self.resolve_stack(expr).block;
-        self.memory.bit_test(block, Src::Immediate(field.index));
-        self.memory.set_if(Dest::Block(block), IRCond::NotZero);
-        Ok(Expr::resolved(Ty::bool(), block))
-    }
-
-    pub fn begin_cond(&mut self, cond: Expr) -> Compile<CondIndex> {
+    fn begin_cond(&mut self, cond: Expr) -> Compile<CondIndex> {
         Ty::bool().check(&cond.ty)?;
         Ok(self.memory.begin_cond(cond))
     }
-    pub fn begin_else(&mut self, if_rec: CondIndex) -> CondIndex {
+    fn begin_else(&mut self, if_rec: CondIndex) -> CondIndex {
         self.memory.begin_else(if_rec)
     }
-    pub fn end_if(&mut self, if_rec: CondIndex) {
+    fn end_if(&mut self, if_rec: CondIndex) {
         self.memory.end_if(if_rec);
     }
-    pub fn begin_while(&mut self) -> WhileIndex {
+    fn begin_while(&mut self) -> WhileIndex {
         self.memory.begin_while()
     }
-    pub fn end_while(&mut self, while_index: WhileIndex, cond_index: CondIndex) {
+    fn end_while(&mut self, while_index: WhileIndex, cond_index: CondIndex) {
         self.memory.end_while(while_index, cond_index)
     }
-    pub fn debug_stack(&mut self) {
+    fn debug_stack(&mut self) {
         self.memory.debug_stack()
     }
-    pub fn panic(&mut self) {
+    fn panic(&mut self) {
         self.memory.panic();
     }
 }
 
 impl StmtCompiler<'_, '_> {
-    pub fn begin_compact(&mut self) -> Word {
+    fn begin_compact(&mut self) -> Word {
         self.memory.current_frame_offset
     }
-    pub fn end_compact(&mut self, prev_frame_offset: Word, res: ResolvedExpr) {
+    fn end_compact(&mut self, prev_frame_offset: Word, res: ResolvedExpr) {
         self.memory.compact(res.block, prev_frame_offset)
     }
 }
