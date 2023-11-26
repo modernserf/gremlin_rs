@@ -6,6 +6,7 @@ mod module;
 mod op;
 mod runtime;
 mod stmt;
+mod sub;
 mod ty;
 
 use crate::lexer::*;
@@ -70,40 +71,6 @@ mod test {
         let result = ModuleParser::program(code).expect("compile");
         Runtime::eval_result(result.clone());
         assert_eq!(result.code, ir);
-    }
-
-    #[test]
-    fn empty_program() {
-        expect_ir("", vec![]);
-    }
-
-    #[test]
-    fn integers() {
-        expect_ir_result("123;", vec![Mov(PreDec(SP), Immediate(123))], 123);
-    }
-
-    #[test]
-    fn whitespace() {
-        expect_ir(
-            "
-            123;
-
-            ",
-            vec![Mov(PreDec(SP), Immediate(123))],
-        )
-    }
-
-    #[test]
-    fn comments() {
-        expect_ir(
-            "123; # This is a comment",
-            vec![Mov(PreDec(SP), Immediate(123))],
-        )
-    }
-
-    #[test]
-    fn unexpected_char() {
-        expect_err(" £ ", UnexpectedChar)
     }
 
     #[test]

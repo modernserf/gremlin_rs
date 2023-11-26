@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::rc::Rc;
-
 use crate::block::*;
 use crate::lexer::*;
 use crate::memory::*;
@@ -8,13 +5,15 @@ use crate::module::ModuleRecord;
 use crate::op::Op;
 use crate::runtime::*;
 use crate::stmt::*;
+use crate::sub::*;
 use crate::ty::*;
 use crate::{Compile, CompileError::*, CompileOpt};
+use std::collections::HashMap;
 
 pub struct ExprParser<'lexer, 'compiler, 'memory, 'module_scope, 'scope, 'ty_scope> {
-    lexer: &'lexer mut Lexer,
-    compiler: &'compiler mut ExprCompiler<'memory, 'module_scope, 'scope>,
-    ty_scope: &'ty_scope mut TyScope,
+    pub lexer: &'lexer mut Lexer,
+    pub compiler: &'compiler mut ExprCompiler<'memory, 'module_scope, 'scope>,
+    pub ty_scope: &'ty_scope mut TyScope,
 }
 
 impl<'lexer, 'compiler, 'memory, 'module_scope, 'scope, 'ty_scope>
@@ -209,7 +208,7 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'scope, 'ty_scope>
                 Token::SqLeft => {
                     self.lexer.advance();
                     if self.lexer.token(Token::SqRight)?.is_some() {
-                        left = self.compiler.deref_expr(left)?
+                        left = left.deref(self.compiler.memory, ExprTarget::Stack)?;
                     } else {
                         left = self.array_index(left)?;
                         self.lexer.expect_token(Token::SqRight)?;
@@ -231,20 +230,8 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'scope, 'ty_scope>
                 }
                 Token::ParLeft => {
                     self.lexer.advance();
-                    let mut builder = self.compiler.begin_call(left)?;
-                    loop {
-                        match self.expr()? {
-                            Some(expr) => {
-                                self.compiler.call_arg(&mut builder, expr)?;
-                            }
-                            None => break,
-                        };
-                        if self.lexer.token(Token::Comma)?.is_none() {
-                            break;
-                        }
-                    }
+                    left = self.call_args(left)?;
                     self.lexer.expect_token(Token::ParRight)?;
-                    left = self.compiler.end_call(builder)?;
                 }
                 _ => return Ok(Some(left)),
             };
@@ -261,12 +248,12 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'scope, 'ty_scope>
             Token::Ampersand => {
                 self.lexer.advance();
                 let expr = self.expect_unary_op_expr()?;
-                self.compiler.add_ref_expr(expr)?
+                expr.add_ref(self.compiler.memory, ExprTarget::Stack)?
             }
             Token::Volatile => {
                 self.lexer.advance();
                 let operand = self.expect_unary_op_expr()?;
-                self.compiler.resolve_stack(operand).into_expr()
+                operand.resolve_to_stack(self.compiler.memory).into_expr()
             }
             _ => return self.postfix_expr(),
         };
@@ -327,12 +314,6 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'scope, 'ty_scope>
 }
 
 #[derive(Debug)]
-pub struct Expr {
-    pub ty: Ty,
-    kind: ExprKind,
-}
-
-#[derive(Debug)]
 pub struct Reference {
     // 0 = an identifier, 1 = a pointer, 2 = a pointer to a pointer...
     deref_level: usize,
@@ -389,6 +370,12 @@ impl Reference {
 }
 
 #[derive(Debug)]
+pub struct Expr {
+    pub ty: Ty,
+    kind: ExprKind,
+}
+
+#[derive(Debug)]
 enum ExprKind {
     // a value in memory, not assigned to a variable
     Block(Block),
@@ -421,13 +408,13 @@ impl Expr {
             kind: ExprKind::Cond(cond),
         }
     }
-    pub fn lvalue(ty: Ty, block: Block) -> Self {
+    fn lvalue(ty: Ty, block: Block) -> Self {
         Self {
             ty,
             kind: ExprKind::Reference(Reference::block(block)),
         }
     }
-    pub fn sub(ty: Ty, sub_index: SubIndex) -> Self {
+    fn sub(ty: Ty, sub_index: SubIndex) -> Self {
         Self {
             ty,
             kind: ExprKind::Sub(sub_index),
@@ -649,37 +636,16 @@ impl ExprTarget {
 }
 
 pub struct ExprCompiler<'memory, 'module_scope, 'scope> {
-    memory: &'memory mut Memory,
-    module_scope: &'module_scope mut HashMap<String, ModuleRecord>,
-    scope: &'scope Vec<ScopeFrame>,
-}
-
-// Calling convention
-// [return value, args..., return addr, locals...] top
-// caller:
-// Sub(SP, sizeof return)
-// Mov(Push, arg) ...
-// JSR sub
-// ...
-// Add(SP, sizeof args)
-// callee:
-// ...
-// Mov(SP+return, result)
-// Add(SP, sizeof locals)
-// RTS
-
-pub struct CallBuilder {
-    sub_index: SubIndex,
-    ty_sub: Rc<TySub>,
-    return_block: Block,
-    current_arg: usize,
+    pub memory: &'memory mut Memory,
+    module_scope: &'module_scope HashMap<String, ModuleRecord>,
+    scope: &'scope Scope,
 }
 
 impl<'memory, 'module_scope, 'scope> ExprCompiler<'memory, 'module_scope, 'scope> {
     pub fn new(
         memory: &'memory mut Memory,
-        module_scope: &'module_scope mut HashMap<String, ModuleRecord>,
-        scope: &'scope Vec<ScopeFrame>,
+        module_scope: &'module_scope HashMap<String, ModuleRecord>,
+        scope: &'scope Scope,
     ) -> Self {
         Self {
             memory,
@@ -687,108 +653,11 @@ impl<'memory, 'module_scope, 'scope> ExprCompiler<'memory, 'module_scope, 'scope
             scope,
         }
     }
-
-    pub fn begin_call(&mut self, callee: Expr) -> Compile<CallBuilder> {
-        let sub_index = callee.sub_index()?;
-        let ty_sub = callee.ty.get_sub()?;
-        let return_block = self.memory.allocate(ty_sub.ret.size());
-        Ok(CallBuilder {
-            sub_index,
-            ty_sub,
-            return_block,
-            current_arg: 0,
-        })
-    }
-    pub fn call_arg(&mut self, builder: &mut CallBuilder, arg: Expr) -> Compile<()> {
-        let params = &builder.ty_sub.params;
-        if builder.current_arg > params.len() {
-            return Err(Expected("fewer params"));
-        }
-        params[builder.current_arg].check(&arg.ty)?;
-        arg.resolve(self.memory, ExprTarget::Stack);
-        builder.current_arg += 1;
-        Ok(())
-    }
-    pub fn end_call(&mut self, builder: CallBuilder) -> Compile<Expr> {
-        if builder.current_arg != builder.ty_sub.params.len() {
-            return Err(Expected("more params"));
-        }
-        self.memory
-            .call_sub(builder.sub_index, builder.ty_sub.args_size());
-        Ok(Expr::resolved(
-            builder.ty_sub.ret.clone(),
-            builder.return_block,
-        ))
-    }
-}
-
-// Ops
-
-pub struct OpExpr {
-    op_stack: Vec<Op>,
-    operands: Vec<Expr>,
-}
-
-impl ExprCompiler<'_, '_, '_> {
-    pub fn op_begin(&mut self, left: Expr) -> OpExpr {
-        OpExpr {
-            op_stack: Vec::new(),
-            operands: vec![left],
-        }
-    }
-    // TODO: somewhere here need to
-    pub fn op_next(&mut self, op_expr: &mut OpExpr, op: Op) -> Compile<()> {
-        match op_expr.op_stack.pop() {
-            Some(last_op) => {
-                if last_op.precedence() > op.precedence() {
-                    op_expr.op_stack.push(last_op);
-                    op_expr.op_stack.push(op);
-                } else {
-                    self.op_apply(op_expr, op)?;
-                    op_expr.op_stack.push(op);
-                }
-            }
-            None => {
-                op_expr.op_stack.push(op);
-            }
-        };
-        Ok(())
-    }
-
-    pub fn op_push(&mut self, op_expr: &mut OpExpr, expr: Expr) {
-        op_expr.operands.push(expr);
-    }
-
-    pub fn op_end(&mut self, mut op_expr: OpExpr) -> Compile<Expr> {
-        while let Some(op) = op_expr.op_stack.pop() {
-            self.op_apply(&mut op_expr, op)?;
-        }
-        Ok(op_expr.operands.pop().expect("op result"))
-    }
-    fn op_apply(&mut self, op_expr: &mut OpExpr, op: Op) -> Compile<()> {
-        let right = op_expr.operands.pop().expect("rhs");
-        let left = op_expr.operands.pop().expect("lhs");
-
-        let out_ty = op.check_ty(&left.ty, &right.ty)?;
-        let result = right.op_rhs(self.memory, out_ty, op, left);
-        op_expr.operands.push(result);
-        Ok(())
-    }
-    pub fn negate_expr(&mut self, expr: Expr) -> Compile<Expr> {
-        self.op_simple(Op::Sub, Expr::constant(Ty::int(), 0), expr)
-    }
-    fn op_simple(&mut self, op: Op, left: Expr, right: Expr) -> Compile<Expr> {
-        let op_expr = OpExpr {
-            op_stack: vec![op],
-            operands: vec![left, right],
-        };
-        self.op_end(op_expr)
-    }
 }
 
 impl ExprCompiler<'_, '_, '_> {
     pub fn get_expr(&mut self, name: &str) -> Compile<Expr> {
-        if let Some(record) = self.get_local(name) {
+        if let Some(record) = self.scope.get(name) {
             let block = Block::new(record.frame_offset, record.ty.size());
             return Ok(Expr::lvalue(record.ty.clone(), block));
         }
@@ -798,22 +667,11 @@ impl ExprCompiler<'_, '_, '_> {
 
         Err(UnknownIdentifier(name.to_string()))
     }
-    fn get_local(&self, key: &str) -> Option<&ScopeRecord> {
-        for frame in self.scope.iter().rev() {
-            if let Some(rec) = frame.scope.get(key) {
-                return Some(rec);
-            }
-        }
-        None
-    }
     pub fn allocate(&mut self, ty: &Ty) -> Block {
         self.memory.allocate(ty.size())
     }
     pub fn resolve_expr(&mut self, expr: Expr, target: ExprTarget) {
         expr.resolve(self.memory, target)
-    }
-    pub fn resolve_stack(&mut self, expr: Expr) -> ResolvedExpr {
-        expr.resolve_to_stack(self.memory)
     }
     // get pointer to first item from array
     pub fn array_ptr(&mut self, array: Expr, item_ty: &Ty) -> Compile<Expr> {
@@ -836,17 +694,70 @@ impl ExprCompiler<'_, '_, '_> {
         // deref pointer
         offset_ptr.deref(self.memory, ExprTarget::Stack)
     }
-    pub fn add_ref_expr(&mut self, expr: Expr) -> Compile<Expr> {
-        expr.add_ref(self.memory, ExprTarget::Stack)
-    }
-    pub fn deref_expr(&mut self, expr: Expr) -> Compile<Expr> {
-        expr.deref(self.memory, ExprTarget::Stack)
-    }
     pub fn bitset_field(&mut self, expr: Expr, field_name: &str) -> Compile<Expr> {
         let field = expr.ty.oneof_member(field_name)?.clone();
         let block = expr.resolve_to_stack(self.memory).block;
         self.memory.bit_test(block, Src::Immediate(field.index));
         self.memory.set_if(Dest::Block(block), IRCond::NotZero);
         Ok(Expr::resolved(Ty::bool(), block))
+    }
+}
+
+#[cfg(test)]
+pub mod test {
+    use super::*;
+    // use crate::runtime::{Register::*, EA::*, IR::*};
+    use crate::*;
+    use std::collections::HashMap;
+
+    pub struct ExprFixture {
+        pub memory: Memory,
+        pub module_scope: HashMap<String, ModuleRecord>,
+        pub scope: Scope,
+        pub ty_scope: TyScope,
+    }
+
+    impl ExprFixture {
+        pub fn new() -> Self {
+            let memory = Memory::new();
+            let module_scope = HashMap::new();
+            let scope = Scope::new();
+            let ty_scope = TyScope::new();
+            Self {
+                memory,
+                module_scope,
+                scope,
+                ty_scope,
+            }
+        }
+
+        fn reset_ir(&mut self) {
+            self.memory = Memory::new();
+        }
+
+        pub fn expect_err(&mut self, code: &str, expected: CompileError) {
+            self.reset_ir();
+            let mut compiler =
+                ExprCompiler::new(&mut self.memory, &mut self.module_scope, &mut self.scope);
+            let mut lexer = Lexer::new(code);
+            let mut parser = ExprParser::new(&mut lexer, &mut compiler, &mut self.ty_scope);
+
+            match parser.expr() {
+                Ok(_) => panic!("expected err, received ok"),
+                Err(received) => {
+                    assert_eq!(received, expected);
+                }
+            }
+        }
+
+        pub fn expect_ok(mut self, code: &str, ir: Vec<IR>) {
+            self.reset_ir();
+            let mut compiler =
+                ExprCompiler::new(&mut self.memory, &mut self.module_scope, &mut self.scope);
+            let mut lexer = Lexer::new(code);
+            let mut parser = ExprParser::new(&mut lexer, &mut compiler, &mut self.ty_scope);
+            parser.expr().expect("ok");
+            assert_eq!(self.memory.done(), ir);
+        }
     }
 }

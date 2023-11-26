@@ -308,3 +308,62 @@ impl Lexer {
         self.index += 1;
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn expect_tok(str: &str, toks: Vec<Token>) {
+        let mut out = Vec::new();
+        let mut lexer = Lexer::new(str);
+        loop {
+            match lexer.peek().unwrap() {
+                Token::EndOfInput => break,
+                tok => {
+                    out.push(tok);
+                    lexer.advance()
+                }
+            }
+        }
+        assert_eq!(out, toks);
+    }
+
+    #[test]
+    fn empty_program() {
+        expect_tok("", vec![]);
+    }
+
+    #[test]
+    fn integers() {
+        expect_tok("123", vec![Token::Integer(123)]);
+    }
+
+    #[test]
+    fn whitespace() {
+        expect_tok(
+            "
+            123
+
+            ",
+            vec![Token::Integer(123)],
+        );
+    }
+
+    #[test]
+    fn comments() {
+        expect_tok("123 # This is a comment", vec![Token::Integer(123)]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn unexpected_char() {
+        expect_tok(" £ ", vec![]);
+    }
+
+    #[test]
+    fn identifier_or_keyword() {
+        expect_tok("a", vec![Token::Identifier("a".to_string())]);
+        expect_tok("as", vec![Token::As]);
+        expect_tok("ask", vec![Token::Identifier("ask".to_string())]);
+    }
+}

@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 pub struct StmtParser<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope> {
-    lexer: &'lexer mut Lexer,
+    pub lexer: &'lexer mut Lexer,
     pub compiler: &'compiler mut StmtCompiler<'memory, 'module_scope>,
-    ty_scope: &'ty_scope mut TyScope,
+    pub ty_scope: &'ty_scope mut TyScope,
 }
 
 impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
@@ -38,11 +38,11 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
         }
     }
 
-    fn expr(&mut self) -> CompileOpt<Expr> {
+    pub fn expr(&mut self) -> CompileOpt<Expr> {
         let mut expr_compiler = ExprCompiler::new(
             self.compiler.memory,
             self.compiler.module_scope,
-            &mut self.compiler.scope,
+            &self.compiler.scope,
         );
         let mut expr_parser = ExprParser::new(self.lexer, &mut expr_compiler, self.ty_scope);
         let expr = expr_parser.expr()?;
@@ -228,8 +228,7 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
             }
             Token::Return => {
                 self.lexer.advance();
-                let maybe_expr = self.expr()?;
-                self.compiler.return_sub(maybe_expr)?;
+                self.return_stmt()?;
                 self.lexer.expect_token(Token::Semicolon)?;
             }
             Token::Panic => {
@@ -254,12 +253,42 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
     }
 }
 
-pub struct StmtCompiler<'memory, 'module_scope> {
-    memory: &'memory mut Memory,
-    module_scope: &'module_scope mut HashMap<String, ModuleRecord>,
+pub struct Scope {
     scope: Vec<ScopeFrame>,
-    return_expr: ResolvedExpr,
-    did_return: bool,
+}
+
+impl Scope {
+    pub fn new() -> Self {
+        Self {
+            scope: vec![ScopeFrame::new(ScopeIndex::root())],
+        }
+    }
+    pub fn push_scope(&mut self, scope_index: ScopeIndex) {
+        self.scope.push(ScopeFrame::new(scope_index));
+    }
+    pub fn pop_scope(&mut self) -> ScopeFrame {
+        self.scope.pop().expect("scope frame")
+    }
+    pub fn get(&self, key: &str) -> Option<&ScopeRecord> {
+        for frame in self.scope.iter().rev() {
+            if let Some(rec) = frame.scope.get(key) {
+                return Some(rec);
+            }
+        }
+        None
+    }
+    pub fn insert(&mut self, key: String, value: ScopeRecord) {
+        let len = self.scope.len();
+        self.scope[len - 1].scope.insert(key, value);
+    }
+}
+
+pub struct StmtCompiler<'memory, 'module_scope> {
+    pub memory: &'memory mut Memory,
+    pub module_scope: &'module_scope mut HashMap<String, ModuleRecord>,
+    pub scope: Scope,
+    pub return_expr: ResolvedExpr,
+    pub did_return: bool,
 }
 
 impl<'memory, 'module_scope> StmtCompiler<'memory, 'module_scope> {
@@ -271,57 +300,21 @@ impl<'memory, 'module_scope> StmtCompiler<'memory, 'module_scope> {
         Self {
             memory,
             module_scope,
-            scope: vec![ScopeFrame::new(ScopeIndex::root())],
+            scope: Scope::new(),
             return_expr,
             did_return: false,
         }
     }
 
-    fn check_return(&mut self, ty: &Ty) -> Compile<()> {
-        self.did_return = true;
-        self.return_expr.ty.check(ty)
-    }
-
     fn push_scope(&mut self) {
-        self.scope.push(ScopeFrame::new(self.memory.begin_scope()));
+        self.scope.push_scope(self.memory.begin_scope());
     }
     fn pop_scope(&mut self) {
-        let last_frame = self.scope.pop().expect("scope frame");
+        let last_frame = self.scope.pop_scope();
         self.memory.end_scope(last_frame.scope_index);
     }
     pub fn insert_scope_record(&mut self, key: String, value: ScopeRecord) {
-        let len = self.scope.len();
-        self.scope[len - 1].scope.insert(key, value);
-    }
-}
-
-impl StmtCompiler<'_, '_> {
-    fn return_sub(&mut self, expr: Option<Expr>) -> Compile<()> {
-        match expr {
-            Some(expr) => {
-                self.check_return(&expr.ty)?;
-                expr.resolve(
-                    self.memory,
-                    ExprTarget::Reference(Reference::block(self.return_expr.block)),
-                );
-            }
-            None => {
-                self.check_return(&Ty::void())?;
-            }
-        };
-        self.memory.return_sub();
-        Ok(())
-    }
-    pub fn end_sub(&mut self) -> Compile<()> {
-        if !self.did_return {
-            if self.return_expr.ty == Ty::void() {
-                self.memory.return_sub();
-            } else {
-                return Err(Expected("return"));
-            }
-        }
-
-        Ok(())
+        self.scope.insert(key, value);
     }
 }
 

@@ -4,7 +4,7 @@ use crate::runtime::*;
 
 #[derive(Debug)]
 pub struct Memory {
-    output: Vec<IR>,
+    pub output: Vec<IR>,
     pub current_frame_offset: Word,
     free_registers: Vec<Register>,
 }
@@ -19,12 +19,6 @@ impl Memory {
     }
     pub fn done(self) -> Vec<IR> {
         self.output
-    }
-    pub fn done_program(self, main_sub: SubIndex) -> CompileResult {
-        CompileResult {
-            code: self.output,
-            entry_point: main_sub.index,
-        }
     }
     pub fn debug_stack(&mut self) {
         self.output.push(IR::DebugStack)
@@ -285,27 +279,6 @@ impl Memory {
         self.output
             .push(IR::BranchIf(EA::Immediate(-jump_back), IRCond::Always));
         self.end_if(cond);
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct SubIndex {
-    index: Word,
-}
-
-impl Memory {
-    pub fn sub(&self) -> SubIndex {
-        SubIndex {
-            index: self.output.len() as Word,
-        }
-    }
-    pub fn call_sub(&mut self, sub_index: SubIndex, args_size: Word) {
-        self.output.push(IR::Call(sub_index.index));
-        self.drop(args_size);
-    }
-    pub fn return_sub(&mut self) {
-        self.drop(self.current_frame_offset);
-        self.output.push(IR::Return);
     }
 }
 

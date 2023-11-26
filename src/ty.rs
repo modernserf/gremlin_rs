@@ -1,12 +1,13 @@
 use crate::block::*;
 use crate::lexer::*;
 use crate::runtime::*;
+use crate::sub::TySub;
 use crate::{Compile, CompileError::*, CompileOpt};
 use std::collections::HashMap;
 use std::rc::Rc;
 
 pub struct TypeExprParser<'lexer, 'ty_scope> {
-    lexer: &'lexer mut Lexer,
+    pub lexer: &'lexer mut Lexer,
     ty_scope: &'ty_scope mut TyScope,
 }
 
@@ -86,6 +87,10 @@ impl<'lexer, 'ty_scope> TypeExprParser<'lexer, 'ty_scope> {
             Token::OneOf => {
                 self.lexer.advance();
                 self.oneof_ty().map(Some)
+            }
+            Token::Sub => {
+                self.lexer.advance();
+                self.sub_ty().map(Some)
             }
             _ => Ok(None),
         }
@@ -416,31 +421,6 @@ impl RecordField {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TySub {
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-}
-
-impl TySub {
-    pub fn new(params: Vec<Ty>, ret: Ty) -> Self {
-        Self { params, ret }
-    }
-    pub fn args_size(&self) -> Word {
-        self.params.iter().map(|p| p.size()).sum::<Word>()
-    }
-    pub fn resolve_var(&self, name: &str, ty: &Ty) -> Self {
-        Self {
-            params: self
-                .params
-                .iter()
-                .map(|p| p.clone().resolve_var(name, ty))
-                .collect(),
-            ret: self.ret.clone().resolve_var(name, ty),
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -450,27 +430,24 @@ mod test {
         let t = Ty::var("T".to_string());
 
         // sub[T] foo(a: &T, b: Int) ...
-        let sub = Ty::sub(TySub {
-            params: vec![t.clone().add_ref(), Ty::int()],
-            ret: Ty::void(),
-        });
+        let sub = Ty::sub(TySub::new(vec![t.clone().add_ref(), Ty::int()], Ty::void()));
 
         // T = Bool, sub = sub foo(a: &Bool, b: Int) ...
         assert_eq!(
             sub.clone().resolve_var("T", &Ty::bool()),
-            Ty::sub(TySub {
-                params: vec![Ty::bool().add_ref(), Ty::int()],
-                ret: Ty::void()
-            })
+            Ty::sub(TySub::new(
+                vec![Ty::bool().add_ref(), Ty::int()],
+                Ty::void()
+            ))
         );
 
         // T = &Bool, sub = sub foo(a: &&Bool, b: Int) ...
         assert_eq!(
             sub.clone().resolve_var("T", &Ty::bool().add_ref()),
-            Ty::sub(TySub {
-                params: vec![Ty::bool().add_ref().add_ref(), Ty::int()],
-                ret: Ty::void()
-            })
+            Ty::sub(TySub::new(
+                vec![Ty::bool().add_ref().add_ref(), Ty::int()],
+                Ty::void()
+            ))
         );
     }
 }
