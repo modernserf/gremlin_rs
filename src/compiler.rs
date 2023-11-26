@@ -135,10 +135,9 @@ impl<'memory, 'module_scope> StmtCompiler<'memory, 'module_scope> {
     }
     fn get_local(&self, key: &str) -> Option<&ScopeRecord> {
         for frame in self.scope.iter().rev() {
-            match frame.scope.get(key) {
-                Some(rec) => return Some(rec),
-                None => {}
-            };
+            if let Some(rec) = frame.scope.get(key) {
+                return Some(rec);
+            }
         }
         None
     }
@@ -210,7 +209,7 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
             Some(expr) => {
                 self.check_return(&expr.ty)?;
                 expr.resolve(
-                    &mut self.memory,
+                    self.memory,
                     ExprTarget::Reference(Reference::block(self.return_expr.block)),
                 );
             }
@@ -255,7 +254,7 @@ pub struct MatchCaseBuilder {
 
 impl<'a, 'b> StmtCompiler<'a, 'b> {
     pub fn begin_match(&mut self, expr: Expr) -> Compile<MatchBuilder> {
-        let res = expr.to_stack(&mut self.memory);
+        let res = expr.resolve_to_stack(self.memory);
         let record = res.ty.get_record()?;
         let case_field = record.case_field.as_ref().ok_or(Expected("case field"))?;
         let case_value = res.block.focus(case_field.to_slice());
@@ -350,7 +349,7 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
         let left = op_expr.operands.pop().expect("lhs");
 
         let out_ty = op.check_ty(&left.ty, &right.ty)?;
-        let result = right.op_rhs(&mut self.memory, out_ty, op, left);
+        let result = right.op_rhs(self.memory, out_ty, op, left);
         op_expr.operands.push(result);
         Ok(())
     }
@@ -412,15 +411,15 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
         self.memory.allocate(ty.size())
     }
     pub fn resolve_expr(&mut self, expr: Expr, target: ExprTarget) {
-        expr.resolve(&mut self.memory, target)
+        expr.resolve(self.memory, target)
     }
     pub fn resolve_stack(&mut self, expr: Expr) -> ResolvedExpr {
-        expr.to_stack(&mut self.memory)
+        expr.resolve_to_stack(self.memory)
     }
     // get pointer to first item from array
     pub fn array_ptr(&mut self, array: Expr, item_ty: &Ty) -> Compile<Expr> {
         array
-            .add_ref(&mut self.memory, ExprTarget::Stack)?
+            .add_ref(self.memory, ExprTarget::Stack)?
             .cast_ty(item_ty.add_ref())
     }
     // add (index * size) to value of pointer
@@ -436,13 +435,13 @@ impl<'a, 'b> StmtCompiler<'a, 'b> {
             .op_simple(Op::Add, array_ptr.cast_ty(Ty::int())?, offset)?
             .cast_ty(ptr_ty)?;
         // deref pointer
-        offset_ptr.deref(&mut self.memory, ExprTarget::Stack)
+        offset_ptr.deref(self.memory, ExprTarget::Stack)
     }
     pub fn add_ref_expr(&mut self, expr: Expr) -> Compile<Expr> {
-        expr.add_ref(&mut self.memory, ExprTarget::Stack)
+        expr.add_ref(self.memory, ExprTarget::Stack)
     }
     pub fn deref_expr(&mut self, expr: Expr) -> Compile<Expr> {
-        expr.deref(&mut self.memory, ExprTarget::Stack)
+        expr.deref(self.memory, ExprTarget::Stack)
     }
     pub fn bitset_field(&mut self, expr: Expr, field_name: &str) -> Compile<Expr> {
         let field = expr.ty.oneof_member(field_name)?.clone();

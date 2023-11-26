@@ -99,7 +99,7 @@ impl Op {
     pub fn apply(&self, memory: &mut Memory, ty: Ty, left: Src, right: Src) -> Expr {
         match self.op_kind() {
             OpKind::Accumulate(ir_op) => {
-                let block = memory.accumulate(ir_op, left.as_dest(), right);
+                let block = memory.accumulate(ir_op, left.into_dest(), right);
                 Expr::resolved(ty, block)
             }
             OpKind::Cmp(cond) => {

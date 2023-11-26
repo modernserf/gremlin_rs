@@ -29,18 +29,14 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
     }
 
     fn expect_type_expr(&mut self) -> Compile<Ty> {
-        let mut p = TypeExprParser::new(&mut self.lexer, &mut self.ty_scope);
+        let mut p = TypeExprParser::new(self.lexer, self.ty_scope);
         let ty = p.expect_type_expr()?;
         Ok(ty)
     }
 
     fn bitset_expr(&mut self, ty: Ty) -> Compile<Expr> {
         let mut value = 0;
-        loop {
-            let key = match self.lexer.type_ident_token()? {
-                Some(key) => key,
-                _ => break,
-            };
+        while let Some(key) = self.lexer.type_ident_token()? {
             let field = ty.oneof_member(&key)?;
             // TODO: check for dupes
             value |= 1 << field.index;
@@ -49,7 +45,7 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
                 break;
             }
         }
-        Ok(Expr::constant(ty.as_bitset()?, value))
+        Ok(Expr::constant(ty.into_bitset()?, value))
     }
 
     fn record_expr(&mut self, ty: Ty, case: Option<Word>) -> Compile<Expr> {
@@ -64,11 +60,7 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
                 .resolve_expr(Expr::constant(Ty::int(), case_id), field_ctx);
         }
 
-        loop {
-            let field_name = match self.lexer.ident_token()? {
-                Some(s) => s,
-                None => break,
-            };
+        while let Some(field_name) = self.lexer.ident_token()? {
             self.lexer.expect_token(Token::Colon)?;
             let field = record.get(&field_name, case)?;
             let field_ctx = ExprTarget::Reference(Reference::block(block).focus(field.to_slice()));
@@ -270,7 +262,7 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
             Token::Volatile => {
                 self.lexer.advance();
                 let operand = self.expect_unary_op_expr()?;
-                self.compiler.resolve_stack(operand).to_expr()
+                self.compiler.resolve_stack(operand).into_expr()
             }
             _ => return self.postfix_expr(),
         };
@@ -288,14 +280,9 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
         };
         let mut op_expr = self.compiler.op_begin(left);
 
-        loop {
-            match self.lexer.op()? {
-                Some(op) => {
-                    let right = self.expect_unary_op_expr()?;
-                    self.compiler.op_next(&mut op_expr, op, right)?;
-                }
-                None => break,
-            }
+        while let Some(op) = self.lexer.op()? {
+            let right = self.expect_unary_op_expr()?;
+            self.compiler.op_next(&mut op_expr, op, right)?;
         }
         self.compiler.op_end(op_expr).map(Some)
     }
@@ -310,7 +297,7 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
         }
         let expr = self.op_expr()?.ok_or(Expected("expr"))?;
         self.compiler.resolve_expr(expr, left.assign_ctx()?);
-        Ok(Some(ResolvedExpr::void().to_expr()))
+        Ok(Some(ResolvedExpr::void().into_expr()))
     }
 
     fn as_expr(&mut self) -> CompileOpt<Expr> {
@@ -385,12 +372,7 @@ impl<'lexer, 'ty_scope> TypeExprParser<'lexer, 'ty_scope> {
         let mut data = TyOneOf::new(self.ty_scope.new_type_id());
         self.lexer.expect_token(Token::CurlyLeft)?;
         let mut i = 0;
-        loop {
-            let key = match self.lexer.type_ident_token()? {
-                Some(key) => key,
-                _ => break,
-            };
-
+        while let Some(key) = self.lexer.type_ident_token()? {
             // TODO: allow setting numeric values for oneof members
             // `oneof {Jan := 1, Feb, Mar, Apr}`
             // enforce that numbers are increasing order
@@ -451,7 +433,7 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
         }
     }
 
-    fn expr<'t>(&'t mut self) -> CompileOpt<Expr> {
+    fn expr(&mut self) -> CompileOpt<Expr> {
         let mut expr_parser = ExprParser::new(self.lexer, self.compiler, self.ty_scope);
         let expr = expr_parser.expr()?;
         Ok(expr)
@@ -468,7 +450,7 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
     }
 
     fn type_expr(&mut self) -> CompileOpt<Ty> {
-        let mut p = TypeExprParser::new(&mut self.lexer, &mut self.ty_scope);
+        let mut p = TypeExprParser::new(self.lexer, self.ty_scope);
         let ty = p.type_expr()?;
         Ok(ty)
     }
@@ -539,11 +521,7 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
         if self.lexer.token(Token::CurlyLeft)?.is_none() {
             return Ok(());
         }
-        loop {
-            let binding = match self.lexer.ident_token()? {
-                Some(b) => b,
-                None => break,
-            };
+        while let Some(binding) = self.lexer.ident_token()? {
             self.compiler.add_case_binding(case, binding)?;
             if self.lexer.token(Token::Comma)?.is_none() {
                 break;
@@ -604,10 +582,9 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'ty_scope>
         let frame_offset = self.compiler.begin_compact();
         let expr = self.expect_expr()?;
         let resolved = self.compiler.resolve_stack(expr);
-        match bind_ty {
-            Some(b) => b.check(&resolved.ty)?,
-            None => {}
-        };
+        if let Some(b) = bind_ty {
+            b.check(&resolved.ty)?;
+        }
         self.compiler.assign_expr(binding, resolved, frame_offset);
         self.lexer.expect_token(Token::Semicolon)?;
         Ok(())
@@ -732,11 +709,7 @@ impl ModuleParser {
 
     fn sub_params(&mut self, builder: &mut SubBuilder) -> Compile<()> {
         self.lexer.expect_token(Token::ParLeft)?;
-        loop {
-            let binding = match self.binding()? {
-                Some(b) => b,
-                None => break,
-            };
+        while let Some(binding) = self.binding()? {
             self.lexer.expect_token(Token::Colon)?;
             let ty = self.expect_type_expr()?;
             builder.add_param(binding, ty);

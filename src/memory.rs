@@ -58,7 +58,7 @@ impl Src {
             Self::Immediate(_) => 1,
         }
     }
-    fn to_ea(self, current_frame_offset: Word) -> EA {
+    fn into_ea(self, current_frame_offset: Word) -> EA {
         match &self {
             Self::Block(block) => block.to_ea(current_frame_offset),
             Self::Offset(r, slice) => EA::Offset(*r, slice.offset),
@@ -67,7 +67,7 @@ impl Src {
     }
     // TODO: only pop new stack values, not lvalues
     // this should probably be handled by expr
-    fn to_pop_ea(self, memory: &mut Memory) -> EA {
+    fn into_pop_ea(self, memory: &mut Memory) -> EA {
         match self {
             Self::Block(block) => match block.to_ea(memory.current_frame_offset) {
                 EA::Offset(Register::SP, 0) => {
@@ -76,11 +76,11 @@ impl Src {
                 }
                 ea => ea,
             },
-            _ => self.to_ea(memory.current_frame_offset),
+            _ => self.into_ea(memory.current_frame_offset),
         }
     }
     // TODO: better interface for op.apply()
-    pub fn as_dest(self) -> Dest {
+    pub fn into_dest(self) -> Dest {
         match self {
             Self::Block(block) => Dest::Block(block),
             Self::Offset(r, slice) => Dest::Offset(r, slice),
@@ -98,7 +98,7 @@ pub enum Dest {
 
 impl Memory {
     pub fn accumulate(&mut self, op: IROp, dest: Dest, src: Src) -> Block {
-        let ea_src = src.to_ea(self.current_frame_offset);
+        let ea_src = src.into_ea(self.current_frame_offset);
         match dest {
             Dest::Stack => {
                 self.output.push(op(EA::PreDec(Register::SP), ea_src));
@@ -121,12 +121,12 @@ impl Memory {
                     let block = self.allocate(size);
                     self.mov_inner(
                         block.to_ea(self.current_frame_offset),
-                        src.to_ea(self.current_frame_offset),
+                        src.into_ea(self.current_frame_offset),
                         size,
                     );
                     block
                 } else {
-                    let ea_src = src.to_ea(self.current_frame_offset);
+                    let ea_src = src.into_ea(self.current_frame_offset);
                     self.output.push(IR::Mov(EA::PreDec(Register::SP), ea_src));
                     self.current_frame_offset += 1;
                     Block::new(self.current_frame_offset, 1)
@@ -136,7 +136,7 @@ impl Memory {
                 assert_eq!(block.size(), size);
                 self.mov_inner(
                     block.to_ea(self.current_frame_offset),
-                    src.to_ea(self.current_frame_offset),
+                    src.into_ea(self.current_frame_offset),
                     size,
                 );
                 block
@@ -145,7 +145,7 @@ impl Memory {
                 assert_eq!(slice.size, size);
                 self.mov_inner(
                     EA::Offset(r, slice.offset),
-                    src.to_ea(self.current_frame_offset),
+                    src.into_ea(self.current_frame_offset),
                     size,
                 );
                 // TODO
@@ -163,7 +163,7 @@ impl Memory {
         }
     }
     pub fn load_address(&mut self, dest: Dest, src: Src) -> Block {
-        let ea_src = src.to_ea(self.current_frame_offset);
+        let ea_src = src.into_ea(self.current_frame_offset);
         match dest {
             Dest::Stack => {
                 self.output
@@ -385,7 +385,7 @@ impl Memory {
     pub fn bit_test(&mut self, target: Block, src: Src) {
         self.output.push(IR::BitTest(
             target.to_ea(self.current_frame_offset),
-            src.to_ea(self.current_frame_offset),
+            src.into_ea(self.current_frame_offset),
         ))
     }
     pub fn set_if(&mut self, dest: Dest, cond: IRCond) -> Block {
@@ -402,13 +402,13 @@ impl Memory {
         out
     }
     pub fn cmp_bool(&mut self, block: Block) -> IRCond {
-        let ea = Src::Block(block).to_pop_ea(self);
+        let ea = Src::Block(block).into_pop_ea(self);
         self.output.push(IR::Cmp(ea, EA::Immediate(1)));
         IRCond::Zero
     }
     pub fn cmp(&mut self, left: Src, right: Src) {
-        let right = right.to_ea(self.current_frame_offset);
-        let left = left.to_pop_ea(self);
+        let right = right.into_ea(self.current_frame_offset);
+        let left = left.into_pop_ea(self);
         self.output.push(IR::Cmp(left, right))
     }
 }

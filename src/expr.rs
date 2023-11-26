@@ -45,7 +45,7 @@ impl Reference {
     }
 
     // TODO: can a src/dest "own" a register, so that it can be automatically released after use?
-    fn to_dest(self, memory: &mut Memory) -> (Dest, Option<Register>) {
+    fn into_dest_with_register(self, memory: &mut Memory) -> (Dest, Option<Register>) {
         match self.deref_level {
             0 => (Dest::Block(self.next.focus(self.focus)), None),
             deref_level => {
@@ -55,7 +55,7 @@ impl Reference {
             }
         }
     }
-    fn to_src(self, memory: &mut Memory) -> (Src, Option<Register>) {
+    fn into_src_with_register(self, memory: &mut Memory) -> (Src, Option<Register>) {
         match self.deref_level {
             0 => (Src::Block(self.next.focus(self.focus)), None),
             deref_level => {
@@ -183,23 +183,23 @@ impl Expr {
                 Expr::constant(ty, value)
             }
             (_, ExprKind::Constant(r)) => {
-                let left = Src::Block(left.to_stack(memory).block);
+                let left = Src::Block(left.resolve_to_stack(memory).block);
                 op.apply(memory, ty, left, Src::Immediate(r))
             }
             (_, ExprKind::Block(r)) => {
                 // TODO: try popping left
-                let left = Src::Block(left.to_stack(memory).block);
+                let left = Src::Block(left.resolve_to_stack(memory).block);
                 op.apply(memory, ty, left, Src::Block(r))
             }
             (_, ExprKind::Cond(r)) => {
-                let left = Src::Block(left.to_stack(memory).block);
+                let left = Src::Block(left.resolve_to_stack(memory).block);
                 let right = Src::Block(memory.set_if(Dest::Stack, r));
                 op.apply(memory, ty, left, right)
             }
             (_, ExprKind::Reference(r)) => {
-                let left = Src::Block(left.to_stack(memory).block);
+                let left = Src::Block(left.resolve_to_stack(memory).block);
                 // TODO
-                let (src, register) = r.to_src(memory);
+                let (src, register) = r.into_src_with_register(memory);
                 let out = op.apply(memory, ty, left, src);
                 if let Some(register) = register {
                     memory.free_register(register);
@@ -222,14 +222,14 @@ impl Expr {
             }
             ExprKind::Cond(cond) => cond,
             _ => {
-                let res = self.to_stack(memory);
+                let res = self.resolve_to_stack(memory);
                 memory.cmp_bool(res.block)
             }
         }
     }
 
     // expr resolved to stack has an addressable value, can be accumulated upon
-    pub fn to_stack(self, memory: &mut Memory) -> ResolvedExpr {
+    pub fn resolve_to_stack(self, memory: &mut Memory) -> ResolvedExpr {
         self.resolve_inner(memory, ExprTarget::Stack)
     }
 
@@ -251,7 +251,7 @@ impl Expr {
                 ResolvedExpr { ty: self.ty, block }
             }
             ExprKind::Reference(r) => {
-                let (src, register) = r.to_src(memory);
+                let (src, register) = r.into_src_with_register(memory);
                 let block = target.mov(memory, src);
                 if let Some(register) = register {
                     memory.free_register(register);
@@ -276,7 +276,7 @@ impl ResolvedExpr {
             block: Block::new(0, 0),
         }
     }
-    pub fn to_expr(self) -> Expr {
+    pub fn into_expr(self) -> Expr {
         Expr::resolved(self.ty, self.block)
     }
 }
@@ -288,14 +288,14 @@ pub enum ExprTarget {
 }
 
 impl ExprTarget {
-    fn to_dest(self, memory: &mut Memory) -> (Dest, Option<Register>) {
+    fn into_dest(self, memory: &mut Memory) -> (Dest, Option<Register>) {
         match self {
             Self::Stack => (Dest::Stack, None),
-            Self::Reference(r) => r.to_dest(memory),
+            Self::Reference(r) => r.into_dest_with_register(memory),
         }
     }
     fn mov(self, memory: &mut Memory, src: Src) -> Block {
-        let (dest, register) = self.to_dest(memory);
+        let (dest, register) = self.into_dest(memory);
         let block = memory.mov(dest, src);
         if let Some(r) = register {
             memory.free_register(r);
@@ -303,7 +303,7 @@ impl ExprTarget {
         block
     }
     fn set_if(self, memory: &mut Memory, cond: IRCond) -> Block {
-        let (dest, register) = self.to_dest(memory);
+        let (dest, register) = self.into_dest(memory);
         let block = memory.set_if(dest, cond);
         if let Some(r) = register {
             memory.free_register(r);
@@ -312,7 +312,7 @@ impl ExprTarget {
     }
     fn load_address(self, memory: &mut Memory, block: Block) -> Block {
         let src = Src::Block(block);
-        let (dest, register) = self.to_dest(memory);
+        let (dest, register) = self.into_dest(memory);
         let block = memory.load_address(dest, src);
         if let Some(r) = register {
             memory.free_register(r);

@@ -168,7 +168,7 @@ impl Ty {
         };
         fields.get(member_name)
     }
-    pub fn as_bitset(self) -> Compile<Self> {
+    pub fn into_bitset(self) -> Compile<Self> {
         match self.kind {
             TyKind::OneOf(fields) => Ok(Self {
                 ref_level: self.ref_level,
