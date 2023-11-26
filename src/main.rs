@@ -34,7 +34,7 @@ pub type Compile<T> = Result<T, CompileError>;
 pub type CompileOpt<T> = Result<Option<T>, CompileError>;
 
 fn main() {
-    let result = Parser::program("").expect("compile");
+    let result = ModuleParser::program("").expect("compile");
     Runtime::eval_result(result);
 }
 
@@ -44,21 +44,21 @@ mod test {
     use super::{IRCond::*, Register::*, EA::*, IR::*};
 
     fn expect_ir(code: &str, ir: Vec<IR>) {
-        assert_eq!(Parser::script(code), Ok(ir));
+        assert_eq!(ModuleParser::script(code), Ok(ir));
     }
     fn expect_result(code: &str, _ir: Vec<IR>, value: Word) {
-        let ir = Parser::script(code).expect("compile");
+        let ir = ModuleParser::script(code).expect("compile");
         let res = Runtime::eval(&ir);
         assert_eq!(res, value);
     }
     fn expect_ir_result(code: &str, ir: Vec<IR>, result: Word) {
-        let actual_ir = Parser::script(code).expect("compile");
+        let actual_ir = ModuleParser::script(code).expect("compile");
         assert_eq!(actual_ir, ir);
         let actual_result: i32 = Runtime::eval(&actual_ir);
         assert_eq!(actual_result, result);
     }
     fn expect_err(code: &str, err: CompileError) {
-        assert_eq!(Parser::script(code), Err(err))
+        assert_eq!(ModuleParser::script(code), Err(err))
     }
     #[allow(dead_code)]
     fn run_ir(ir: Vec<IR>) {
@@ -67,7 +67,7 @@ mod test {
     }
 
     fn expect_program(code: &str, ir: Vec<IR>) {
-        let result = Parser::program(code).expect("compile");
+        let result = ModuleParser::program(code).expect("compile");
         Runtime::eval_result(result.clone());
         assert_eq!(result.code, ir);
     }

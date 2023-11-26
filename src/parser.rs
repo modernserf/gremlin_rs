@@ -7,31 +7,20 @@ use crate::runtime::*;
 use crate::ty::*;
 use crate::{Compile, CompileError::*, CompileOpt};
 
-pub struct Parser {
-    compiler: Compiler,
-    lexer: Lexer,
+pub struct ExprParser<'a, 'b> {
+    lexer: &'a mut Lexer,
+    compiler: &'b mut Compiler,
 }
 
-impl Parser {
-    pub fn program(input: &str) -> Compile<CompileResult> {
-        let mut parse = Self::new(input);
-        parse.module()?;
-        parse.lexer.expect_token(Token::EndOfInput)?;
-        parse.compiler.resolve()
+impl<'a, 'b> ExprParser<'a, 'b> {
+    fn new(lexer: &'a mut Lexer, compiler: &'b mut Compiler) -> Self {
+        Self { lexer, compiler }
     }
-    #[allow(dead_code)]
-    pub fn script(input: &str) -> Compile<Vec<IR>> {
-        let mut parse = Self::new(input);
-        parse.compiler.script_scope();
-        parse.block()?;
-        parse.lexer.expect_token(Token::EndOfInput)?;
-        Ok(parse.compiler.done())
-    }
-    fn new(input: &str) -> Self {
-        Self {
-            lexer: Lexer::new(input),
-            compiler: Compiler::new(),
-        }
+
+    fn expect_type_expr(&mut self) -> Compile<Ty> {
+        let mut p = TypeExprParser::new(&mut self.lexer, &mut self.compiler);
+        let ty = p.expect_type_expr()?;
+        Ok(ty)
     }
 
     fn bitset_expr(&mut self, ty: Ty) -> Compile<Expr> {
@@ -332,15 +321,16 @@ impl Parser {
     fn expect_expr(&mut self) -> Compile<Expr> {
         self.expr()?.ok_or(Expected("expr"))
     }
+}
 
-    // ### Bindings, TypeExprs, etc.
+pub struct TypeExprParser<'a, 'b> {
+    lexer: &'a mut Lexer,
+    compiler: &'b mut Compiler,
+}
 
-    fn binding(&mut self) -> CompileOpt<String> {
-        self.lexer.ident_token()
-    }
-
-    fn type_binding(&mut self) -> CompileOpt<String> {
-        self.lexer.type_ident_token()
+impl<'a, 'b> TypeExprParser<'a, 'b> {
+    fn new(lexer: &'a mut Lexer, compiler: &'b mut Compiler) -> Self {
+        Self { lexer, compiler }
     }
 
     fn record_items(&mut self, fields: &mut TyRecord, case: Option<Word>) -> Compile<()> {
@@ -427,9 +417,51 @@ impl Parser {
     fn expect_type_expr(&mut self) -> Compile<Ty> {
         self.type_expr()?.ok_or(Expected("type expr"))
     }
+}
+
+pub struct StmtParser<'a, 'b> {
+    lexer: &'a mut Lexer,
+    compiler: &'b mut Compiler,
+}
+
+impl<'a, 'b> StmtParser<'a, 'b> {
+    fn new(lexer: &'a mut Lexer, compiler: &'b mut Compiler) -> Self {
+        Self { lexer, compiler }
+    }
+
+    fn expr(&mut self) -> CompileOpt<Expr> {
+        let mut expr_parser = ExprParser::new(&mut self.lexer, &mut self.compiler);
+        let expr = expr_parser.expr()?;
+        Ok(expr)
+    }
+
+    fn expect_expr(&mut self) -> Compile<Expr> {
+        self.expr()?.ok_or(Expected("expr"))
+    }
+
+    // ### Bindings, TypeExprs, etc.
+
+    fn binding(&mut self) -> CompileOpt<String> {
+        self.lexer.ident_token()
+    }
+
+    fn type_expr(&mut self) -> CompileOpt<Ty> {
+        let mut p = TypeExprParser::new(&mut self.lexer, &mut self.compiler);
+        let ty = p.type_expr()?;
+        Ok(ty)
+    }
+
+    fn expect_type_expr(&mut self) -> Compile<Ty> {
+        self.type_expr()?.ok_or(Expected("type expr"))
+    }
 
     // ### Statements
 
+    fn type_binding(&mut self) -> CompileOpt<String> {
+        self.lexer.type_ident_token()
+    }
+
+    // TODO: remove statement-level typedefs?
     fn type_def_stmt(&mut self) -> Compile<()> {
         let tb = self.type_binding()?.ok_or(Expected("type binding"))?;
         self.lexer.expect_token(Token::ColonEq)?;
@@ -619,6 +651,61 @@ impl Parser {
             }
         }
     }
+}
+
+pub struct ModuleParser {
+    compiler: Compiler,
+    lexer: Lexer,
+}
+
+impl ModuleParser {
+    pub fn program(input: &str) -> Compile<CompileResult> {
+        let mut parse = Self::new(Lexer::new(input), Compiler::new());
+        parse.module()?;
+        parse.lexer.expect_token(Token::EndOfInput)?;
+        parse.compiler.resolve()
+    }
+    #[allow(dead_code)]
+    pub fn script(input: &str) -> Compile<Vec<IR>> {
+        let mut parse = Self::new(Lexer::new(input), Compiler::new());
+        parse.compiler.script_scope();
+        parse.block()?;
+        parse.lexer.expect_token(Token::EndOfInput)?;
+        Ok(parse.compiler.done())
+    }
+    fn new(lexer: Lexer, compiler: Compiler) -> Self {
+        Self { lexer, compiler }
+    }
+
+    fn expect_type_expr(&mut self) -> Compile<Ty> {
+        let mut p = TypeExprParser::new(&mut self.lexer, &mut self.compiler);
+        let ty = p.expect_type_expr()?;
+        Ok(ty)
+    }
+
+    fn block(&mut self) -> Compile<()> {
+        let mut sp = StmtParser::new(&mut self.lexer, &mut self.compiler);
+        sp.block()?;
+        Ok(())
+    }
+
+    fn type_binding(&mut self) -> CompileOpt<String> {
+        self.lexer.type_ident_token()
+    }
+
+    // TODO: remove statement-level typedefs?
+    fn type_def_stmt(&mut self) -> Compile<()> {
+        let tb = self.type_binding()?.ok_or(Expected("type binding"))?;
+        self.lexer.expect_token(Token::ColonEq)?;
+        let te = self.expect_type_expr()?;
+        self.compiler.assign_ty(tb, te);
+        self.lexer.expect_token(Token::Semicolon)?;
+        Ok(())
+    }
+
+    fn binding(&mut self) -> CompileOpt<String> {
+        self.lexer.ident_token()
+    }
 
     fn sub_params(&mut self, builder: &mut SubBuilder) -> Compile<()> {
         self.lexer.expect_token(Token::ParLeft)?;
@@ -628,7 +715,7 @@ impl Parser {
                 None => break,
             };
             self.lexer.expect_token(Token::Colon)?;
-            let ty = self.type_expr()?.ok_or(Expected("type"))?;
+            let ty = self.expect_type_expr()?;
             builder.add_param(binding, ty);
 
             if self.lexer.token(Token::Comma)?.is_none() {
@@ -638,7 +725,7 @@ impl Parser {
         self.lexer.expect_token(Token::ParRight)?;
 
         if self.lexer.token(Token::Arrow)?.is_some() {
-            let ty = self.type_expr()?.ok_or(Expected("return type"))?;
+            let ty = self.expect_type_expr()?;
             builder.returns(ty);
         };
 
