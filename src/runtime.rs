@@ -4,6 +4,7 @@ pub type Word = i32;
 pub enum Register {
     SP,
     R0,
+    A0,
 }
 
 // TODO: Most instructions besides Mov only accept certain EA forms
@@ -97,6 +98,7 @@ impl Status {
 
 pub struct Runtime {
     r0: Word,
+    a0: Word,
     sp: Word,
     ip: usize,
     status: Status,
@@ -121,6 +123,7 @@ impl Runtime {
     fn new(memory_size: Word) -> Self {
         Self {
             r0: 0,
+            a0: 0,
             sp: memory_size,
             ip: 0,
             memory: vec![0; memory_size as usize],
@@ -265,6 +268,7 @@ impl Runtime {
         match register {
             Register::R0 => &mut self.r0,
             Register::SP => &mut self.sp,
+            Register::A0 => &mut self.a0,
         }
     }
     fn get_effective_address(&mut self, src: EA) -> Word {

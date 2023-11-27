@@ -4,6 +4,7 @@ use crate::runtime::{IRCond, IROp, Register, Word, EA, IR};
 use crate::ty::Ty;
 use crate::{Compile, CompileError::*};
 use std::collections::HashMap;
+use std::fmt::Debug;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Memory2 {
@@ -11,8 +12,8 @@ struct Memory2 {
     scope: Vec<ScopeFrame>,
     module_scope: ModuleScope,
     output: Vec<IR>,
-    // TODO: more registers, status codes
-    r0_locked: Option<Ty>,
+    data_registers: HashMap<Data, Ty>,
+    address_registers: HashMap<Address, Ty>,
     cc_zero_locked: bool,
 }
 
@@ -23,7 +24,8 @@ impl Memory2 {
             scope: Vec::new(),
             module_scope: ModuleScope::new(),
             output: Vec::new(),
-            r0_locked: None,
+            data_registers: HashMap::new(),
+            address_registers: HashMap::new(),
             cc_zero_locked: false,
         }
     }
@@ -100,7 +102,112 @@ struct SubRecord {
 
 const PUSH: EA = EA::PreDec(Register::SP);
 const POP: EA = EA::PostInc(Register::SP);
-const R0: EA = EA::Register(Register::R0);
+
+trait ConsumableRegister {
+    fn try_get(&self, mem: &mut Memory2) -> Option<Ty>;
+    fn try_insert(&self, mem: &mut Memory2, ty: Ty) -> Option<Ty>;
+    fn try_remove(&self, mem: &mut Memory2) -> Option<Ty>;
+}
+trait CR: ConsumableRegister + Debug {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Data {
+    D0,
+}
+
+impl Data {
+    fn ea_direct(&self) -> EA {
+        match self {
+            Data::D0 => EA::Register(Register::R0),
+        }
+    }
+}
+
+impl ConsumableRegister for Data {
+    fn try_get(&self, mem: &mut Memory2) -> Option<Ty> {
+        mem.data_registers.get(self).cloned()
+    }
+    fn try_insert(&self, mem: &mut Memory2, ty: Ty) -> Option<Ty> {
+        mem.data_registers.insert(*self, ty)
+    }
+    fn try_remove(&self, mem: &mut Memory2) -> Option<Ty> {
+        mem.data_registers.remove(self)
+    }
+}
+impl CR for Data {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Address {
+    A0,
+}
+
+impl Address {
+    fn ea_direct(&self) -> EA {
+        match self {
+            Address::A0 => EA::Register(Register::A0),
+        }
+    }
+    fn ea_offset(&self, offset: Word) -> EA {
+        match self {
+            Address::A0 => EA::Offset(Register::A0, offset),
+        }
+    }
+}
+
+impl ConsumableRegister for Address {
+    fn try_get(&self, mem: &mut Memory2) -> Option<Ty> {
+        mem.address_registers.get(self).cloned()
+    }
+    fn try_insert(&self, mem: &mut Memory2, ty: Ty) -> Option<Ty> {
+        mem.address_registers.insert(*self, ty)
+    }
+    fn try_remove(&self, mem: &mut Memory2) -> Option<Ty> {
+        mem.address_registers.remove(self)
+    }
+}
+impl CR for Address {}
+
+impl Memory2 {
+    // TODO: iterate through more items
+    fn get_data_register(&mut self) -> Option<Data> {
+        if self.data_registers.contains_key(&Data::D0) {
+            None
+        } else {
+            Some(Data::D0)
+        }
+    }
+    fn get_address_register(&mut self) -> Option<Address> {
+        if self.address_registers.contains_key(&Address::A0) {
+            None
+        } else {
+            Some(Address::A0)
+        }
+    }
+    fn take_register(&mut self, r: impl CR, ty: Ty) {
+        if r.try_insert(self, ty).is_some() {
+            panic!("{:?} in use", r);
+        }
+    }
+    fn replace_register(&mut self, r: impl CR, ty: Ty) {
+        if r.try_insert(self, ty).is_none() {
+            panic!("{:?} is vacant", r);
+        }
+    }
+    fn borrow_register(&mut self, r: impl CR) -> Ty {
+        if let Some(ty) = r.try_get(self) {
+            ty
+        } else {
+            panic!("{:?} is vacant", r);
+        }
+    }
+    fn release_register(&mut self, r: impl CR) -> Ty {
+        if let Some(ty) = r.try_remove(self) {
+            ty
+        } else {
+            panic!("{:?} is vacant", r);
+        }
+    }
+}
 
 // a location on the stack which can be either a src or dest
 #[derive(Debug, Clone)]
@@ -115,22 +222,24 @@ enum Src {
     Immediate(Ty, Word),
     Target(Target),
     // TODO: should using a register as a src always release it?
-    Register,
-    RegisterIndirect(Ty, usize),
+    Data(Data),
+    AddressIndirect(Address, Ty, usize),
     Pop,
 }
 
 // dest for "accumulator" operations, _not_ push
 #[derive(Debug)]
 enum Dest {
-    Register,
+    Data(Data),
+    Address(Address),
+    AddressIndirect(Address, Ty, usize),
     Target(Target),
 }
 
 #[derive(Debug)]
 enum CmpSrc {
     Immediate(Ty, Word),
-    Register,
+    Data(Data),
 }
 
 impl Memory2 {
@@ -138,9 +247,6 @@ impl Memory2 {
     fn immediate(&self, ty: Ty, value: Word) -> Src {
         assert_eq!(ty.size(), 1);
         Src::Immediate(ty, value)
-    }
-    fn register(&self) -> Src {
-        Src::Register
     }
     fn identifier(&self, name: &str) -> Compile<Src> {
         let target = self.identifier_target(name)?;
@@ -175,10 +281,10 @@ impl Memory2 {
                 let ea = self.stack_offset(&target).add_offset(target.ty.size()); // account for pre-decrement
                 (target.ty, ea)
             }
-            Src::Register => (self.release_r0(), EA::Register(Register::R0)),
-            Src::RegisterIndirect(ty, offset) => {
-                self.borrow_r0();
-                (ty, self.deref_register(offset))
+            Src::Data(r) => (self.release_register(r), r.ea_direct()),
+            Src::AddressIndirect(r, ty, offset) => {
+                self.borrow_register(r);
+                (ty, self.deref_register(r, offset))
             }
             Src::Pop => {
                 panic!("cannot combine push & pop");
@@ -208,8 +314,8 @@ impl Memory2 {
     pub fn set_dest(&mut self, dest: Dest, src: Src) {
         let (src_ty, src_ea) = match src {
             Src::Immediate(ty, value) => (ty, EA::Immediate(value)),
-            Src::Register => (self.release_r0(), EA::Register(Register::R0)),
-            Src::RegisterIndirect(ty, offset) => (ty, self.deref_register(offset)),
+            Src::Data(r) => (self.release_register(r), r.ea_direct()),
+            Src::AddressIndirect(r, ty, offset) => (ty, self.deref_register(r, offset)),
             Src::Target(target) => {
                 let ea = self.stack_offset(&target);
                 (target.ty, ea)
@@ -220,19 +326,32 @@ impl Memory2 {
             }
         };
         match dest {
-            Dest::Register => {
-                // allow Mov(R0, (R0))
-                match src_ea {
-                    EA::Offset(Register::R0, _) => {
-                        self.replace_r0(src_ty);
+            Dest::Data(r) => {
+                self.take_register(r, src_ty);
+                self.output.push(IR::Mov(r.ea_direct(), src_ea));
+            }
+            Dest::Address(r) => {
+                match (src_ea, r.ea_direct()) {
+                    // allow Mov(A0, (A0))
+                    (EA::Offset(a, _), EA::Register(b)) if a == b => {
+                        self.replace_register(r, src_ty);
                     }
                     _ => {
-                        self.take_r0(src_ty);
+                        self.take_register(r, src_ty);
                     }
                 };
-                self.output.push(IR::Mov(R0, src_ea));
-                if src_ea == POP {
-                    self.stack.pop();
+                self.output.push(IR::Mov(r.ea_direct(), src_ea))
+            }
+            Dest::AddressIndirect(r, _, offset) => {
+                let dest_ea = self.deref_register(r, offset);
+                for i in 0..src_ty.size() {
+                    let src_ea_offset = if src_ea == POP {
+                        src_ea
+                    } else {
+                        src_ea.add_offset(i)
+                    };
+                    self.output
+                        .push(IR::Mov(dest_ea.add_offset(i), src_ea_offset));
                 }
             }
             Dest::Target(target) => {
@@ -249,11 +368,11 @@ impl Memory2 {
                         self.stack_offset(&target).add_offset(i),
                         src_ea_offset,
                     ));
-                    if src_ea == POP {
-                        self.stack.pop();
-                    }
                 }
             }
+        }
+        if src_ea == POP {
+            self.stack.pop();
         }
         self.clobber_cc_zero();
     }
@@ -270,18 +389,18 @@ impl Memory2 {
             offset: 0,
         }
     }
-    pub fn load_address(&mut self, target: Target) {
-        self.take_r0(target.ty.add_ref());
+    pub fn load_address(&mut self, r: Address, target: Target) {
+        self.take_register(r, target.ty.add_ref());
         let ea = self.stack_offset(&target);
-        self.output.push(IR::LoadAddress(R0, ea));
+        self.output.push(IR::LoadAddress(r.ea_direct(), ea));
     }
 
     // arithmetic
     pub fn accumulate(&mut self, op: IROp, dest: Dest, src: Src) {
         let (src_ty, src_ea) = match src {
             Src::Immediate(ty, value) => (ty, EA::Immediate(value)),
-            Src::Register => (self.release_r0(), R0),
-            Src::RegisterIndirect(ty, offset) => (ty, self.deref_register(offset)),
+            Src::Data(r) => (self.release_register(r), r.ea_direct()),
+            Src::AddressIndirect(r, ty, offset) => (ty, self.deref_register(r, offset)),
             Src::Target(target) => {
                 let ea = self.stack_offset(&target);
                 (target.ty, ea)
@@ -293,7 +412,12 @@ impl Memory2 {
         };
         assert_eq!(src_ty.size(), 1);
         let (dest_ty, dest_ea) = match dest {
-            Dest::Register => (self.release_r0(), R0),
+            Dest::Data(r) => (self.borrow_register(r), r.ea_direct()),
+            Dest::Address(r) => (self.borrow_register(r), r.ea_direct()),
+            Dest::AddressIndirect(r, ty, offset) => {
+                self.borrow_register(r);
+                (ty, self.deref_register(r, offset))
+            }
             Dest::Target(target) => {
                 let ea = self.stack_offset(&target);
                 (target.ty, ea)
@@ -303,9 +427,6 @@ impl Memory2 {
         self.output.push(op(dest_ea, src_ea));
         if src_ea == POP {
             self.stack.pop();
-        }
-        if dest_ea == R0 {
-            self.r0_locked = Some(dest_ty);
         }
         self.clobber_cc_zero();
     }
@@ -317,16 +438,16 @@ impl Memory2 {
         }
         let (left_ty, left_ea) = match left {
             Src::Immediate(ty, value) => (ty, EA::Immediate(value)),
-            Src::Register => (self.release_r0(), R0),
-            Src::RegisterIndirect(ty, offset) => (ty, self.deref_register(offset)),
+            Src::Data(r) => (self.release_register(r), r.ea_direct()),
+            Src::AddressIndirect(r, ty, offset) => (ty, self.deref_register(r, offset)),
             Src::Target(target) => (target.ty.clone(), self.stack_offset(&target)),
             Src::Pop => (self.expect_pop_expr().clone(), POP),
         };
         assert_eq!(left_ty.size(), 1);
         let right_ea = match right {
-            CmpSrc::Register => {
-                self.release_r0();
-                R0
+            CmpSrc::Data(r) => {
+                self.release_register(r);
+                r.ea_direct()
             }
             CmpSrc::Immediate(_, value) => EA::Immediate(value),
         };
@@ -429,11 +550,11 @@ impl Memory2 {
         EA::Offset(Register::SP, (self.stack.len() - target.idx - 1) as Word)
             .add_offset(target.offset as Word)
     }
-    fn deref_register(&mut self, offset: usize) -> EA {
-        let ty = self.borrow_r0().deref().expect("pointer");
+    fn deref_register(&mut self, r: Address, offset: usize) -> EA {
+        let ty = self.borrow_register(r).deref().expect("pointer");
         // TODO: check that offset field makes sense for type
         assert!(ty.size() >= offset as Word);
-        EA::Offset(Register::R0, offset as Word)
+        r.ea_offset(offset as Word)
     }
     fn push_stack_item(&mut self, kind: StackItemKind) -> usize {
         self.stack.push(StackItem {
@@ -460,39 +581,13 @@ impl Memory2 {
             panic!("clobbered cc zero");
         }
     }
-    fn take_r0(&mut self, ty: Ty) {
-        if self.r0_locked.is_some() {
-            panic!("r0 in use");
-        }
-        self.r0_locked = Some(ty);
-    }
-    fn borrow_r0(&mut self) -> Ty {
-        match &self.r0_locked {
-            Some(ty) => ty.clone(),
-            None => panic!("r0 is vacant"),
-        }
-    }
-    fn replace_r0(&mut self, ty: Ty) {
-        if self.r0_locked.is_none() {
-            panic!("r0 is vacant");
-        }
-        self.r0_locked = Some(ty);
-    }
-    fn release_r0(&mut self) -> Ty {
-        let ty = match &self.r0_locked {
-            Some(ty) => ty.clone(),
-            None => panic!("r0 is vacant"),
-        };
-        self.r0_locked = None;
-        ty
-    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::{
-        runtime::{IRCond::*, Register::R0, Register::SP, EA::*, IR::*},
+        runtime::{IRCond::*, Register::SP, EA::*, IR::*},
         ty::TyRecord,
     };
 
@@ -537,18 +632,19 @@ mod test {
         m.init_scope();
         m.push(m.immediate(Ty::int(), 123));
         m.assign_local("foo".to_string(), None).unwrap();
-        m.set_dest(Dest::Register, m.immediate(Ty::int(), 456));
+        let data = m.get_data_register().unwrap();
+        m.set_dest(Dest::Data(data), m.immediate(Ty::int(), 456));
         let foo = m.identifier("foo").unwrap();
         m.push(foo);
-        m.accumulate(IR::Add, Dest::Register, Src::Pop);
-        m.push(Src::Register);
+        m.accumulate(IR::Add, Dest::Data(data), Src::Pop);
+        m.push(Src::Data(data));
 
         m.expect_output(vec![
             Mov(PUSH, Immediate(123)),
-            Mov(Register(R0), Immediate(456)),
+            Mov(data.ea_direct(), Immediate(456)),
             Mov(PUSH, Offset(SP, 1)),
-            Add(Register(R0), POP),
-            Mov(PUSH, Register(R0)),
+            Add(data.ea_direct(), POP),
+            Mov(PUSH, data.ea_direct()),
         ]);
         m.expect_stack(vec![
             //
@@ -563,14 +659,15 @@ mod test {
         m.init_scope();
         m.push(m.immediate(Ty::int(), 123));
         m.assign_local("foo".to_string(), None).unwrap();
-        m.set_dest(Dest::Register, m.immediate(Ty::int(), 456));
+        let d = m.get_data_register().unwrap();
+        m.set_dest(Dest::Data(d), m.immediate(Ty::int(), 456));
         let foo = m.identifier_target("foo").unwrap();
-        m.set_dest(Dest::Target(foo), m.register());
+        m.set_dest(Dest::Target(foo), Src::Data(d));
 
         m.expect_output(vec![
             Mov(PUSH, Immediate(123)),
-            Mov(Register(R0), Immediate(456)),
-            Mov(Offset(SP, 0), Register(R0)),
+            Mov(d.ea_direct(), Immediate(456)),
+            Mov(Offset(SP, 0), d.ea_direct()),
         ]);
         m.expect_stack(vec![
             //
@@ -722,11 +819,12 @@ mod test {
         let ptr = m.push_address(base);
         m.assign_local("ptr".to_string(), None).unwrap();
         // ptr[].y
-        m.set_dest(Dest::Register, Src::Target(ptr));
+        let a = m.get_address_register().unwrap();
+        m.set_dest(Dest::Address(a), Src::Target(ptr));
         let y = {
             let rec = pair_ty.get_record().unwrap();
             let field = rec.get("y", None).unwrap().clone();
-            Src::RegisterIndirect(field.ty.clone(), field.offset as usize)
+            Src::AddressIndirect(a, field.ty.clone(), field.offset as usize)
         };
         m.push(y);
 
@@ -744,8 +842,64 @@ mod test {
             // let ptr := &foo;
             LoadAddress(PUSH, Offset(SP, 1)),
             // ptr[].y
-            Mov(Register(R0), Offset(SP, 0)),
-            Mov(PUSH, Offset(R0, 1)),
+            Mov(a.ea_direct(), Offset(SP, 0)),
+            Mov(PUSH, a.ea_offset(1)),
+        ]);
+    }
+
+    #[test]
+    fn pointer_assign() {
+        let mut m = Memory2::new();
+        let pair_ty = {
+            let mut pair_ty = TyRecord::new(1);
+            pair_ty.insert("x".to_string(), Ty::int(), None).unwrap();
+            pair_ty.insert("y".to_string(), Ty::int(), None).unwrap();
+            Ty::record(pair_ty)
+        };
+
+        m.init_scope();
+        // let foo := Pair { x: 123, y: 456 };
+        let base = m.push_structure(pair_ty.clone());
+        m.set_dest(
+            Dest::Target(m.target_field(base.clone(), "x").unwrap()),
+            m.immediate(Ty::int(), 123),
+        );
+        m.set_dest(
+            Dest::Target(m.target_field(base.clone(), "y").unwrap()),
+            m.immediate(Ty::int(), 456),
+        );
+        m.assign_local("foo".to_string(), None).unwrap();
+        // let ptr := &foo;
+        let ptr = m.push_address(base);
+        m.assign_local("ptr".to_string(), None).unwrap();
+        // ptr[].y := 789
+        let a = m.get_address_register().unwrap();
+        m.set_dest(Dest::Address(a), Src::Target(ptr));
+        let y_offset = {
+            let rec = pair_ty.get_record().unwrap();
+            let field = rec.get("y", None).unwrap().clone();
+            field.offset as usize
+        };
+        m.set_dest(
+            Dest::AddressIndirect(a, Ty::int(), y_offset),
+            m.immediate(Ty::int(), 789),
+        );
+
+        m.expect_stack(vec![
+            Owned,
+            Local("foo".to_string(), pair_ty.clone()),
+            Local("ptr".to_string(), pair_ty.add_ref()),
+        ]);
+        m.expect_output(vec![
+            // let foo := Pair { x: 123, y: 456 };
+            Sub(Register(SP), Immediate(2)),
+            Mov(Offset(SP, 0), Immediate(123)),
+            Mov(Offset(SP, 1), Immediate(456)),
+            // let ptr := &foo;
+            LoadAddress(PUSH, Offset(SP, 1)),
+            // ptr[].y := 789
+            Mov(a.ea_direct(), Offset(SP, 0)),
+            Mov(a.ea_offset(1), Immediate(789)),
         ]);
     }
 }
