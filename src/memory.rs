@@ -68,19 +68,19 @@ impl Src {
             Self::Immediate(value) => EA::Immediate(*value),
         }
     }
-    // TODO: use Self::PopBlock instead of this
-    fn into_pop_ea(self, memory: &mut Memory) -> EA {
-        match self {
-            Self::Block(block) => match block.to_ea(memory.current_frame_offset) {
-                EA::Offset(Register::SP, 0) => {
-                    memory.current_frame_offset -= 1;
-                    EA::PostInc(Register::SP)
-                }
-                ea => ea,
-            },
-            _ => self.into_ea(memory),
-        }
-    }
+    // // TODO: use Self::PopBlock instead of this
+    // fn into_pop_ea(self, memory: &mut Memory) -> EA {
+    //     match self {
+    //         Self::Block(block) => match block.to_ea(memory.current_frame_offset) {
+    //             EA::Offset(Register::SP, 0) => {
+    //                 memory.current_frame_offset -= 1;
+    //                 EA::PostInc(Register::SP)
+    //             }
+    //             ea => ea,
+    //         },
+    //         _ => self.into_ea(memory),
+    //     }
+    // }
     // TODO: better interface for op.apply()
     pub fn into_dest(self) -> Dest {
         match self {
@@ -224,10 +224,10 @@ impl Memory {
         self.compact(block, prev_frame_offset);
         self.current_frame_offset
     }
-    pub fn load_ptr_iter(&mut self, ptr_block: Block, deref_count: usize) -> Register {
+    pub fn load_ptr_iter(&mut self, ptr_block: Src, deref_count: usize) -> Register {
         assert_eq!(ptr_block.size(), 1);
         let register = self.take_register().expect("free register");
-        let mut src_ea = ptr_block.to_ea(self.current_frame_offset);
+        let mut src_ea = ptr_block.into_ea(self);
 
         // TODO: Can you actually do MOV A0 <- (A0)?
         for _ in 0..deref_count {
@@ -376,13 +376,19 @@ impl Memory {
         out
     }
     pub fn cmp_bool(&mut self, block: Block) -> IRCond {
-        let ea = Src::Block(block).into_pop_ea(self);
+        let ea = Src::PopBlock(block).into_ea(self);
         self.output.push(IR::Cmp(ea, EA::Immediate(1)));
         IRCond::Zero
     }
     pub fn cmp(&mut self, left: Src, right: Src) {
+        // FIXME: right must be immediate or register
         let right = right.into_ea(self);
-        let left = left.into_pop_ea(self);
+        // FIXME: do this in expr
+        let left = match left {
+            Src::Block(b) => Src::PopBlock(b),
+            src => src,
+        }
+        .into_ea(self);
         self.output.push(IR::Cmp(left, right))
     }
 }

@@ -336,7 +336,7 @@ impl Reference {
         match self.deref_level {
             0 => (Dest::Block(self.next.focus(self.focus)), None),
             deref_level => {
-                let register = memory.load_ptr_iter(self.next, deref_level);
+                let register = memory.load_ptr_iter(Src::Block(self.next), deref_level);
                 let dest = Dest::Offset(register, self.focus);
                 (dest, Some(register))
             }
@@ -346,7 +346,7 @@ impl Reference {
         match self.deref_level {
             0 => (Src::Block(self.next.focus(self.focus)), None),
             deref_level => {
-                let register = memory.load_ptr_iter(self.next, deref_level);
+                let register = memory.load_ptr_iter(Src::Block(self.next), deref_level);
                 let src = Src::Offset(register, self.focus);
                 (src, Some(register))
             }
@@ -453,7 +453,7 @@ impl Expr {
         let deref_ty = self.ty.deref()?;
         match self.kind {
             ExprKind::Block(block) => {
-                let register = memory.load_ptr_iter(block, 1);
+                let register = memory.load_ptr_iter(Src::PopBlock(block), 1);
                 let src = Src::Offset(register, Slice::with_size(deref_ty.size()));
                 let out = target.mov(memory, src);
                 memory.free_register(register);

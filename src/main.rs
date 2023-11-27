@@ -2,6 +2,7 @@ mod block;
 mod expr;
 mod lexer;
 mod memory;
+mod memory2;
 mod module;
 mod op;
 mod runtime;
@@ -346,11 +347,8 @@ mod test {
                 // volatile ptr
                 Mov(PreDec(SP), Offset(SP, 0)),
                 // []
-                Mov(Register(R0), Offset(SP, 0)),
+                Mov(Register(R0), PostInc(SP)),
                 Mov(PreDec(SP), Offset(R0, 0)),
-                // cleanup
-                Mov(Offset(SP, 1), Offset(SP, 0)),
-                Add(Register(SP), Immediate(1)),
             ],
             5,
         );
@@ -455,16 +453,13 @@ mod test {
                 Mult(Offset(SP, 0), Immediate(1)),
                 Add(Offset(SP, 1), PostInc(SP)),
                 // deref
-                Mov(Register(R0), Offset(SP, 0)),
+                Mov(Register(R0), PostInc(SP)),
                 Mov(PreDec(SP), Offset(R0, 0)),
-                // cleanup
-                Mov(Offset(SP, 1), Offset(SP, 0)),
-                Add(Register(SP), Immediate(1)),
             ],
             20,
         );
 
-        expect_result(
+        expect_ir_result(
             "
                 let xs := array[Int: 4]{10, 20, 30, 40};
                 xs[1];
@@ -480,8 +475,8 @@ mod test {
                 LoadAddress(PreDec(SP), Offset(SP, 0)),
                 Add(Offset(SP, 0), Immediate(1)),
                 // deref
-                Mov(Register(R0), Offset(SP, 0)),
-                Mov(Offset(SP, 0), Offset(R0, 0)),
+                Mov(Register(R0), PostInc(SP)),
+                Mov(PreDec(SP), Offset(R0, 0)),
             ],
             20,
         );

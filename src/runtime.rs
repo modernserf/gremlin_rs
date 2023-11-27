@@ -6,6 +6,9 @@ pub enum Register {
     R0,
 }
 
+// TODO: Most instructions besides Mov only accept certain EA forms
+// probably need to use traits to implement
+// this will complicate the `into_ea` methods on Src, Dest, Block
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum EA {
     // #123
@@ -179,7 +182,7 @@ impl Runtime {
             }
             IR::Cmp(left, right) => {
                 let l = self.get_src(*left);
-                let r = self.get_src(*right);
+                let r = self.get_cmp_src(*right);
                 self.status.zero = l != r
             }
             IR::BranchIf(disp, cond) => {
@@ -249,6 +252,13 @@ impl Runtime {
                 let addr = *self.get_register(register);
                 self.memory[addr as usize]
             }
+        }
+    }
+    fn get_cmp_src(&mut self, src: EA) -> Word {
+        match src {
+            EA::Immediate(value) => value,
+            EA::Register(register) => *self.get_register(register),
+            _ => panic!("invalid src"),
         }
     }
     fn get_register(&mut self, register: Register) -> &mut Word {
