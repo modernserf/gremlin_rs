@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::runtime::{IRCond, IROp, Register, Word, EA, IR};
+use crate::sub::TySub;
 use crate::ty::Ty;
 use crate::{Compile, CompileError::*};
 use std::collections::HashMap;
@@ -11,6 +12,7 @@ struct Memory2 {
     stack: Vec<StackItem>,
     scope: Vec<ScopeFrame>,
     module_scope: ModuleScope,
+    current_sub: Option<SubContext>,
     output: Vec<IR>,
     data_registers: HashMap<Data, Ty>,
     address_registers: HashMap<Address, Ty>,
@@ -23,6 +25,7 @@ impl Memory2 {
             stack: Vec::new(),
             scope: Vec::new(),
             module_scope: ModuleScope::new(),
+            current_sub: None,
             output: Vec::new(),
             data_registers: HashMap::new(),
             address_registers: HashMap::new(),
@@ -72,6 +75,8 @@ struct ScopeFrame {
     start_index: usize,
     // map of identifier to index of low block of value, i.e. "frame offset"
     locals: HashMap<String, usize>,
+    // whether there was a return in this specific frame
+    did_return: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +103,174 @@ struct SubRecord {
     ty: Ty,
     // where the sub begins in the output
     index: usize,
+}
+
+impl SubRecord {
+    fn return_ty(&self) -> Ty {
+        let ty = self.ty.get_sub().unwrap();
+        ty.ret.clone()
+    }
+    fn params_size(&self) -> Word {
+        let ty = self.ty.get_sub().unwrap();
+        ty.params
+            .iter()
+            .map(|p| p.size())
+            .fold(0, |acc, size| acc + size)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubContext {
+    name: String,
+    return_ty: Ty,
+    return_idx: usize,
+    return_addr_idx: usize,
+    did_return: bool,
+    ty: Ty,
+    index: usize,
+}
+
+// Calling convention
+// [return value, args..., return addr, locals...] top
+// caller:
+// Sub(SP, sizeof return)
+// Mov(Push, arg) ...
+// JSR(sub)
+// ...
+// Add(SP, sizeof args)
+// callee:
+// ...
+// Mov(SP+return, result)
+// Add(SP, sizeof locals)
+// RTS
+
+impl Memory2 {
+    fn get_sub(&self, name: &str) -> Compile<SubRecord> {
+        self.module_scope
+            .subs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| UnknownIdentifier(name.to_string()))
+    }
+
+    fn begin_call(&mut self, sub: &SubRecord) {
+        let size = sub.return_ty().size();
+        if size > 0 {
+            for _ in 1..size {
+                self.push_stack_item(Owned);
+            }
+            self.push_stack_item(Expr(sub.return_ty().clone()));
+            self.output
+                .push(IR::Sub(EA::Register(Register::SP), EA::Immediate(size)));
+        }
+    }
+
+    fn end_call(&mut self, sub: &SubRecord) {
+        self.invalidate_volatile_registers();
+        self.clobber_cc_zero();
+
+        self.output.push(IR::Call(sub.index as Word));
+        let to_drop = sub.params_size();
+        if to_drop > 0 {
+            self.output
+                .push(IR::Add(EA::Register(Register::SP), EA::Immediate(to_drop)));
+            let new_len = self.stack.len() - to_drop as usize;
+            self.stack.truncate(new_len);
+        }
+    }
+
+    fn begin_sub(&mut self, name: String, params: Vec<(String, Ty)>, ret: Ty) {
+        self.scope = Vec::new();
+        self.stack = Vec::new();
+        self.init_registers();
+        self.clobber_cc_zero();
+
+        // begin sub scope
+        self.init_scope();
+        let ty = Ty::sub(TySub::new(
+            params.iter().map(|(_, ty)| ty.clone()).collect(),
+            ret.clone(),
+        ));
+        let return_idx = if ret.size() > 0 {
+            // return slot
+            for _ in 1..ret.size() {
+                self.push_stack_item(Owned);
+            }
+            self.push_stack_item(Return(ret.clone()))
+        } else {
+            0
+        };
+
+        // params
+        for (name, ty) in params.into_iter() {
+            for _ in 1..ty.size() {
+                self.push_stack_item(Owned);
+            }
+            let idx = self.push_stack_item(Arg(name.clone(), ty));
+            self.insert_scope(name, idx);
+        }
+        // return addr
+        let return_addr_idx = self.push_stack_item(ReturnAddr);
+
+        // begin locals scope
+        self.enter_block();
+
+        self.current_sub = Some(SubContext {
+            name,
+            did_return: false,
+            return_ty: ret,
+            return_idx,
+            return_addr_idx,
+            ty,
+            index: self.output.len(),
+        });
+    }
+
+    fn return_sub(&mut self, src: Option<Src>) -> Compile<()> {
+        let ctx = self.current_sub.as_mut().unwrap();
+        ctx.did_return = true;
+        let scope_idx = self.scope.len() - 1;
+        self.scope[scope_idx].did_return = true;
+
+        let target = Target {
+            ty: ctx.return_ty.clone(),
+            idx: ctx.return_idx,
+            offset: 0,
+        };
+        let to_drop = self.stack.len() - ctx.return_addr_idx - 1;
+
+        if let Some(src) = src {
+            // TODO: check return ty
+            self.set_dest(Dest::Target(target), src);
+        } else {
+            ctx.return_ty.check(&Ty::void())?;
+        }
+
+        if to_drop > 0 {
+            self.output.push(IR::Add(
+                EA::Register(Register::SP),
+                EA::Immediate(to_drop as Word),
+            ));
+        }
+        self.output.push(IR::Return);
+
+        Ok(())
+    }
+
+    fn end_sub(&mut self) -> Compile<()> {
+        if !self.current_sub.as_ref().unwrap().did_return {
+            self.return_sub(None)?;
+        }
+        let ctx = self.current_sub.take().unwrap();
+        self.module_scope.subs.insert(
+            ctx.name,
+            SubRecord {
+                ty: ctx.ty,
+                index: ctx.index,
+            },
+        );
+        Ok(())
+    }
 }
 
 const PUSH: EA = EA::PreDec(Register::SP);
@@ -168,6 +341,15 @@ impl ConsumableRegister for Address {
 impl CR for Address {}
 
 impl Memory2 {
+    fn init_registers(&mut self) {
+        self.data_registers = HashMap::new();
+        self.address_registers = HashMap::new();
+    }
+    fn invalidate_volatile_registers(&mut self) {
+        self.invalidate_register(Address::A0);
+        self.invalidate_register(Data::D0);
+    }
+
     // TODO: iterate through more items
     fn get_data_register(&mut self) -> Option<Data> {
         if self.data_registers.contains_key(&Data::D0) {
@@ -181,6 +363,11 @@ impl Memory2 {
             None
         } else {
             Some(Address::A0)
+        }
+    }
+    fn invalidate_register(&mut self, r: impl CR) {
+        if r.try_remove(self).is_some() {
+            panic!("{:?} in use", r);
         }
     }
     fn take_register(&mut self, r: impl CR, ty: Ty) {
@@ -512,19 +699,22 @@ impl Memory2 {
         self.scope = vec![ScopeFrame {
             start_index: 0,
             locals: HashMap::new(),
+            did_return: false,
         }];
     }
-    fn enter_scope(&mut self) {
+    fn enter_block(&mut self) {
         self.scope.push(ScopeFrame {
             start_index: self.stack.len(),
             locals: HashMap::new(),
+            did_return: false,
         })
     }
-    fn exit_scope(&mut self) {
+    fn exit_block(&mut self) {
         let frame = self.scope.pop().expect("scope frame");
         let to_remove = self.stack.len() - frame.start_index;
         self.stack.truncate(frame.start_index);
-        if to_remove > 0 {
+
+        if !frame.did_return && to_remove > 0 {
             self.output.push(IR::Add(
                 EA::Register(Register::SP),
                 EA::Immediate(to_remove as Word),
@@ -587,7 +777,7 @@ impl Memory2 {
 mod test {
     use super::*;
     use crate::{
-        runtime::{IRCond::*, Register::SP, EA::*, IR::*},
+        runtime::{IRCond::*, Register::SP, EA::*, IR, IR::*},
         ty::TyRecord,
     };
 
@@ -728,7 +918,7 @@ mod test {
         m.push(foo);
         m.compare(Src::Pop, CmpSrc::Immediate(Ty::int(), 456));
         let b = m.forward_branch_if(IRCond::NotZero);
-        m.enter_scope();
+        m.enter_block();
         // let bar := 789
         m.push(m.immediate(Ty::int(), 789));
         m.assign_local("bar".to_string(), None).unwrap();
@@ -736,7 +926,7 @@ mod test {
         let foo = m.identifier_target("foo").unwrap();
         m.set_dest(Dest::Target(foo), m.immediate(Ty::int(), 42));
         // end
-        m.exit_scope();
+        m.exit_block();
         m.resolve_forward_branch(b);
 
         m.expect_stack(vec![
@@ -767,12 +957,12 @@ mod test {
         m.push(counter);
         m.compare(Src::Pop, CmpSrc::Immediate(Ty::int(), 10));
         let out_idx = m.forward_branch_if(Zero);
-        m.enter_scope();
+        m.enter_block();
         // counter := counter + 1;
         let counter = m.identifier_target("counter").unwrap();
         m.accumulate(IR::Add, Dest::Target(counter), m.immediate(Ty::int(), 1));
         // end
-        m.exit_scope();
+        m.exit_block();
         m.loop_end(loop_idx);
         m.resolve_forward_branch(out_idx);
 
@@ -901,5 +1091,65 @@ mod test {
             Mov(a.ea_direct(), Offset(SP, 0)),
             Mov(a.ea_offset(1), Immediate(789)),
         ]);
+    }
+
+    #[test]
+    fn sub_calls() {
+        let mut m = Memory2::new();
+
+        // sub add(a: Int, b: Int) -> Int
+        m.begin_sub(
+            "add".to_string(),
+            vec![("a".to_string(), Ty::int()), ("b".to_string(), Ty::int())],
+            Ty::int(),
+        );
+        let r = m.get_data_register().unwrap();
+        m.set_dest(Dest::Data(r), m.identifier("a").unwrap());
+        m.accumulate(IR::Add, Dest::Data(r), m.identifier("b").unwrap());
+
+        m.expect_stack(vec![
+            StackItemKind::Return(Ty::int()),
+            Arg("a".to_string(), Ty::int()),
+            Arg("b".to_string(), Ty::int()),
+            ReturnAddr,
+        ]);
+
+        m.return_sub(Some(Src::Data(r))).unwrap();
+        m.end_sub().unwrap();
+
+        // sub main()
+        m.begin_sub("main".to_string(), vec![], Ty::void());
+        let add = m.get_sub("add").unwrap();
+        m.begin_call(&add);
+        m.push(Src::Immediate(Ty::int(), 123));
+        m.push(Src::Immediate(Ty::int(), 456));
+        m.end_call(&add);
+
+        m.expect_stack(vec![
+            //
+            ReturnAddr,
+            Expr(Ty::int()),
+        ]);
+
+        m.end_sub().unwrap();
+
+        m.expect_output(vec![
+            // sub add(a: Int, b: Int) -> Int
+            // return a + b
+            Mov(r.ea_direct(), Offset(SP, 2)),
+            Add(r.ea_direct(), Offset(SP, 1)),
+            Mov(Offset(SP, 3), r.ea_direct()),
+            IR::Return,
+            // sub main()
+            // add(123, 456)
+            Sub(Register(SP), Immediate(1)),
+            Mov(PUSH, Immediate(123)),
+            Mov(PUSH, Immediate(456)),
+            Call(add.index as Word),
+            Add(Register(SP), Immediate(2)),
+            // cleanup
+            Add(Register(SP), Immediate(1)),
+            IR::Return,
+        ])
     }
 }

@@ -25,8 +25,8 @@ use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TySub {
-    params: Vec<Ty>,
-    ret: Ty,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
 }
 
 impl TySub {
