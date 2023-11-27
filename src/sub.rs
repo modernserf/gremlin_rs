@@ -313,7 +313,7 @@ mod test {
         fx.expect_err("s(1, false, 2)", Expected("fewer params"));
         fx.expect_err("s(1, 2)", ExpectedType(Ty::bool(), Ty::int()));
 
-        fx.expect_ok(
+        fx.expect_ir(
             "s(3, true)",
             vec![
                 // allocate space for return

@@ -40,6 +40,7 @@ impl Memory {
 #[derive(Debug)]
 pub enum Src {
     Block(Block),
+    PopBlock(Block),
     Offset(Register, Slice),
     Immediate(Word),
 }
@@ -48,19 +49,26 @@ impl Src {
     pub fn size(&self) -> Word {
         match &self {
             Self::Block(block) => block.size(),
+            Self::PopBlock(block) => block.size(),
             Self::Offset(_, slice) => slice.size,
             Self::Immediate(_) => 1,
         }
     }
-    fn into_ea(self, current_frame_offset: Word) -> EA {
+    fn into_ea(self, memory: &mut Memory) -> EA {
         match &self {
-            Self::Block(block) => block.to_ea(current_frame_offset),
+            Self::Block(block) => block.to_ea(memory.current_frame_offset),
+            Self::PopBlock(block) => match block.to_ea(memory.current_frame_offset) {
+                EA::Offset(Register::SP, 0) => {
+                    memory.current_frame_offset -= 1;
+                    EA::PostInc(Register::SP)
+                }
+                ea => ea,
+            },
             Self::Offset(r, slice) => EA::Offset(*r, slice.offset),
             Self::Immediate(value) => EA::Immediate(*value),
         }
     }
-    // TODO: only pop new stack values, not lvalues
-    // this should probably be handled by expr
+    // TODO: use Self::PopBlock instead of this
     fn into_pop_ea(self, memory: &mut Memory) -> EA {
         match self {
             Self::Block(block) => match block.to_ea(memory.current_frame_offset) {
@@ -70,7 +78,7 @@ impl Src {
                 }
                 ea => ea,
             },
-            _ => self.into_ea(memory.current_frame_offset),
+            _ => self.into_ea(memory),
         }
     }
     // TODO: better interface for op.apply()
@@ -92,15 +100,16 @@ pub enum Dest {
 
 impl Memory {
     pub fn accumulate(&mut self, op: IROp, dest: Dest, src: Src) -> Block {
-        let ea_src = src.into_ea(self.current_frame_offset);
         match dest {
             Dest::Stack => {
-                self.output.push(op(EA::PreDec(Register::SP), ea_src));
                 self.current_frame_offset += 1;
+                let ea_src = src.into_ea(self);
+                self.output.push(op(EA::PreDec(Register::SP), ea_src));
                 Block::new(self.current_frame_offset, 1)
             }
             Dest::Block(block) => {
                 let ea_dest = block.to_ea(self.current_frame_offset);
+                let ea_src = src.into_ea(self);
                 self.output.push(op(ea_dest, ea_src));
                 block
             }
@@ -113,14 +122,12 @@ impl Memory {
             Dest::Stack => {
                 if size != 1 {
                     let block = self.allocate(size);
-                    self.mov_inner(
-                        block.to_ea(self.current_frame_offset),
-                        src.into_ea(self.current_frame_offset),
-                        size,
-                    );
+                    let dest_ea = block.to_ea(self.current_frame_offset);
+                    let src_ea = src.into_ea(self);
+                    self.mov_inner(dest_ea, src_ea, size);
                     block
                 } else {
-                    let ea_src = src.into_ea(self.current_frame_offset);
+                    let ea_src = src.into_ea(self);
                     self.output.push(IR::Mov(EA::PreDec(Register::SP), ea_src));
                     self.current_frame_offset += 1;
                     Block::new(self.current_frame_offset, 1)
@@ -128,20 +135,15 @@ impl Memory {
             }
             Dest::Block(block) => {
                 assert_eq!(block.size(), size);
-                self.mov_inner(
-                    block.to_ea(self.current_frame_offset),
-                    src.into_ea(self.current_frame_offset),
-                    size,
-                );
+                let dest_ea = block.to_ea(self.current_frame_offset);
+                let src_ea = src.into_ea(self);
+                self.mov_inner(dest_ea, src_ea, size);
                 block
             }
             Dest::Offset(r, slice) => {
                 assert_eq!(slice.size, size);
-                self.mov_inner(
-                    EA::Offset(r, slice.offset),
-                    src.into_ea(self.current_frame_offset),
-                    size,
-                );
+                let src_ea = src.into_ea(self);
+                self.mov_inner(EA::Offset(r, slice.offset), src_ea, size);
                 // TODO
                 Block::new(0, 0)
             }
@@ -157,7 +159,7 @@ impl Memory {
         }
     }
     pub fn load_address(&mut self, dest: Dest, src: Src) -> Block {
-        let ea_src = src.into_ea(self.current_frame_offset);
+        let ea_src = src.into_ea(self);
         match dest {
             Dest::Stack => {
                 self.output
@@ -356,10 +358,9 @@ impl Memory {
 // TODO: take / free respective status registers
 impl Memory {
     pub fn bit_test(&mut self, target: Block, src: Src) {
-        self.output.push(IR::BitTest(
-            target.to_ea(self.current_frame_offset),
-            src.into_ea(self.current_frame_offset),
-        ))
+        let target_ea = target.to_ea(self.current_frame_offset);
+        let src_ea = src.into_ea(self);
+        self.output.push(IR::BitTest(target_ea, src_ea))
     }
     pub fn set_if(&mut self, dest: Dest, cond: IRCond) -> Block {
         let (ea, out) = match dest {
@@ -380,7 +381,7 @@ impl Memory {
         IRCond::Zero
     }
     pub fn cmp(&mut self, left: Src, right: Src) {
-        let right = right.into_ea(self.current_frame_offset);
+        let right = right.into_ea(self);
         let left = left.into_pop_ea(self);
         self.output.push(IR::Cmp(left, right))
     }

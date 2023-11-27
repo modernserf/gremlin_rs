@@ -98,6 +98,7 @@ pub struct Runtime {
     ip: usize,
     status: Status,
     memory: Vec<Word>,
+    post_inc: Option<Register>,
 }
 
 impl Runtime {
@@ -121,6 +122,7 @@ impl Runtime {
             ip: 0,
             memory: vec![0; memory_size as usize],
             status: Status::clear(),
+            post_inc: None,
         }
     }
     fn run_program(&mut self, program: &[IR]) {
@@ -217,28 +219,29 @@ impl Runtime {
                 panic!("runtime panic");
             }
             IR::Halt => {}
+        };
+        if let Some(register) = self.post_inc {
+            *self.get_register(register) += 1;
+            self.post_inc = None;
         }
     }
     fn get_src(&mut self, src: EA) -> Word {
         match src {
             EA::Immediate(value) => value,
             EA::Register(register) => *self.get_register(register),
-
             EA::Absolute(addr) => self.memory[addr as usize],
             EA::Offset(register, offset) => {
                 let addr = *self.get_register(register) + offset;
                 self.memory[addr as usize]
             }
-
             EA::Index(l, r, offset) => {
                 let addr = *self.get_register(l) + *self.get_register(r) + offset;
                 self.memory[addr as usize]
             }
-
             EA::PostInc(register) => {
                 let addr = *self.get_register(register);
                 let result = self.memory[addr as usize];
-                *self.get_register(register) += 1;
+                self.post_inc = Some(register);
                 result
             }
             EA::PreDec(register) => {

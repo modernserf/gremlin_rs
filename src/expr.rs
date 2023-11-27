@@ -238,7 +238,7 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'scope, 'ty_scope>
         }
     }
 
-    fn unary_op_expr(&mut self) -> CompileOpt<Expr> {
+    pub fn unary_op_expr(&mut self) -> CompileOpt<Expr> {
         let out = match self.lexer.peek()? {
             Token::Minus => {
                 self.lexer.advance();
@@ -260,23 +260,8 @@ impl<'lexer, 'compiler, 'memory, 'module_scope, 'scope, 'ty_scope>
         Ok(Some(out))
     }
 
-    fn expect_unary_op_expr(&mut self) -> Compile<Expr> {
+    pub fn expect_unary_op_expr(&mut self) -> Compile<Expr> {
         self.unary_op_expr()?.ok_or(Expected("expr"))
-    }
-
-    fn op_expr(&mut self) -> CompileOpt<Expr> {
-        let left = match self.unary_op_expr()? {
-            Some(expr) => expr,
-            None => return Ok(None),
-        };
-        let mut op_expr = self.compiler.op_begin(left);
-
-        while let Some(op) = self.lexer.op()? {
-            self.compiler.op_next(&mut op_expr, op)?;
-            let right = self.expect_unary_op_expr()?;
-            self.compiler.op_push(&mut op_expr, right);
-        }
-        self.compiler.op_end(op_expr).map(Some)
     }
 
     fn assign_expr(&mut self) -> CompileOpt<Expr> {
@@ -357,7 +342,7 @@ impl Reference {
             }
         }
     }
-    fn into_src_with_register(self, memory: &mut Memory) -> (Src, Option<Register>) {
+    pub fn into_src_with_register(self, memory: &mut Memory) -> (Src, Option<Register>) {
         match self.deref_level {
             0 => (Src::Block(self.next.focus(self.focus)), None),
             deref_level => {
@@ -372,11 +357,11 @@ impl Reference {
 #[derive(Debug)]
 pub struct Expr {
     pub ty: Ty,
-    kind: ExprKind,
+    pub kind: ExprKind,
 }
 
 #[derive(Debug)]
-enum ExprKind {
+pub enum ExprKind {
     // a value in memory, not assigned to a variable
     Block(Block),
     // a value known at compile time that has not yet been written to memory
@@ -478,42 +463,6 @@ impl Expr {
                 ty: deref_ty,
                 kind: ExprKind::Reference(r.inc_deref()),
             }),
-            _ => unreachable!(),
-        }
-    }
-    pub fn op_rhs(self, memory: &mut Memory, ty: Ty, op: Op, left: Expr) -> Expr {
-        // TODO: in (a < b) | (c < d), how do we ensure that we've saved a < b to stack
-        // by the time we execute c < d?
-
-        match (&left.kind, self.kind) {
-            (ExprKind::Constant(l), ExprKind::Constant(r)) => {
-                let value = op.inline(*l, r);
-                Expr::constant(ty, value)
-            }
-            (_, ExprKind::Constant(r)) => {
-                let left = Src::Block(left.resolve_to_stack(memory).block);
-                op.apply(memory, ty, left, Src::Immediate(r))
-            }
-            (_, ExprKind::Block(r)) => {
-                // TODO: try popping left
-                let left = Src::Block(left.resolve_to_stack(memory).block);
-                op.apply(memory, ty, left, Src::Block(r))
-            }
-            (_, ExprKind::Cond(r)) => {
-                let left = Src::Block(left.resolve_to_stack(memory).block);
-                let right = Src::Block(memory.set_if(Dest::Stack, r));
-                op.apply(memory, ty, left, right)
-            }
-            (_, ExprKind::Reference(r)) => {
-                let left = Src::Block(left.resolve_to_stack(memory).block);
-                // TODO
-                let (src, register) = r.into_src_with_register(memory);
-                let out = op.apply(memory, ty, left, src);
-                if let Some(register) = register {
-                    memory.free_register(register);
-                }
-                out
-            }
             _ => unreachable!(),
         }
     }
@@ -656,6 +605,9 @@ impl<'memory, 'module_scope, 'scope> ExprCompiler<'memory, 'module_scope, 'scope
 }
 
 impl ExprCompiler<'_, '_, '_> {
+    fn negate_expr(&mut self, expr: Expr) -> Compile<Expr> {
+        self.op_simple(Op::Sub, Expr::constant(Ty::int(), 0), expr)
+    }
     pub fn get_expr(&mut self, name: &str) -> Compile<Expr> {
         if let Some(record) = self.scope.get(name) {
             let block = Block::new(record.frame_offset, record.ty.size());
@@ -750,14 +702,34 @@ pub mod test {
             }
         }
 
-        pub fn expect_ok(mut self, code: &str, ir: Vec<IR>) {
+        pub fn expect_ir(&mut self, code: &str, ir: Vec<IR>) {
             self.reset_ir();
             let mut compiler =
                 ExprCompiler::new(&mut self.memory, &mut self.module_scope, &mut self.scope);
             let mut lexer = Lexer::new(code);
             let mut parser = ExprParser::new(&mut lexer, &mut compiler, &mut self.ty_scope);
-            parser.expr().expect("ok");
-            assert_eq!(self.memory.done(), ir);
+            parser
+                .expr()
+                .expect("ok")
+                .expect("present")
+                .resolve_to_stack(&mut self.memory);
+            assert_eq!(self.memory.output, ir);
+        }
+
+        pub fn expect_ir_result(&mut self, code: &str, ir: Vec<IR>, result: Word) {
+            self.reset_ir();
+            let mut compiler =
+                ExprCompiler::new(&mut self.memory, &mut self.module_scope, &mut self.scope);
+            let mut lexer = Lexer::new(code);
+            let mut parser = ExprParser::new(&mut lexer, &mut compiler, &mut self.ty_scope);
+            parser
+                .expr()
+                .expect("ok")
+                .expect("present")
+                .resolve_to_stack(&mut self.memory);
+            assert_eq!(self.memory.output, ir);
+            let actual = Runtime::eval(&self.memory.output);
+            assert_eq!(actual, result);
         }
     }
 }

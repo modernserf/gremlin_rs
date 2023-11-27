@@ -157,71 +157,6 @@ mod test {
     }
 
     #[test]
-    fn parens() {
-        expect_ir_result(
-            "volatile 3 * (volatile 4 + volatile 5);",
-            vec![
-                Mov(PreDec(SP), Immediate(3)),
-                Mov(PreDec(SP), Immediate(4)),
-                Mov(PreDec(SP), Immediate(5)),
-                Add(Offset(SP, 1), Offset(SP, 0)),
-                Mult(Offset(SP, 2), Offset(SP, 1)),
-                Add(Register(SP), Immediate(2)),
-            ],
-            27,
-        );
-    }
-
-    #[test]
-    fn constant_folding() {
-        expect_ir_result("3 * (4 + 5);", vec![Mov(PreDec(SP), Immediate(27))], 27);
-    }
-
-    #[test]
-    fn precedence() {
-        expect_ir_result(
-            "volatile 4 + volatile 5 * volatile 3;",
-            vec![
-                Mov(PreDec(SP), Immediate(4)),
-                Mov(PreDec(SP), Immediate(5)),
-                Mov(PreDec(SP), Immediate(3)),
-                Mult(Offset(SP, 1), Offset(SP, 0)),
-                Add(Offset(SP, 2), Offset(SP, 1)),
-                Add(Register(SP), Immediate(2)),
-            ],
-            19,
-        );
-        expect_ir_result("4 + 5 * 3;", vec![Mov(PreDec(SP), Immediate(19))], 19);
-    }
-
-    #[test]
-    fn negation() {
-        expect_ir_result("-3;", vec![Mov(PreDec(SP), Immediate(-3))], -3);
-
-        expect_ir_result(
-            "let a := 3; -a;",
-            vec![
-                Mov(PreDec(SP), Immediate(3)),
-                Mov(PreDec(SP), Immediate(0)),
-                Sub(Offset(SP, 0), Offset(SP, 1)),
-            ],
-            -3,
-        );
-
-        expect_ir_result(
-            "-(volatile 3);",
-            vec![
-                Mov(PreDec(SP), Immediate(3)),
-                Mov(PreDec(SP), Immediate(0)),
-                Sub(Offset(SP, 0), Offset(SP, 1)),
-                Mov(Offset(SP, 1), Offset(SP, 0)),
-                Add(Register(SP), Immediate(1)),
-            ],
-            -3,
-        );
-    }
-
-    #[test]
     fn ref_deref() {
         expect_result(
             "
@@ -507,23 +442,24 @@ mod test {
                 xs[volatile 1];
             ",
             vec![
-                //
+                // let xs := array[Int: 4]{10, 20, 30, 40};
                 Sub(Register(SP), Immediate(4)),
                 Mov(Offset(SP, 0), Immediate(10)),
                 Mov(Offset(SP, 1), Immediate(20)),
                 Mov(Offset(SP, 2), Immediate(30)),
                 Mov(Offset(SP, 3), Immediate(40)),
-                // xs
+                // &xs
                 LoadAddress(PreDec(SP), Offset(SP, 0)),
-                // [1]
+                // + (1 * sizeof Int)
                 Mov(PreDec(SP), Immediate(1)),
                 Mult(Offset(SP, 0), Immediate(1)),
-                Add(Offset(SP, 1), Offset(SP, 0)),
-                Mov(Register(R0), Offset(SP, 1)),
+                Add(Offset(SP, 1), PostInc(SP)),
+                // deref
+                Mov(Register(R0), Offset(SP, 0)),
                 Mov(PreDec(SP), Offset(R0, 0)),
-                // compact
-                Mov(Offset(SP, 2), Offset(SP, 0)),
-                Add(Register(SP), Immediate(2)),
+                // cleanup
+                Mov(Offset(SP, 1), Offset(SP, 0)),
+                Add(Register(SP), Immediate(1)),
             ],
             20,
         );

@@ -2,7 +2,7 @@ use crate::expr::*;
 use crate::memory::*;
 use crate::runtime::*;
 use crate::ty::*;
-use crate::Compile;
+use crate::{Compile, CompileOpt};
 
 // a * b + c
 // a: [a] []
@@ -21,6 +21,61 @@ use crate::Compile;
 // .. [a, b * c] [+]
 // .. [a + (b * c)] []
 
+impl ExprParser<'_, '_, '_, '_, '_, '_> {
+    pub fn op_expr(&mut self) -> CompileOpt<Expr> {
+        let left = match self.unary_op_expr()? {
+            Some(expr) => expr,
+            None => return Ok(None),
+        };
+        let mut op_expr = self.compiler.op_begin(left);
+
+        while let Some(op) = self.lexer.op()? {
+            self.compiler.op_next(&mut op_expr, op)?;
+            let right = self.expect_unary_op_expr()?;
+            self.compiler.op_push(&mut op_expr, right);
+        }
+        self.compiler.op_end(op_expr).map(Some)
+    }
+}
+
+impl Expr {
+    pub fn op_rhs(self, memory: &mut Memory, ty: Ty, op: Op, left: Expr) -> Expr {
+        // TODO: in (a < b) | (c < d), how do we ensure that we've saved a < b to stack
+        // by the time we execute c < d?
+
+        match (&left.kind, self.kind) {
+            (ExprKind::Constant(l), ExprKind::Constant(r)) => {
+                let value = op.inline(*l, r);
+                Expr::constant(ty, value)
+            }
+            (_, ExprKind::Constant(r)) => {
+                let left = Src::Block(left.resolve_to_stack(memory).block);
+                op.apply(memory, ty, left, Src::Immediate(r))
+            }
+            (_, ExprKind::Block(r)) => {
+                let left = Src::Block(left.resolve_to_stack(memory).block);
+                op.apply(memory, ty, left, Src::PopBlock(r))
+            }
+            (_, ExprKind::Cond(r)) => {
+                let left = Src::Block(left.resolve_to_stack(memory).block);
+                let right = Src::Block(memory.set_if(Dest::Stack, r));
+                op.apply(memory, ty, left, right)
+            }
+            (_, ExprKind::Reference(r)) => {
+                let left = Src::Block(left.resolve_to_stack(memory).block);
+                // TODO
+                let (src, register) = r.into_src_with_register(memory);
+                let out = op.apply(memory, ty, left, src);
+                if let Some(register) = register {
+                    memory.free_register(register);
+                }
+                out
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Op {
     Add,
@@ -31,7 +86,7 @@ pub enum Op {
 }
 
 #[derive(Debug)]
-pub enum OpKind {
+enum OpKind {
     Accumulate(IROp),
     Cmp(IRCond),
 }
@@ -118,14 +173,13 @@ pub struct OpExpr {
 }
 
 impl ExprCompiler<'_, '_, '_> {
-    pub fn op_begin(&mut self, left: Expr) -> OpExpr {
+    fn op_begin(&mut self, left: Expr) -> OpExpr {
         OpExpr {
             op_stack: Vec::new(),
             operands: vec![left],
         }
     }
-    // TODO: somewhere here need to
-    pub fn op_next(&mut self, op_expr: &mut OpExpr, op: Op) -> Compile<()> {
+    fn op_next(&mut self, op_expr: &mut OpExpr, op: Op) -> Compile<()> {
         match op_expr.op_stack.pop() {
             Some(last_op) => {
                 if last_op.precedence() > op.precedence() {
@@ -142,10 +196,10 @@ impl ExprCompiler<'_, '_, '_> {
         };
         Ok(())
     }
-    pub fn op_push(&mut self, op_expr: &mut OpExpr, expr: Expr) {
+    fn op_push(&mut self, op_expr: &mut OpExpr, expr: Expr) {
         op_expr.operands.push(expr);
     }
-    pub fn op_end(&mut self, mut op_expr: OpExpr) -> Compile<Expr> {
+    fn op_end(&mut self, mut op_expr: OpExpr) -> Compile<Expr> {
         while let Some(op) = op_expr.op_stack.pop() {
             self.op_apply(&mut op_expr, op)?;
         }
@@ -160,14 +214,71 @@ impl ExprCompiler<'_, '_, '_> {
         op_expr.operands.push(result);
         Ok(())
     }
-    pub fn negate_expr(&mut self, expr: Expr) -> Compile<Expr> {
-        self.op_simple(Op::Sub, Expr::constant(Ty::int(), 0), expr)
-    }
     pub fn op_simple(&mut self, op: Op, left: Expr, right: Expr) -> Compile<Expr> {
         let op_expr = OpExpr {
             op_stack: vec![op],
             operands: vec![left, right],
         };
         self.op_end(op_expr)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::expr::test::ExprFixture;
+    use crate::runtime::{Register::*, EA::*, IR::*};
+
+    #[test]
+    fn parens() {
+        let mut fx = ExprFixture::new();
+        fx.expect_ir_result(
+            "volatile 3 * (volatile 4 + volatile 5)",
+            vec![
+                Mov(PreDec(SP), Immediate(3)),
+                Mov(PreDec(SP), Immediate(4)),
+                Mov(PreDec(SP), Immediate(5)),
+                Add(Offset(SP, 1), PostInc(SP)),
+                Mult(Offset(SP, 1), PostInc(SP)),
+            ],
+            27,
+        );
+    }
+
+    #[test]
+    fn constant_folding() {
+        let mut fx = ExprFixture::new();
+        fx.expect_ir_result("3 * (4 + 5)", vec![Mov(PreDec(SP), Immediate(27))], 27);
+    }
+
+    #[test]
+    fn precedence() {
+        let mut fx = ExprFixture::new();
+        fx.expect_ir_result(
+            "volatile 4 + volatile 5 * volatile 3",
+            vec![
+                Mov(PreDec(SP), Immediate(4)),
+                Mov(PreDec(SP), Immediate(5)),
+                Mov(PreDec(SP), Immediate(3)),
+                Mult(Offset(SP, 1), PostInc(SP)),
+                Add(Offset(SP, 1), PostInc(SP)),
+            ],
+            19,
+        );
+        fx.expect_ir_result("4 + 5 * 3", vec![Mov(PreDec(SP), Immediate(19))], 19);
+    }
+
+    #[test]
+    fn negation() {
+        let mut fx = ExprFixture::new();
+        fx.expect_ir_result("-3", vec![Mov(PreDec(SP), Immediate(-3))], -3);
+        fx.expect_ir_result(
+            "-(volatile 3)",
+            vec![
+                Mov(PreDec(SP), Immediate(3)),
+                Mov(PreDec(SP), Immediate(0)),
+                Sub(Offset(SP, 0), Offset(SP, 1)),
+            ],
+            -3,
+        );
     }
 }
