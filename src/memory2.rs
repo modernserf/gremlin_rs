@@ -32,19 +32,215 @@ impl Memory2 {
             cc_zero_locked: false,
         }
     }
-    #[cfg(test)]
-    fn expect_output(&mut self, output: Vec<IR>) {
-        assert_eq!(self.output, output);
+}
+
+#[cfg(test)]
+mod test_utils {
+    use super::*;
+    // mini AST / parser
+
+    pub enum Module {
+        Sub(&'static str, Vec<(&'static str, Ty)>, Ty, Vec<Stmt>),
     }
-    #[cfg(test)]
-    fn expect_stack(&mut self, stack: Vec<StackItemKind>) {
-        assert_eq!(
-            self.stack
-                .iter()
-                .map(|s| s.kind.clone())
-                .collect::<Vec<_>>(),
-            stack
-        );
+
+    pub enum Stmt {
+        Let(&'static str, Expr),
+        Expr(Expr),
+        If(Expr, Vec<Stmt>, Vec<Stmt>),
+        While(Expr, Vec<Stmt>),
+        Return(Option<Expr>),
+    }
+
+    pub enum Expr {
+        Int(Word),
+        Ident(&'static str),
+        Add(Box<Expr>, Box<Expr>),
+        Call(Box<Expr>, Vec<Expr>),
+        Cond(IRCond, Box<Expr>, Box<Expr>),
+        Assign(Box<Expr>, Box<Expr>),
+        Ref(Box<Expr>),
+        Deref(Box<Expr>),
+    }
+
+    impl Expr {
+        pub fn add(l: Expr, r: Expr) -> Expr {
+            Expr::Add(Box::new(l), Box::new(r))
+        }
+        pub fn assign(l: Expr, r: Expr) -> Expr {
+            Expr::Assign(Box::new(l), Box::new(r))
+        }
+        pub fn ref_(expr: Expr) -> Expr {
+            Expr::Ref(Box::new(expr))
+        }
+        pub fn deref(expr: Expr) -> Expr {
+            Expr::Deref(Box::new(expr))
+        }
+        pub fn cond(cond: IRCond, l: Expr, r: Expr) -> Expr {
+            Expr::Cond(cond, Box::new(l), Box::new(r))
+        }
+        pub fn call(sub: Expr, args: Vec<Expr>) -> Expr {
+            Expr::Call(Box::new(sub), args)
+        }
+    }
+
+    impl Memory2 {
+        pub fn expect_output(&mut self, output: Vec<IR>) {
+            assert_eq!(self.output, output);
+        }
+        pub fn expect_stack(&mut self, stack: Vec<StackItemKind>) {
+            assert_eq!(
+                self.stack
+                    .iter()
+                    .map(|s| s.kind.clone())
+                    .collect::<Vec<_>>(),
+                stack
+            );
+        }
+        pub fn p_expr(&mut self, expr: Expr) -> Compile<Item> {
+            match expr {
+                Expr::Int(value) => Ok(Item::Constant(Ty::int(), value)),
+                Expr::Ident(name) => {
+                    if let Some(idx) = self.get_scope(name) {
+                        let ty = self.stack[idx].kind.ty().clone();
+                        return Ok(Item::Local(ty, idx, 0));
+                    }
+                    if let Some(record) = self.module_scope.subs.get(name) {
+                        return Ok(Item::Sub(record.clone()));
+                    }
+                    Err(UnknownIdentifier(name.to_string()))
+                }
+                Expr::Ref(expr) => {
+                    let item = self.p_expr(*expr)?;
+                    self.ref_item(item)
+                }
+                Expr::Deref(expr) => {
+                    let item = self.p_expr(*expr)?;
+                    self.deref_item(item)
+                }
+                Expr::Assign(left, right) => {
+                    let left = self.p_expr(*left)?;
+
+                    match &left {
+                        Item::Local(_, _, _) => {}
+                        Item::AddressIndirect(_, _, _) => {}
+                        _ => return Err(InvalidAssignment),
+                    };
+
+                    let right = self.p_expr(*right)?;
+                    self.apply_item(IR::Mov, &left, right);
+                    Ok(left)
+                }
+                Expr::Add(left, right) => {
+                    let left = self.p_expr(*left)?;
+                    if let Item::Constant(ty, l) = left {
+                        let right = self.p_expr(*right)?;
+                        // constant folding
+                        if let Item::Constant(_, r) = right {
+                            return Ok(Item::Constant(ty, l + r));
+                        }
+                        let right = self.materialize_item(right);
+                        // reverse commutative operands
+                        self.apply_item(IR::Add, &right, Item::Constant(ty, l));
+                        return Ok(right);
+                    }
+
+                    // need to materialize left _before_ parsing right, in case left is volatile
+                    let left = self.materialize_item(left);
+
+                    let right = self.p_expr(*right)?;
+                    self.apply_item(IR::Add, &left, right);
+                    Ok(left)
+                }
+                Expr::Cond(cond, left, right) => {
+                    let left = self.p_expr(*left)?;
+                    let right = self.p_expr(*right)?;
+                    self.cmp(left, right)?;
+
+                    Ok(Item::Cond(Ty::bool(), cond))
+                }
+                Expr::Call(sub, args) => {
+                    let sub = self.p_expr(*sub)?;
+                    let callable = self.callable_item(sub)?;
+                    self.begin_call(&callable);
+                    for arg in args {
+                        let arg = self.p_expr(arg)?;
+                        self.push_item(arg);
+                    }
+                    Ok(self.end_call(&callable))
+                }
+            }
+        }
+        pub fn p_stmt(&mut self, stmt: Stmt) -> Compile<()> {
+            match stmt {
+                Stmt::Let(name, expr) => {
+                    let item = self.p_expr(expr)?;
+                    let idx = self.push_item(item);
+                    self.insert_scope(name.to_string(), idx);
+                    self.stack[idx].kind = match &self.stack[idx].kind {
+                        StackItemKind::Expr(t) => StackItemKind::Local(name.to_string(), t.clone()),
+                        _ => unreachable!(),
+                    }
+                }
+                Stmt::If(expr, if_true, if_false) => {
+                    let item = self.p_expr(expr)?;
+                    let cond = self.cond_item(item)?;
+                    let true_idx = self.forward_branch_if(cond);
+                    self.p_block(if_true)?;
+                    if if_false.len() > 0 {
+                        let false_idx = self.forward_branch_else(true_idx);
+                        self.p_block(if_false)?;
+                        self.resolve_forward_branch(false_idx);
+                    } else {
+                        self.resolve_forward_branch(true_idx);
+                    }
+                }
+                Stmt::While(expr, block) => {
+                    let loop_idx = self.loop_begin();
+                    let item = self.p_expr(expr)?;
+                    let cond = self.cond_item(item)?;
+                    let while_idx = self.forward_branch_if(cond);
+                    self.p_block(block)?;
+                    self.loop_end(loop_idx);
+                    self.resolve_forward_branch(while_idx);
+                }
+                Stmt::Return(opt_expr) => {
+                    let item = if let Some(expr) = opt_expr {
+                        Some(self.p_expr(expr)?)
+                    } else {
+                        None
+                    };
+                    self.return_sub(item)?;
+                }
+                Stmt::Expr(expr) => {
+                    let item = self.p_expr(expr)?;
+                    self.drop_item(item);
+                }
+            }
+            Ok(())
+        }
+        pub fn p_block(&mut self, block: Vec<Stmt>) -> Compile<()> {
+            for stmt in block {
+                self.p_stmt(stmt)?;
+            }
+            Ok(())
+        }
+        pub fn p_module(&mut self, module: Vec<Module>) -> Compile<()> {
+            for item in module {
+                match item {
+                    Module::Sub(name, params, ret, body) => {
+                        let params = params
+                            .into_iter()
+                            .map(|(name, ty)| (name.to_string(), ty))
+                            .collect();
+
+                        self.begin_sub(name.to_string(), params, ret);
+                        self.p_block(body)?;
+                        self.end_sub()?;
+                    }
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -69,15 +265,14 @@ enum StackItemKind {
     // the return address on the stack between args & locals
     ReturnAddr,
 }
-use StackItemKind::*;
 
 impl StackItemKind {
     fn ty(&self) -> &Ty {
         match &self {
-            Local(_, ty) => ty,
-            Arg(_, ty) => ty,
-            Return(ty) => ty,
-            Expr(ty) => ty,
+            StackItemKind::Local(_, ty) => ty,
+            StackItemKind::Arg(_, ty) => ty,
+            StackItemKind::Return(ty) => ty,
+            StackItemKind::Expr(ty) => ty,
             _ => panic!("expected value with type"),
         }
     }
@@ -166,179 +361,6 @@ impl ModuleScope {
             ]),
             subs: HashMap::new(),
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SubRecord {
-    ty: Ty,
-    // where the sub begins in the output
-    index: usize,
-}
-
-impl SubRecord {
-    fn return_ty(&self) -> Ty {
-        let ty = self.ty.get_sub().unwrap();
-        ty.ret.clone()
-    }
-    fn params_size(&self) -> Word {
-        let ty = self.ty.get_sub().unwrap();
-        ty.params
-            .iter()
-            .map(|p| p.size())
-            .fold(0, |acc, size| acc + size)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SubContext {
-    name: String,
-    return_ty: Ty,
-    return_idx: usize,
-    return_addr_idx: usize,
-    did_return: bool,
-    ty: Ty,
-    index: usize,
-}
-
-// Calling convention
-// [return value, args..., return addr, locals...] top
-// caller:
-// Sub(SP, sizeof return)
-// Mov(Push, arg) ...
-// JSR(sub)
-// ...
-// Add(SP, sizeof args)
-// callee:
-// ...
-// Mov(SP+return, result)
-// Add(SP, sizeof locals)
-// RTS
-
-impl Memory2 {
-    fn callable_item(&self, item: Item) -> Compile<SubRecord> {
-        match item {
-            Item::Sub(record) => Ok(record),
-            _ => Err(Expected("subroutine")),
-        }
-    }
-
-    fn begin_call(&mut self, sub: &SubRecord) {
-        let size = sub.return_ty().size();
-        if size > 0 {
-            for _ in 1..size {
-                self.push_stack_item(Owned);
-            }
-            self.push_stack_item(Expr(sub.return_ty().clone()));
-            self.output
-                .push(IR::Sub(EA::Register(Register::SP), EA::Immediate(size)));
-        }
-    }
-
-    fn end_call(&mut self, sub: &SubRecord) -> Item {
-        self.invalidate_volatile_registers();
-        self.clobber_cc_zero();
-
-        self.output.push(IR::Call(sub.index as Word));
-        let to_drop = sub.params_size();
-        if to_drop > 0 {
-            self.output
-                .push(IR::Add(EA::Register(Register::SP), EA::Immediate(to_drop)));
-            let new_len = self.stack.len() - to_drop as usize;
-            self.stack.truncate(new_len);
-        };
-        let idx = self.stack.len() - 1;
-        Item::Stack(sub.return_ty(), idx)
-    }
-
-    fn begin_sub(&mut self, name: String, params: Vec<(String, Ty)>, ret: Ty) {
-        self.scope = Vec::new();
-        self.stack = Vec::new();
-        self.init_registers();
-        self.clobber_cc_zero();
-
-        // begin sub scope
-        self.init_scope();
-        let ty = Ty::sub(TySub::new(
-            params.iter().map(|(_, ty)| ty.clone()).collect(),
-            ret.clone(),
-        ));
-        let return_idx = if ret.size() > 0 {
-            // return slot
-            for _ in 1..ret.size() {
-                self.push_stack_item(Owned);
-            }
-            self.push_stack_item(Return(ret.clone()))
-        } else {
-            0
-        };
-
-        // params
-        for (name, ty) in params.into_iter() {
-            for _ in 1..ty.size() {
-                self.push_stack_item(Owned);
-            }
-            let idx = self.push_stack_item(Arg(name.clone(), ty));
-            self.insert_scope(name, idx);
-        }
-        // return addr
-        let return_addr_idx = self.push_stack_item(ReturnAddr);
-
-        // begin locals scope
-        self.enter_block();
-
-        self.current_sub = Some(SubContext {
-            name,
-            did_return: false,
-            return_ty: ret,
-            return_idx,
-            return_addr_idx,
-            ty,
-            index: self.output.len(),
-        });
-    }
-
-    fn return_sub(&mut self, src: Option<Item>) -> Compile<()> {
-        let ctx = self.current_sub.as_mut().unwrap();
-        ctx.did_return = true;
-        let scope_idx = self.scope.len() - 1;
-        self.scope[scope_idx].did_return = true;
-
-        let return_dest = Item::Local(ctx.return_ty.clone(), ctx.return_idx, 0);
-
-        let to_drop = self.stack.len() - ctx.return_addr_idx - 1;
-
-        if let Some(src) = src {
-            // TODO: check return ty
-            self.apply_item(IR::Mov, &return_dest, src);
-        } else {
-            ctx.return_ty.check(&Ty::void())?;
-        }
-
-        if to_drop > 0 {
-            self.output.push(IR::Add(
-                EA::Register(Register::SP),
-                EA::Immediate(to_drop as Word),
-            ));
-        }
-        self.output.push(IR::Return);
-
-        Ok(())
-    }
-
-    fn end_sub(&mut self) -> Compile<()> {
-        if !self.current_sub.as_ref().unwrap().did_return {
-            self.return_sub(None)?;
-        }
-        let ctx = self.current_sub.take().unwrap();
-        self.module_scope.subs.insert(
-            ctx.name,
-            SubRecord {
-                ty: ctx.ty,
-                index: ctx.index,
-            },
-        );
-        Ok(())
     }
 }
 
@@ -512,10 +534,10 @@ impl Memory2 {
 
         // write high to low
         for _ in 1..ty.size() {
-            self.push_stack_item(Owned);
+            self.push_stack_item(StackItemKind::Owned);
             self.output.push(IR::Mov(PUSH, src_ea));
         }
-        let idx = self.push_stack_item(Expr(ty));
+        let idx = self.push_stack_item(StackItemKind::Expr(ty));
         self.output.push(IR::Mov(PUSH, src_ea));
         idx
     }
@@ -523,13 +545,13 @@ impl Memory2 {
     fn push_item(&mut self, item: Item) -> usize {
         let (ty, src_ea) = match item {
             Item::Local(ty, offset, 1) => {
-                let idx = self.push_stack_item(Expr(ty));
+                let idx = self.push_stack_item(StackItemKind::Expr(ty));
                 self.output
                     .push(IR::LoadAddress(PUSH, self.stack_offset__(offset)));
                 return idx;
             }
             Item::Cond(ty, cond) => {
-                let idx = self.push_stack_item(Expr(ty));
+                let idx = self.push_stack_item(StackItemKind::Expr(ty));
                 self.output.push(IR::SetIf(PUSH, cond));
                 return idx;
             }
@@ -681,204 +703,9 @@ impl Memory2 {
 
 #[cfg(test)]
 mod item_test {
+    use super::test_utils::*;
     use super::{Address::*, Data::*, *};
-    use crate::runtime::{IRCond::*, Register::SP, EA::*, IR, IR::*};
-
-    // mini AST / parser
-
-    enum Module {
-        Sub(&'static str, Vec<(&'static str, Ty)>, Ty, Vec<Stmt>),
-    }
-
-    enum Stmt {
-        Let(&'static str, Expr),
-        Expr(Expr),
-        If(Expr, Vec<Stmt>, Vec<Stmt>),
-        While(Expr, Vec<Stmt>),
-        Return(Option<Expr>),
-    }
-
-    enum Expr {
-        Int(Word),
-        Ident(&'static str),
-        Add(Box<Expr>, Box<Expr>),
-        Call(Box<Expr>, Vec<Expr>),
-        Cond(IRCond, Box<Expr>, Box<Expr>),
-        Assign(Box<Expr>, Box<Expr>),
-        Ref(Box<Expr>),
-        Deref(Box<Expr>),
-    }
-
-    impl Expr {
-        fn add(l: Expr, r: Expr) -> Expr {
-            Expr::Add(Box::new(l), Box::new(r))
-        }
-        fn assign(l: Expr, r: Expr) -> Expr {
-            Expr::Assign(Box::new(l), Box::new(r))
-        }
-        fn ref_(expr: Expr) -> Expr {
-            Expr::Ref(Box::new(expr))
-        }
-        fn deref(expr: Expr) -> Expr {
-            Expr::Deref(Box::new(expr))
-        }
-        fn cond(cond: IRCond, l: Expr, r: Expr) -> Expr {
-            Expr::Cond(cond, Box::new(l), Box::new(r))
-        }
-        fn call(sub: Expr, args: Vec<Expr>) -> Expr {
-            Expr::Call(Box::new(sub), args)
-        }
-    }
-
-    impl Memory2 {
-        fn p_expr(&mut self, expr: Expr) -> Compile<Item> {
-            match expr {
-                Expr::Int(value) => Ok(Item::Constant(Ty::int(), value)),
-                Expr::Ident(name) => {
-                    if let Some(idx) = self.get_scope(name) {
-                        let ty = self.stack[idx].kind.ty().clone();
-                        return Ok(Item::Local(ty, idx, 0));
-                    }
-                    if let Some(record) = self.module_scope.subs.get(name) {
-                        return Ok(Item::Sub(record.clone()));
-                    }
-                    Err(UnknownIdentifier(name.to_string()))
-                }
-                Expr::Ref(expr) => {
-                    let item = self.p_expr(*expr)?;
-                    self.ref_item(item)
-                }
-                Expr::Deref(expr) => {
-                    let item = self.p_expr(*expr)?;
-                    self.deref_item(item)
-                }
-                Expr::Assign(left, right) => {
-                    let left = self.p_expr(*left)?;
-
-                    match &left {
-                        Item::Local(_, _, _) => {}
-                        Item::AddressIndirect(_, _, _) => {}
-                        _ => return Err(InvalidAssignment),
-                    };
-
-                    let right = self.p_expr(*right)?;
-                    self.apply_item(IR::Mov, &left, right);
-                    Ok(left)
-                }
-                Expr::Add(left, right) => {
-                    let left = self.p_expr(*left)?;
-                    if let Item::Constant(ty, l) = left {
-                        let right = self.p_expr(*right)?;
-                        // constant folding
-                        if let Item::Constant(_, r) = right {
-                            return Ok(Item::Constant(ty, l + r));
-                        }
-                        let right = self.materialize_item(right);
-                        // reverse commutative operands
-                        self.apply_item(IR::Add, &right, Item::Constant(ty, l));
-                        return Ok(right);
-                    }
-
-                    // need to materialize left _before_ parsing right, in case left is volatile
-                    let left = self.materialize_item(left);
-
-                    let right = self.p_expr(*right)?;
-                    self.apply_item(IR::Add, &left, right);
-                    Ok(left)
-                }
-                Expr::Cond(cond, left, right) => {
-                    let left = self.p_expr(*left)?;
-                    let right = self.p_expr(*right)?;
-                    self.cmp(left, right)?;
-
-                    Ok(Item::Cond(Ty::bool(), cond))
-                }
-                Expr::Call(sub, args) => {
-                    let sub = self.p_expr(*sub)?;
-                    let callable = self.callable_item(sub)?;
-                    self.begin_call(&callable);
-                    for arg in args {
-                        let arg = self.p_expr(arg)?;
-                        self.push_item(arg);
-                    }
-                    Ok(self.end_call(&callable))
-                }
-            }
-        }
-
-        fn p_stmt(&mut self, stmt: Stmt) -> Compile<()> {
-            match stmt {
-                Stmt::Let(name, expr) => {
-                    let item = self.p_expr(expr)?;
-                    let idx = self.push_item(item);
-                    self.insert_scope(name.to_string(), idx);
-                    self.stack[idx].kind = match &self.stack[idx].kind {
-                        Expr(t) => Local(name.to_string(), t.clone()),
-                        _ => unreachable!(),
-                    }
-                }
-                Stmt::If(expr, if_true, if_false) => {
-                    let item = self.p_expr(expr)?;
-                    let cond = self.cond_item(item)?;
-                    let true_idx = self.forward_branch_if(cond);
-                    self.p_block(if_true)?;
-                    if if_false.len() > 0 {
-                        let false_idx = self.forward_branch_else(true_idx);
-                        self.p_block(if_false)?;
-                        self.resolve_forward_branch(false_idx);
-                    } else {
-                        self.resolve_forward_branch(true_idx);
-                    }
-                }
-                Stmt::While(expr, block) => {
-                    let loop_idx = self.loop_begin();
-                    let item = self.p_expr(expr)?;
-                    let cond = self.cond_item(item)?;
-                    let while_idx = self.forward_branch_if(cond);
-                    self.p_block(block)?;
-                    self.loop_end(loop_idx);
-                    self.resolve_forward_branch(while_idx);
-                }
-                Stmt::Return(opt_expr) => {
-                    let item = if let Some(expr) = opt_expr {
-                        Some(self.p_expr(expr)?)
-                    } else {
-                        None
-                    };
-                    self.return_sub(item)?;
-                }
-                Stmt::Expr(expr) => {
-                    let item = self.p_expr(expr)?;
-                    self.drop_item(item);
-                }
-            }
-            Ok(())
-        }
-        fn p_block(&mut self, block: Vec<Stmt>) -> Compile<()> {
-            for stmt in block {
-                self.p_stmt(stmt)?;
-            }
-            Ok(())
-        }
-
-        fn p_module(&mut self, module: Vec<Module>) -> Compile<()> {
-            for item in module {
-                match item {
-                    Module::Sub(name, params, ret, body) => {
-                        let params = params
-                            .into_iter()
-                            .map(|(name, ty)| (name.to_string(), ty))
-                            .collect();
-
-                        self.begin_sub(name.to_string(), params, ret);
-                        self.p_block(body)?;
-                        self.end_sub()?;
-                    }
-                }
-            }
-            Ok(())
-        }
-    }
+    use crate::runtime::{Register::SP, EA::*, IR::*};
 
     #[test]
     fn assignment() {
@@ -1076,6 +903,70 @@ mod item_test {
             Mov(A0.ea_offset(0), Immediate(200)),
         ])
     }
+}
+
+// Loops & Conditionals
+
+impl Memory2 {
+    pub fn cmp(&mut self, left: Item, right: Item) -> Compile<()> {
+        // TODO: check types
+        let (_, left_ea) = self.item_src(left);
+        let (_, right_ea) = self.item_src(right);
+        self.output.push(IR::Cmp(left_ea, right_ea));
+
+        self.cc_zero_locked = true;
+        Ok(())
+    }
+
+    pub fn forward_branch_if(&mut self, cond: IRCond) -> usize {
+        if !self.cc_zero_locked {
+            panic!("cc zero vacant");
+        }
+        let idx = self.output.len();
+        self.output.push(IR::BranchIf(EA::Immediate(-1), cond));
+
+        self.cc_zero_locked = false;
+        idx
+    }
+    pub fn forward_branch_else(&mut self, true_idx: usize) -> usize {
+        self.cc_zero_locked = true;
+        let false_idx = self.forward_branch_if(IRCond::Always);
+        self.resolve_forward_branch(true_idx);
+        false_idx
+    }
+
+    pub fn resolve_forward_branch(&mut self, idx: usize) {
+        let here = self.output.len();
+        let displacement = here - idx - 1;
+        self.output[idx] = match &self.output[idx] {
+            IR::BranchIf(EA::Immediate(-1), cond) => {
+                IR::BranchIf(EA::Immediate(displacement as Word), *cond)
+            }
+            _ => unreachable!(),
+        };
+    }
+    pub fn loop_begin(&mut self) -> usize {
+        self.output.len()
+    }
+    pub fn loop_end(&mut self, idx: usize) {
+        let here = self.output.len();
+        let displacement = (here - idx + 1) as Word;
+        self.output
+            .push(IR::BranchIf(EA::Immediate(-displacement), IRCond::Always));
+    }
+
+    fn clobber_cc_zero(&mut self) {
+        if self.cc_zero_locked {
+            panic!("clobbered cc zero");
+        }
+    }
+}
+
+#[cfg(test)]
+mod cond_test {
+    use super::test_utils::*;
+    use super::{Address::*, Data::*, *};
+    use crate::runtime::{IRCond::*, Register::SP, EA::*, IR::*};
 
     #[test]
     fn if_stmt() {
@@ -1185,6 +1076,186 @@ mod item_test {
             // end
         ])
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubRecord {
+    ty: Ty,
+    // where the sub begins in the output
+    index: usize,
+}
+
+impl SubRecord {
+    fn return_ty(&self) -> Ty {
+        let ty = self.ty.get_sub().unwrap();
+        ty.ret.clone()
+    }
+    fn params_size(&self) -> Word {
+        let ty = self.ty.get_sub().unwrap();
+        ty.params
+            .iter()
+            .map(|p| p.size())
+            .fold(0, |acc, size| acc + size)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubContext {
+    name: String,
+    return_ty: Ty,
+    return_idx: usize,
+    return_addr_idx: usize,
+    did_return: bool,
+    ty: Ty,
+    index: usize,
+}
+
+// Calling convention
+// [return value, args..., return addr, locals...] top
+// caller:
+// Sub(SP, sizeof return)
+// Mov(Push, arg) ...
+// JSR(sub)
+// ...
+// Add(SP, sizeof args)
+// callee:
+// ...
+// Mov(SP+return, result)
+// Add(SP, sizeof locals)
+// RTS
+
+impl Memory2 {
+    fn callable_item(&self, item: Item) -> Compile<SubRecord> {
+        match item {
+            Item::Sub(record) => Ok(record),
+            _ => Err(Expected("subroutine")),
+        }
+    }
+
+    fn begin_call(&mut self, sub: &SubRecord) {
+        let size = sub.return_ty().size();
+        if size > 0 {
+            for _ in 1..size {
+                self.push_stack_item(StackItemKind::Owned);
+            }
+            self.push_stack_item(StackItemKind::Expr(sub.return_ty().clone()));
+            self.output
+                .push(IR::Sub(EA::Register(Register::SP), EA::Immediate(size)));
+        }
+    }
+
+    fn end_call(&mut self, sub: &SubRecord) -> Item {
+        self.invalidate_volatile_registers();
+        self.clobber_cc_zero();
+
+        self.output.push(IR::Call(sub.index as Word));
+        let to_drop = sub.params_size();
+        if to_drop > 0 {
+            self.output
+                .push(IR::Add(EA::Register(Register::SP), EA::Immediate(to_drop)));
+            let new_len = self.stack.len() - to_drop as usize;
+            self.stack.truncate(new_len);
+        };
+        let idx = self.stack.len() - 1;
+        Item::Stack(sub.return_ty(), idx)
+    }
+
+    fn begin_sub(&mut self, name: String, params: Vec<(String, Ty)>, ret: Ty) {
+        self.scope = Vec::new();
+        self.stack = Vec::new();
+        self.init_registers();
+        self.clobber_cc_zero();
+
+        // begin sub scope
+        self.init_scope();
+        let ty = Ty::sub(TySub::new(
+            params.iter().map(|(_, ty)| ty.clone()).collect(),
+            ret.clone(),
+        ));
+        let return_idx = if ret.size() > 0 {
+            // return slot
+            for _ in 1..ret.size() {
+                self.push_stack_item(StackItemKind::Owned);
+            }
+            self.push_stack_item(StackItemKind::Return(ret.clone()))
+        } else {
+            0
+        };
+
+        // params
+        for (name, ty) in params.into_iter() {
+            for _ in 1..ty.size() {
+                self.push_stack_item(StackItemKind::Owned);
+            }
+            let idx = self.push_stack_item(StackItemKind::Arg(name.clone(), ty));
+            self.insert_scope(name, idx);
+        }
+        // return addr
+        let return_addr_idx = self.push_stack_item(StackItemKind::ReturnAddr);
+
+        // begin locals scope
+        self.enter_block();
+
+        self.current_sub = Some(SubContext {
+            name,
+            did_return: false,
+            return_ty: ret,
+            return_idx,
+            return_addr_idx,
+            ty,
+            index: self.output.len(),
+        });
+    }
+
+    fn return_sub(&mut self, src: Option<Item>) -> Compile<()> {
+        let ctx = self.current_sub.as_mut().unwrap();
+        ctx.did_return = true;
+        let scope_idx = self.scope.len() - 1;
+        self.scope[scope_idx].did_return = true;
+
+        let return_dest = Item::Local(ctx.return_ty.clone(), ctx.return_idx, 0);
+
+        let to_drop = self.stack.len() - ctx.return_addr_idx - 1;
+
+        if let Some(src) = src {
+            // TODO: check return ty
+            self.apply_item(IR::Mov, &return_dest, src);
+        } else {
+            ctx.return_ty.check(&Ty::void())?;
+        }
+
+        if to_drop > 0 {
+            self.output.push(IR::Add(
+                EA::Register(Register::SP),
+                EA::Immediate(to_drop as Word),
+            ));
+        }
+        self.output.push(IR::Return);
+
+        Ok(())
+    }
+
+    fn end_sub(&mut self) -> Compile<()> {
+        if !self.current_sub.as_ref().unwrap().did_return {
+            self.return_sub(None)?;
+        }
+        let ctx = self.current_sub.take().unwrap();
+        self.module_scope.subs.insert(
+            ctx.name,
+            SubRecord {
+                ty: ctx.ty,
+                index: ctx.index,
+            },
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod sub_test {
+    use super::test_utils::*;
+    use super::{Address::*, Data::*, *};
+    use crate::runtime::{Register::SP, EA::*, IR, IR::*};
 
     #[test]
     fn sub_calls() {
@@ -1229,63 +1300,6 @@ mod item_test {
             Add(Register(SP), Immediate(1)),
             IR::Return,
         ])
-    }
-}
-
-// Loops & Conditionals
-
-impl Memory2 {
-    pub fn cmp(&mut self, left: Item, right: Item) -> Compile<()> {
-        // TODO: check types
-        let (_, left_ea) = self.item_src(left);
-        let (_, right_ea) = self.item_src(right);
-        self.output.push(IR::Cmp(left_ea, right_ea));
-
-        self.cc_zero_locked = true;
-        Ok(())
-    }
-
-    pub fn forward_branch_if(&mut self, cond: IRCond) -> usize {
-        if !self.cc_zero_locked {
-            panic!("cc zero vacant");
-        }
-        let idx = self.output.len();
-        self.output.push(IR::BranchIf(EA::Immediate(-1), cond));
-
-        self.cc_zero_locked = false;
-        idx
-    }
-    pub fn forward_branch_else(&mut self, true_idx: usize) -> usize {
-        self.cc_zero_locked = true;
-        let false_idx = self.forward_branch_if(IRCond::Always);
-        self.resolve_forward_branch(true_idx);
-        false_idx
-    }
-
-    pub fn resolve_forward_branch(&mut self, idx: usize) {
-        let here = self.output.len();
-        let displacement = here - idx - 1;
-        self.output[idx] = match &self.output[idx] {
-            IR::BranchIf(EA::Immediate(-1), cond) => {
-                IR::BranchIf(EA::Immediate(displacement as Word), *cond)
-            }
-            _ => unreachable!(),
-        };
-    }
-    pub fn loop_begin(&mut self) -> usize {
-        self.output.len()
-    }
-    pub fn loop_end(&mut self, idx: usize) {
-        let here = self.output.len();
-        let displacement = (here - idx + 1) as Word;
-        self.output
-            .push(IR::BranchIf(EA::Immediate(-displacement), IRCond::Always));
-    }
-
-    fn clobber_cc_zero(&mut self) {
-        if self.cc_zero_locked {
-            panic!("clobbered cc zero");
-        }
     }
 }
 
