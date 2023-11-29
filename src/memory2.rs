@@ -32,6 +32,20 @@ impl Memory2 {
             cc_zero_locked: false,
         }
     }
+    #[cfg(test)]
+    fn expect_output(&mut self, output: Vec<IR>) {
+        assert_eq!(self.output, output);
+    }
+    #[cfg(test)]
+    fn expect_stack(&mut self, stack: Vec<StackItemKind>) {
+        assert_eq!(
+            self.stack
+                .iter()
+                .map(|s| s.kind.clone())
+                .collect::<Vec<_>>(),
+            stack
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +83,19 @@ impl StackItemKind {
     }
 }
 
+impl Memory2 {
+    fn push_stack_item(&mut self, kind: StackItemKind) -> usize {
+        self.stack.push(StackItem {
+            kind,
+            last_updated: self.output.len(),
+        });
+        self.stack.len() - 1
+    }
+    fn update_stack_item(&mut self, idx: usize, offset: usize) {
+        self.stack[idx - offset].last_updated = self.output.len();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScopeFrame {
     // stack index of _high_ block of first item, i.e. 0 at root scope
@@ -77,6 +104,50 @@ struct ScopeFrame {
     locals: HashMap<String, usize>,
     // whether there was a return in this specific frame
     did_return: bool,
+}
+
+impl Memory2 {
+    fn init_scope(&mut self) {
+        assert!(self.scope.len() == 0);
+        self.scope = vec![ScopeFrame {
+            start_index: 0,
+            locals: HashMap::new(),
+            did_return: false,
+        }];
+    }
+    fn enter_block(&mut self) {
+        self.scope.push(ScopeFrame {
+            start_index: self.stack.len(),
+            locals: HashMap::new(),
+            did_return: false,
+        })
+    }
+    fn exit_block(&mut self) {
+        let frame = self.scope.pop().expect("scope frame");
+        let to_remove = self.stack.len() - frame.start_index;
+        self.stack.truncate(frame.start_index);
+
+        if !frame.did_return && to_remove > 0 {
+            self.output.push(IR::Add(
+                EA::Register(Register::SP),
+                EA::Immediate(to_remove as Word),
+            ));
+        }
+    }
+
+    fn get_scope(&self, name: &str) -> Option<usize> {
+        // get from scope
+        for frame in self.scope.iter().rev() {
+            if let Some(index) = frame.locals.get(name) {
+                return Some(*index);
+            }
+        }
+        return None;
+    }
+    fn insert_scope(&mut self, name: String, idx: usize) {
+        let len = self.scope.len();
+        self.scope[len - 1].locals.insert(name, idx);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,22 +297,19 @@ impl Memory2 {
         });
     }
 
-    fn return_sub(&mut self, src: Option<Src>) -> Compile<()> {
+    fn return_sub(&mut self, src: Option<Item>) -> Compile<()> {
         let ctx = self.current_sub.as_mut().unwrap();
         ctx.did_return = true;
         let scope_idx = self.scope.len() - 1;
         self.scope[scope_idx].did_return = true;
 
-        let target = Target {
-            ty: ctx.return_ty.clone(),
-            idx: ctx.return_idx,
-            offset: 0,
-        };
+        let return_dest = Item::Local(ctx.return_ty.clone(), ctx.return_idx, 0);
+
         let to_drop = self.stack.len() - ctx.return_addr_idx - 1;
 
         if let Some(src) = src {
             // TODO: check return ty
-            self.set_dest(Dest::Target(target), src);
+            self.apply_item(IR::Mov, &return_dest, src);
         } else {
             ctx.return_ty.check(&Ty::void())?;
         }
@@ -275,6 +343,8 @@ impl Memory2 {
 
 const PUSH: EA = EA::PreDec(Register::SP);
 const POP: EA = EA::PostInc(Register::SP);
+
+// registers
 
 trait ConsumableRegister {
     fn try_get(&self, mem: &mut Memory2) -> Option<Ty>;
@@ -351,17 +421,19 @@ impl Memory2 {
     }
 
     // TODO: iterate through more items
-    fn get_data_register(&mut self) -> Option<Data> {
+    fn get_data_register(&mut self, ty: Ty) -> Option<Data> {
         if self.data_registers.contains_key(&Data::D0) {
             None
         } else {
+            Data::D0.try_insert(self, ty.clone());
             Some(Data::D0)
         }
     }
-    fn get_address_register(&mut self) -> Option<Address> {
+    fn get_address_register(&mut self, ty: Ty) -> Option<Address> {
         if self.address_registers.contains_key(&Address::A0) {
             None
         } else {
+            Address::A0.try_insert(self, ty.clone());
             Some(Address::A0)
         }
     }
@@ -370,37 +442,17 @@ impl Memory2 {
             panic!("{:?} in use", r);
         }
     }
-    fn take_register(&mut self, r: impl CR, ty: Ty) {
-        if r.try_insert(self, ty).is_some() {
-            panic!("{:?} in use", r);
-        }
-    }
-    fn replace_register(&mut self, r: impl CR, ty: Ty) {
-        if r.try_insert(self, ty).is_none() {
-            panic!("{:?} is vacant", r);
-        }
-    }
-    fn borrow_register(&mut self, r: impl CR) -> Ty {
-        if let Some(ty) = r.try_get(self) {
-            ty
-        } else {
-            panic!("{:?} is vacant", r);
-        }
-    }
-    fn release_register(&mut self, r: impl CR) -> Ty {
-        if let Some(ty) = r.try_remove(self) {
-            ty
+
+    fn release_register__<T: CR>(&mut self, r: T) -> T {
+        if let Some(_) = r.try_remove(self) {
+            r
         } else {
             panic!("{:?} is vacant", r);
         }
     }
 }
 
-// the result of evaluating an expression
-type FrameOffset = usize;
-type AddressOffset = Word;
-type SubIndex = usize;
-type RefLevel = usize;
+// items
 
 #[derive(Debug, Clone)]
 enum Item {
@@ -410,7 +462,7 @@ enum Item {
     // Record(Ty, Vec<(FieldOffset, Item))>
     // Sub(Ty, SubIndex), TODO
     // volatile runtime values, need to be preserved in some contexts
-    // Cmp, TODO
+    Cond(Ty, IRCond),
     Data(Ty, Data),                              // small data
     Address(Ty, Address),                        // pointers
     AddressIndirect(Ty, Address, AddressOffset), // data accessed thru pointer
@@ -418,17 +470,17 @@ enum Item {
     Stack(Ty, FrameOffset), // large data, or ran out of registers
 }
 
+// the result of evaluating an expression
+type FrameOffset = usize;
+type AddressOffset = Word;
+type SubIndex = usize;
+type RefLevel = usize;
+
 impl Memory2 {
     fn stack_offset__(&self, idx: usize) -> EA {
         EA::Offset(Register::SP, (self.stack.len() - idx - 1) as Word)
     }
-    fn release_register__<T: CR>(&mut self, r: T) -> T {
-        if let Some(_) = r.try_remove(self) {
-            r
-        } else {
-            panic!("{:?} is vacant", r);
-        }
-    }
+
     fn item_src(&mut self, item: Item) -> (Ty, EA) {
         match item {
             Item::Constant(ty, value) => (ty, EA::Immediate(value)),
@@ -443,6 +495,7 @@ impl Memory2 {
             }
             // TODO: ensure this is at top of stack
             Item::Stack(ty, _) => (ty, POP),
+            Item::Cond(_, _) => unimplemented!(),
         }
     }
 
@@ -473,6 +526,11 @@ impl Memory2 {
                     .push(IR::LoadAddress(PUSH, self.stack_offset__(offset)));
                 return idx;
             }
+            Item::Cond(ty, cond) => {
+                let idx = self.push_stack_item(Expr(ty));
+                self.output.push(IR::SetIf(PUSH, cond));
+                return idx;
+            }
             item => self.item_src(item),
         };
         let idx = self.to_stack(ty.clone(), src_ea);
@@ -493,14 +551,12 @@ impl Memory2 {
         let is_ptr = ty.deref().is_ok();
         let size = ty.size();
         if is_ptr && size == 1 {
-            if let Some(a) = self.get_address_register() {
-                a.try_insert(self, ty.clone());
+            if let Some(a) = self.get_address_register(ty.clone()) {
                 self.output.push(IR::Mov(a.ea(), src_ea));
                 return Item::Address(ty, a);
             }
         } else if size == 1 {
-            if let Some(d) = self.get_data_register() {
-                d.try_insert(self, ty.clone());
+            if let Some(d) = self.get_data_register(ty.clone()) {
                 self.output.push(IR::Mov(d.ea(), src_ea));
                 return Item::Data(ty, d);
             }
@@ -526,6 +582,7 @@ impl Memory2 {
             Item::Address(ty, a) => (ty, a.ea()),
             Item::AddressIndirect(ty, a, o) => (ty, a.ea_offset(*o)),
             Item::Stack(ty, idx) => (ty, self.stack_offset__(*idx)),
+            Item::Cond(_, _) => unimplemented!(),
         };
         assert_eq!(src_ty.size(), dest_ty.size());
 
@@ -576,10 +633,24 @@ impl Memory2 {
         };
     }
 
+    fn cond_item(&mut self, item: Item) -> Compile<IRCond> {
+        match item {
+            Item::Cond(_, cond) => Ok(cond),
+            _ => {
+                // compare to `true`
+                self.cmp(item, Item::Constant(Ty::bool(), 1))?;
+                Ok(IRCond::NotZero)
+            }
+        }
+    }
+
     fn drop_item(&mut self, item: Item) {
         match item {
             Item::Constant(_, _) => {}
             Item::Local(_, _, _) => {}
+            Item::Cond(_, _) => {
+                self.cc_zero_locked = false;
+            }
             Item::Data(_, r) => {
                 self.release_register__(r);
             }
@@ -607,18 +678,21 @@ impl Memory2 {
 #[cfg(test)]
 mod item_test {
     use super::{Address::*, Data::*, *};
-    use crate::runtime::{Register::SP, EA::*, IR, IR::*};
+    use crate::runtime::{IRCond::*, Register::SP, EA::*, IR, IR::*};
 
     // mini AST / parser
     enum Stmt {
         Let(&'static str, Expr),
         Expr(Expr),
+        If(Expr, Vec<Stmt>, Vec<Stmt>),
+        While(Expr, Vec<Stmt>),
     }
 
     enum Expr {
         Int(Word),
         Ident(&'static str),
         Add(Box<Expr>, Box<Expr>),
+        Cond(IRCond, Box<Expr>, Box<Expr>),
         Assign(Box<Expr>, Box<Expr>),
         Ref(Box<Expr>),
         Deref(Box<Expr>),
@@ -635,6 +709,9 @@ mod item_test {
         }
         fn deref(expr: Expr) -> Expr {
             Expr::Deref(Box::new(expr))
+        }
+        fn cond(cond: IRCond, l: Expr, r: Expr) -> Expr {
+            Expr::Cond(cond, Box::new(l), Box::new(r))
         }
     }
 
@@ -691,6 +768,13 @@ mod item_test {
                     self.apply_item(IR::Add, &left, right);
                     Ok(left)
                 }
+                Expr::Cond(cond, left, right) => {
+                    let left = self.p_expr(*left)?;
+                    let right = self.p_expr(*right)?;
+                    self.cmp(left, right)?;
+
+                    Ok(Item::Cond(Ty::bool(), cond))
+                }
             }
         }
 
@@ -704,6 +788,28 @@ mod item_test {
                         Expr(t) => Local(name.to_string(), t.clone()),
                         _ => unreachable!(),
                     }
+                }
+                Stmt::If(expr, if_true, if_false) => {
+                    let item = self.p_expr(expr)?;
+                    let cond = self.cond_item(item)?;
+                    let true_idx = self.forward_branch_if(cond);
+                    self.p_block(if_true)?;
+                    if if_false.len() > 0 {
+                        let false_idx = self.forward_branch_else(true_idx);
+                        self.p_block(if_false)?;
+                        self.resolve_forward_branch(false_idx);
+                    } else {
+                        self.resolve_forward_branch(true_idx);
+                    }
+                }
+                Stmt::While(expr, block) => {
+                    let loop_idx = self.loop_begin();
+                    let item = self.p_expr(expr)?;
+                    let cond = self.cond_item(item)?;
+                    let while_idx = self.forward_branch_if(cond);
+                    self.p_block(block)?;
+                    self.loop_end(loop_idx);
+                    self.resolve_forward_branch(while_idx);
                 }
                 Stmt::Expr(expr) => {
                     let item = self.p_expr(expr)?;
@@ -916,258 +1022,130 @@ mod item_test {
             Mov(A0.ea_offset(0), Immediate(200)),
         ])
     }
+
+    #[test]
+    fn if_stmt() {
+        let mut m = Memory2::new();
+        m.init_scope();
+        m.p_block(vec![
+            //
+            Stmt::Let("foo", Expr::Int(100)),
+            Stmt::If(
+                Expr::cond(NotZero, Expr::Ident("foo"), Expr::Int(200)),
+                vec![Stmt::Expr(Expr::assign(Expr::Ident("foo"), Expr::Int(300)))],
+                vec![],
+            ),
+        ])
+        .unwrap();
+
+        m.expect_output(vec![
+            Mov(PUSH, Immediate(100)),
+            Cmp(Offset(SP, 0), Immediate(200)),
+            BranchIf(Immediate(1), NotZero),
+            Mov(Offset(SP, 0), Immediate(300)),
+        ])
+    }
+
+    #[test]
+    fn if_else_stmt() {
+        let mut m = Memory2::new();
+        m.init_scope();
+        m.p_block(vec![
+            //
+            Stmt::Let("foo", Expr::Int(100)),
+            Stmt::If(
+                Expr::cond(NotZero, Expr::Ident("foo"), Expr::Int(200)),
+                vec![Stmt::Expr(Expr::assign(Expr::Ident("foo"), Expr::Int(300)))],
+                vec![Stmt::Expr(Expr::assign(Expr::Ident("foo"), Expr::Int(400)))],
+            ),
+        ])
+        .unwrap();
+
+        m.expect_output(vec![
+            Mov(PUSH, Immediate(100)),
+            Cmp(Offset(SP, 0), Immediate(200)),
+            BranchIf(Immediate(2), NotZero),
+            Mov(Offset(SP, 0), Immediate(300)),
+            BranchIf(Immediate(1), Always),
+            Mov(Offset(SP, 0), Immediate(400)),
+        ]);
+    }
+
+    #[test]
+    fn while_stmt() {
+        let mut m = Memory2::new();
+        m.init_scope();
+        m.p_block(vec![
+            //
+            Stmt::Let("count", Expr::Int(0)),
+            Stmt::While(
+                Expr::cond(Zero, Expr::Ident("count"), Expr::Int(10)),
+                vec![Stmt::Expr(Expr::assign(
+                    Expr::Ident("count"),
+                    Expr::add(Expr::Ident("count"), Expr::Int(1)),
+                ))],
+            ),
+        ])
+        .unwrap();
+
+        m.expect_output(vec![
+            Mov(PUSH, Immediate(0)),
+            Cmp(Offset(SP, 0), Immediate(10)),
+            BranchIf(Immediate(4), Zero),
+            Mov(D0.ea(), Offset(SP, 0)),
+            Add(D0.ea(), Immediate(1)),
+            Mov(Offset(SP, 0), D0.ea()),
+            BranchIf(Immediate(-6), Always),
+        ]);
+    }
+
+    #[test]
+    fn cond_values() {
+        let mut m = Memory2::new();
+        m.init_scope();
+        m.p_block(vec![
+            Stmt::Let("foo", Expr::Int(100)),
+            Stmt::Let(
+                "cond",
+                Expr::cond(NotZero, Expr::Ident("foo"), Expr::Int(200)),
+            ),
+            Stmt::If(
+                Expr::Ident("cond"),
+                vec![Stmt::Expr(Expr::assign(Expr::Ident("foo"), Expr::Int(300)))],
+                vec![],
+            ),
+        ])
+        .unwrap();
+
+        m.expect_output(vec![
+            // let foo := 100
+            Mov(PUSH, Immediate(100)),
+            // let cond := foo == 200;
+            Cmp(Offset(SP, 0), Immediate(200)),
+            SetIf(PUSH, NotZero),
+            // if cond then
+            Cmp(Offset(SP, 0), Immediate(1)),
+            BranchIf(Immediate(1), NotZero),
+            // foo := 300
+            Mov(Offset(SP, 1), Immediate(300)),
+            // end
+        ])
+    }
 }
 
-// a location on the stack which can be either a src or dest
-#[derive(Debug, Clone)]
-struct Target {
-    ty: Ty,
-    idx: usize,
-    offset: usize,
-}
-
-#[derive(Debug)]
-enum Src {
-    Immediate(Ty, Word),
-    Target(Target),
-    Pop,
-    // TODO: when would I want to keep a data register src?
-    PopData(Data),
-    PopAddress(Address),
-    AddressIndirect(Address, Ty, usize),
-}
-
-// dest for "accumulator" operations, _not_ push
-#[derive(Debug, Clone)]
-enum Dest {
-    Data(Data),
-    Address(Address),
-    AddressIndirect(Address, Ty, usize),
-    Target(Target),
-}
-
-#[derive(Debug)]
-enum CmpSrc {
-    Immediate(Ty, Word),
-    Data(Data),
-}
+// Loops & Conditionals
 
 impl Memory2 {
-    // src constructors
-    fn immediate(&self, ty: Ty, value: Word) -> Src {
-        assert_eq!(ty.size(), 1);
-        Src::Immediate(ty, value)
-    }
-    fn identifier(&self, name: &str) -> Compile<Src> {
-        let target = self.identifier_target(name)?;
-        Ok(Src::Target(target))
-    }
-    fn pop(&self) -> Src {
-        Src::Pop
-    }
-    // target constructors
-    fn identifier_target(&self, name: &str) -> Compile<Target> {
-        let idx = self
-            .get_scope(name)
-            .ok_or_else(|| UnknownIdentifier(name.to_string()))?;
-        let ty = self.stack[idx].kind.ty().clone();
-        Ok(Target { ty, idx, offset: 0 })
-    }
-    fn target_field(&self, parent: Target, field_name: &str) -> Compile<Target> {
-        let rec = parent.ty.get_record()?;
-        let field = rec.get(field_name, None)?;
-        Ok(Target {
-            ty: field.ty.clone(),
-            idx: parent.idx,
-            offset: parent.offset + field.offset as usize,
-        })
-    }
-
-    pub fn push(&mut self, src: Src) -> Target {
-        let (ty, ea) = match src {
-            Src::Immediate(ty, value) => (ty, EA::Immediate(value)),
-            Src::Target(target) => {
-                let ea = self.stack_offset(&target).add_offset(target.ty.size()); // account for pre-decrement
-                (target.ty, ea)
-            }
-            Src::PopData(r) => (self.release_register(r), r.ea()),
-            Src::PopAddress(r) => (self.release_register(r), r.ea()),
-            Src::AddressIndirect(r, ty, offset) => (ty, self.deref_register(r, offset)),
-            Src::Pop => {
-                panic!("cannot combine push & pop");
-            }
-        };
-        // write high to low
-        for _ in 1..ty.size() {
-            self.push_stack_item(Owned);
-            self.output.push(IR::Mov(PUSH, ea));
-        }
-        let idx = self.push_stack_item(Expr(ty.clone()));
-        self.output.push(IR::Mov(PUSH, ea));
-        self.clobber_cc_zero();
-        Target { ty, idx, offset: 0 }
-    }
-    pub fn push_structure(&mut self, ty: Ty) -> Target {
-        let size = ty.size();
-        for _ in 1..size {
-            self.push_stack_item(Owned);
-        }
-        let idx = self.push_stack_item(Expr(ty.clone()));
-        self.output
-            .push(IR::Sub(EA::Register(Register::SP), EA::Immediate(size)));
-        self.clobber_cc_zero();
-        Target { ty, idx, offset: 0 }
-    }
-    pub fn set_dest(&mut self, dest: Dest, src: Src) {
-        let (src_ty, src_ea) = match src {
-            Src::Immediate(ty, value) => (ty, EA::Immediate(value)),
-            Src::PopData(r) => (self.release_register(r), r.ea()),
-            Src::PopAddress(r) => (self.release_register(r), r.ea()),
-            Src::AddressIndirect(r, ty, offset) => (ty, self.deref_register(r, offset)),
-            Src::Target(target) => {
-                let ea = self.stack_offset(&target);
-                (target.ty, ea)
-            }
-            Src::Pop => {
-                let ty = self.expect_pop_expr().clone();
-                (ty, POP)
-            }
-        };
-        match dest {
-            Dest::Data(r) => {
-                self.take_register(r, src_ty);
-                self.output.push(IR::Mov(r.ea(), src_ea));
-            }
-            Dest::Address(r) => {
-                match (src_ea, r.ea()) {
-                    // allow Mov(A0, (A0))
-                    (EA::Offset(a, _), EA::Register(b)) if a == b => {
-                        self.replace_register(r, src_ty);
-                    }
-                    _ => {
-                        self.take_register(r, src_ty);
-                    }
-                };
-                self.output.push(IR::Mov(r.ea(), src_ea))
-            }
-            Dest::AddressIndirect(r, _, offset) => {
-                let dest_ea = self.deref_register(r, offset);
-                for i in 0..src_ty.size() {
-                    let src_ea_offset = if src_ea == POP {
-                        src_ea
-                    } else {
-                        src_ea.add_offset(i)
-                    };
-                    self.output
-                        .push(IR::Mov(dest_ea.add_offset(i), src_ea_offset));
-                }
-            }
-            Dest::Target(target) => {
-                target.ty.check(&src_ty).expect("type");
-                // write low to high
-                for i in 0..src_ty.size() {
-                    self.update_stack_item(target.idx, target.offset + i as usize);
-                    let src_ea_offset = if src_ea == POP {
-                        src_ea
-                    } else {
-                        src_ea.add_offset(i)
-                    };
-                    self.output.push(IR::Mov(
-                        self.stack_offset(&target).add_offset(i),
-                        src_ea_offset,
-                    ));
-                }
-            }
-        }
-        if src_ea == POP {
-            self.stack.pop();
-        }
-        self.clobber_cc_zero();
-    }
-
-    // pointers
-    pub fn push_address(&mut self, target: Target) -> Target {
-        let idx = self.push_stack_item(Expr(target.ty.add_ref()));
-
-        let ea = self.stack_offset(&target);
-        self.output.push(IR::LoadAddress(PUSH, ea));
-        Target {
-            ty: target.ty.add_ref(),
-            idx,
-            offset: 0,
-        }
-    }
-    pub fn load_address(&mut self, r: Address, target: Target) {
-        self.take_register(r, target.ty.add_ref());
-        let ea = self.stack_offset(&target);
-        self.output.push(IR::LoadAddress(r.ea(), ea));
-    }
-
-    // arithmetic
-    pub fn accumulate(&mut self, op: IROp, dest: Dest, src: Src) {
-        let (src_ty, src_ea) = match src {
-            Src::Immediate(ty, value) => (ty, EA::Immediate(value)),
-            Src::PopData(r) => (self.release_register(r), r.ea()),
-            Src::PopAddress(r) => (self.release_register(r), r.ea()),
-            Src::AddressIndirect(r, ty, offset) => (ty, self.deref_register(r, offset)),
-            Src::Target(target) => {
-                let ea = self.stack_offset(&target);
-                (target.ty, ea)
-            }
-            Src::Pop => {
-                let ty = self.expect_pop_expr().clone();
-                (ty, POP)
-            }
-        };
-        assert_eq!(src_ty.size(), 1);
-        let (dest_ty, dest_ea) = match dest {
-            Dest::Data(r) => (self.borrow_register(r), r.ea()),
-            Dest::Address(r) => (self.borrow_register(r), r.ea()),
-            Dest::AddressIndirect(r, ty, offset) => {
-                self.borrow_register(r);
-                (ty, self.deref_register(r, offset))
-            }
-            Dest::Target(target) => {
-                let ea = self.stack_offset(&target);
-                (target.ty, ea)
-            }
-        };
-        dest_ty.check(&src_ty).expect("dest != src");
-        self.output.push(op(dest_ea, src_ea));
-        if src_ea == POP {
-            self.stack.pop();
-        }
-        self.clobber_cc_zero();
-    }
-
-    // compare & branch
-    pub fn compare(&mut self, left: Src, right: CmpSrc) {
-        if self.cc_zero_locked {
-            panic!("cc in use");
-        }
-        let (left_ty, left_ea) = match left {
-            Src::Immediate(ty, value) => (ty, EA::Immediate(value)),
-            Src::PopData(r) => (self.release_register(r), r.ea()),
-            Src::PopAddress(r) => (self.release_register(r), r.ea()),
-            Src::AddressIndirect(r, ty, offset) => (ty, self.deref_register(r, offset)),
-            Src::Target(target) => (target.ty.clone(), self.stack_offset(&target)),
-            Src::Pop => (self.expect_pop_expr().clone(), POP),
-        };
-        assert_eq!(left_ty.size(), 1);
-        let right_ea = match right {
-            CmpSrc::Data(r) => {
-                self.release_register(r);
-                r.ea()
-            }
-            CmpSrc::Immediate(_, value) => EA::Immediate(value),
-        };
+    pub fn cmp(&mut self, left: Item, right: Item) -> Compile<()> {
+        // TODO: check types
+        let (_, left_ea) = self.item_src(left);
+        let (_, right_ea) = self.item_src(right);
         self.output.push(IR::Cmp(left_ea, right_ea));
-        if left_ea == POP {
-            self.stack.pop();
-        }
 
         self.cc_zero_locked = true;
+        Ok(())
     }
+
     pub fn forward_branch_if(&mut self, cond: IRCond) -> usize {
         if !self.cc_zero_locked {
             panic!("cc zero vacant");
@@ -1178,6 +1156,13 @@ impl Memory2 {
         self.cc_zero_locked = false;
         idx
     }
+    pub fn forward_branch_else(&mut self, true_idx: usize) -> usize {
+        self.cc_zero_locked = true;
+        let false_idx = self.forward_branch_if(IRCond::Always);
+        self.resolve_forward_branch(true_idx);
+        false_idx
+    }
+
     pub fn resolve_forward_branch(&mut self, idx: usize) {
         let here = self.output.len();
         let displacement = here - idx - 1;
@@ -1198,97 +1183,6 @@ impl Memory2 {
             .push(IR::BranchIf(EA::Immediate(-displacement), IRCond::Always));
     }
 
-    // scope
-    pub fn assign_local(&mut self, name: String, maybe_ty: Option<Ty>) -> Compile<()> {
-        // TODO: this assumes its the top ofthe stack and there's no junk around it
-        let idx = self.stack.len() - 1;
-        let top = &mut self.stack[idx];
-        top.kind = match &top.kind {
-            Expr(ty) => {
-                if let Some(let_ty) = maybe_ty {
-                    let_ty.check(&ty)?;
-                }
-                Local(name.clone(), ty.clone())
-            }
-            _ => unreachable!(),
-        };
-        self.insert_scope(name, idx);
-
-        Ok(())
-    }
-
-    fn init_scope(&mut self) {
-        assert!(self.scope.len() == 0);
-        self.scope = vec![ScopeFrame {
-            start_index: 0,
-            locals: HashMap::new(),
-            did_return: false,
-        }];
-    }
-    fn enter_block(&mut self) {
-        self.scope.push(ScopeFrame {
-            start_index: self.stack.len(),
-            locals: HashMap::new(),
-            did_return: false,
-        })
-    }
-    fn exit_block(&mut self) {
-        let frame = self.scope.pop().expect("scope frame");
-        let to_remove = self.stack.len() - frame.start_index;
-        self.stack.truncate(frame.start_index);
-
-        if !frame.did_return && to_remove > 0 {
-            self.output.push(IR::Add(
-                EA::Register(Register::SP),
-                EA::Immediate(to_remove as Word),
-            ));
-        }
-    }
-
-    fn get_scope(&self, name: &str) -> Option<usize> {
-        // get from scope
-        for frame in self.scope.iter().rev() {
-            if let Some(index) = frame.locals.get(name) {
-                return Some(*index);
-            }
-        }
-        return None;
-    }
-    fn insert_scope(&mut self, name: String, idx: usize) {
-        let len = self.scope.len();
-        self.scope[len - 1].locals.insert(name, idx);
-    }
-    // utils
-    fn stack_offset(&self, target: &Target) -> EA {
-        EA::Offset(Register::SP, (self.stack.len() - target.idx - 1) as Word)
-            .add_offset(target.offset as Word)
-    }
-    fn deref_register(&mut self, r: Address, offset: usize) -> EA {
-        let ty = self.release_register(r).deref().expect("pointer");
-        // TODO: check that offset field makes sense for type
-        assert!(ty.size() >= offset as Word);
-        r.ea_offset(offset as Word)
-    }
-    fn push_stack_item(&mut self, kind: StackItemKind) -> usize {
-        self.stack.push(StackItem {
-            kind,
-            last_updated: self.output.len(),
-        });
-        self.stack.len() - 1
-    }
-    fn update_stack_item(&mut self, idx: usize, offset: usize) {
-        self.stack[idx - offset].last_updated = self.output.len();
-    }
-    fn expect_pop_expr(&mut self) -> &Ty {
-        let idx = self.stack.len() - 1;
-        match &self.stack[idx].kind {
-            Expr(ty) => {
-                assert_eq!(ty.size(), 1);
-                ty
-            }
-            _ => panic!("expected expr"),
-        }
-    }
     fn clobber_cc_zero(&mut self) {
         if self.cc_zero_locked {
             panic!("clobbered cc zero");
@@ -1296,383 +1190,111 @@ impl Memory2 {
     }
 }
 
-#[cfg(test)]
-mod test {
-    use super::*;
-    use crate::{
-        runtime::{IRCond::*, Register::SP, EA::*, IR, IR::*},
-        ty::TyRecord,
-    };
+// mod test {
+//     use super::*;
+//     use crate::{
+//         runtime::{IRCond::*, Register::SP, EA::*, IR, IR::*},
+//         ty::TyRecord,
+//     };
 
-    impl Memory2 {
-        pub fn expect_output(&mut self, output: Vec<IR>) {
-            assert_eq!(self.output, output);
-        }
-        pub fn expect_stack(&mut self, stack: Vec<StackItemKind>) {
-            assert_eq!(
-                self.stack
-                    .iter()
-                    .map(|s| s.kind.clone())
-                    .collect::<Vec<_>>(),
-                stack
-            );
-        }
-    }
+//     #[test]
+//     fn pair() {
+//         let mut m = Memory2::new();
+//         let pair_ty = {
+//             let mut pair_ty = TyRecord::new(1);
+//             pair_ty.insert("x".to_string(), Ty::int(), None).unwrap();
+//             pair_ty.insert("y".to_string(), Ty::int(), None).unwrap();
+//             Ty::record(pair_ty)
+//         };
 
-    #[test]
-    fn identifiers() {
-        let mut m = Memory2::new();
-        m.init_scope();
-        m.push(m.immediate(Ty::int(), 123));
-        m.assign_local("foo".to_string(), None).unwrap();
-        let foo = m.identifier("foo").unwrap();
-        m.push(foo);
-        m.expect_output(vec![
-            //
-            Mov(PUSH, Immediate(123)),
-            Mov(PUSH, Offset(SP, 1)),
-        ]);
-        m.expect_stack(vec![
-            //
-            Local("foo".to_string(), Ty::int()),
-            Expr(Ty::int()),
-        ]);
-    }
+//         m.init_scope();
+//         // let foo := Pair { x: 123, y: 456 };
+//         let base = m.push_structure(pair_ty.clone());
+//         m.set_dest(
+//             Dest::Target(m.target_field(base.clone(), "x").unwrap()),
+//             m.immediate(Ty::int(), 123),
+//         );
+//         m.set_dest(
+//             Dest::Target(m.target_field(base.clone(), "y").unwrap()),
+//             m.immediate(Ty::int(), 456),
+//         );
+//         m.assign_local("foo".to_string(), None).unwrap();
+//         // foo;
+//         let foo = m.identifier("foo").unwrap();
+//         m.push(foo);
 
-    #[test]
-    fn add_register() {
-        let mut m = Memory2::new();
-        m.init_scope();
-        m.push(m.immediate(Ty::int(), 123));
-        m.assign_local("foo".to_string(), None).unwrap();
-        let data = m.get_data_register().unwrap();
-        m.set_dest(Dest::Data(data), m.immediate(Ty::int(), 456));
-        let foo = m.identifier("foo").unwrap();
-        m.push(foo);
-        m.accumulate(IR::Add, Dest::Data(data), Src::Pop);
-        m.push(Src::PopData(data));
+//         m.expect_stack(vec![
+//             Owned,
+//             Local("foo".to_string(), pair_ty.clone()),
+//             Owned,
+//             Expr(pair_ty.clone()),
+//         ]);
+//         m.expect_output(vec![
+//             Sub(Register(SP), Immediate(2)),
+//             Mov(Offset(SP, 0), Immediate(123)),
+//             Mov(Offset(SP, 1), Immediate(456)),
+//             Mov(PUSH, Offset(SP, 2)),
+//             Mov(PUSH, Offset(SP, 2)),
+//         ]);
+//     }
 
-        m.expect_output(vec![
-            Mov(PUSH, Immediate(123)),
-            Mov(data.ea(), Immediate(456)),
-            Mov(PUSH, Offset(SP, 1)),
-            Add(data.ea(), POP),
-            Mov(PUSH, data.ea()),
-        ]);
-        m.expect_stack(vec![
-            //
-            Local("foo".to_string(), Ty::int()),
-            Expr(Ty::int()),
-        ]);
-    }
+//     #[test]
+//     fn sub_calls() {
+//         let mut m = Memory2::new();
 
-    #[test]
-    fn assign_register() {
-        let mut m = Memory2::new();
-        m.init_scope();
-        m.push(m.immediate(Ty::int(), 123));
-        m.assign_local("foo".to_string(), None).unwrap();
-        let d = m.get_data_register().unwrap();
-        m.set_dest(Dest::Data(d), m.immediate(Ty::int(), 456));
-        let foo = m.identifier_target("foo").unwrap();
-        m.set_dest(Dest::Target(foo), Src::PopData(d));
+//         // sub add(a: Int, b: Int) -> Int
+//         m.begin_sub(
+//             "add".to_string(),
+//             vec![("a".to_string(), Ty::int()), ("b".to_string(), Ty::int())],
+//             Ty::int(),
+//         );
+//         let r = m.get_data_register().unwrap();
+//         m.set_dest(Dest::Data(r), m.identifier("a").unwrap());
+//         m.accumulate(IR::Add, Dest::Data(r), m.identifier("b").unwrap());
 
-        m.expect_output(vec![
-            Mov(PUSH, Immediate(123)),
-            Mov(d.ea(), Immediate(456)),
-            Mov(Offset(SP, 0), d.ea()),
-        ]);
-        m.expect_stack(vec![
-            //
-            Local("foo".to_string(), Ty::int()),
-        ]);
-    }
+//         m.expect_stack(vec![
+//             StackItemKind::Return(Ty::int()),
+//             Arg("a".to_string(), Ty::int()),
+//             Arg("b".to_string(), Ty::int()),
+//             ReturnAddr,
+//         ]);
 
-    #[test]
-    fn pair() {
-        let mut m = Memory2::new();
-        let pair_ty = {
-            let mut pair_ty = TyRecord::new(1);
-            pair_ty.insert("x".to_string(), Ty::int(), None).unwrap();
-            pair_ty.insert("y".to_string(), Ty::int(), None).unwrap();
-            Ty::record(pair_ty)
-        };
+//         m.return_sub(Some(Src::PopData(r))).unwrap();
+//         m.end_sub().unwrap();
 
-        m.init_scope();
-        // let foo := Pair { x: 123, y: 456 };
-        let base = m.push_structure(pair_ty.clone());
-        m.set_dest(
-            Dest::Target(m.target_field(base.clone(), "x").unwrap()),
-            m.immediate(Ty::int(), 123),
-        );
-        m.set_dest(
-            Dest::Target(m.target_field(base.clone(), "y").unwrap()),
-            m.immediate(Ty::int(), 456),
-        );
-        m.assign_local("foo".to_string(), None).unwrap();
-        // foo;
-        let foo = m.identifier("foo").unwrap();
-        m.push(foo);
+//         // sub main()
+//         m.begin_sub("main".to_string(), vec![], Ty::void());
+//         let add = m.get_sub("add").unwrap();
+//         m.begin_call(&add);
+//         m.push(Src::Immediate(Ty::int(), 123));
+//         m.push(Src::Immediate(Ty::int(), 456));
+//         m.end_call(&add);
 
-        m.expect_stack(vec![
-            Owned,
-            Local("foo".to_string(), pair_ty.clone()),
-            Owned,
-            Expr(pair_ty.clone()),
-        ]);
-        m.expect_output(vec![
-            Sub(Register(SP), Immediate(2)),
-            Mov(Offset(SP, 0), Immediate(123)),
-            Mov(Offset(SP, 1), Immediate(456)),
-            Mov(PUSH, Offset(SP, 2)),
-            Mov(PUSH, Offset(SP, 2)),
-        ]);
-    }
+//         m.expect_stack(vec![
+//             //
+//             ReturnAddr,
+//             Expr(Ty::int()),
+//         ]);
 
-    #[test]
-    fn if_stmt() {
-        let mut m = Memory2::new();
-        m.init_scope();
-        // let foo := 123
-        m.push(m.immediate(Ty::int(), 123));
-        m.assign_local("foo".to_string(), None).unwrap();
-        // if foo = 456 then
-        let foo = m.identifier("foo").unwrap();
-        m.push(foo);
-        m.compare(Src::Pop, CmpSrc::Immediate(Ty::int(), 456));
-        let b = m.forward_branch_if(IRCond::NotZero);
-        m.enter_block();
-        // let bar := 789
-        m.push(m.immediate(Ty::int(), 789));
-        m.assign_local("bar".to_string(), None).unwrap();
-        // foo := 42
-        let foo = m.identifier_target("foo").unwrap();
-        m.set_dest(Dest::Target(foo), m.immediate(Ty::int(), 42));
-        // end
-        m.exit_block();
-        m.resolve_forward_branch(b);
+//         m.end_sub().unwrap();
 
-        m.expect_stack(vec![
-            //
-            Local("foo".to_string(), Ty::int()),
-        ]);
-        m.expect_output(vec![
-            Mov(PUSH, Immediate(123)),
-            Mov(PUSH, Offset(SP, 1)),
-            Cmp(POP, Immediate(456)),
-            BranchIf(Immediate(3), NotZero),
-            Mov(PUSH, Immediate(789)),
-            Mov(Offset(SP, 1), Immediate(42)),
-            Add(Register(SP), Immediate(1)),
-        ])
-    }
-
-    #[test]
-    fn while_stmt() {
-        let mut m = Memory2::new();
-        m.init_scope();
-        // let counter := 0;
-        m.push(m.immediate(Ty::int(), 0));
-        m.assign_local("counter".to_string(), None).unwrap();
-        // while i != 10
-        let loop_idx = m.loop_begin();
-        let counter = m.identifier("counter").unwrap();
-        m.push(counter);
-        m.compare(Src::Pop, CmpSrc::Immediate(Ty::int(), 10));
-        let out_idx = m.forward_branch_if(Zero);
-        m.enter_block();
-        // counter := counter + 1;
-        let counter = m.identifier_target("counter").unwrap();
-        m.accumulate(IR::Add, Dest::Target(counter), m.immediate(Ty::int(), 1));
-        // end
-        m.exit_block();
-        m.loop_end(loop_idx);
-        m.resolve_forward_branch(out_idx);
-
-        m.expect_stack(vec![
-            //
-            Local("counter".to_string(), Ty::int()),
-        ]);
-        m.expect_output(vec![
-            // let counter := 0
-            Mov(PUSH, Immediate(0)),
-            // while i != 10
-            Mov(PUSH, Offset(SP, 1)),
-            Cmp(POP, Immediate(10)),
-            BranchIf(Immediate(2), Zero),
-            // counter := counter + 1;
-            Add(Offset(SP, 0), Immediate(1)),
-            BranchIf(Immediate(-5), Always),
-        ])
-    }
-
-    #[test]
-    fn pointers() {
-        let mut m = Memory2::new();
-        let pair_ty = {
-            let mut pair_ty = TyRecord::new(1);
-            pair_ty.insert("x".to_string(), Ty::int(), None).unwrap();
-            pair_ty.insert("y".to_string(), Ty::int(), None).unwrap();
-            Ty::record(pair_ty)
-        };
-
-        m.init_scope();
-        // let foo := Pair { x: 123, y: 456 };
-        let base = m.push_structure(pair_ty.clone());
-        m.set_dest(
-            Dest::Target(m.target_field(base.clone(), "x").unwrap()),
-            m.immediate(Ty::int(), 123),
-        );
-        m.set_dest(
-            Dest::Target(m.target_field(base.clone(), "y").unwrap()),
-            m.immediate(Ty::int(), 456),
-        );
-        m.assign_local("foo".to_string(), None).unwrap();
-        // let ptr := &foo;
-        let ptr = m.push_address(base);
-        m.assign_local("ptr".to_string(), None).unwrap();
-        // ptr[].y
-        let a = m.get_address_register().unwrap();
-        m.set_dest(Dest::Address(a), Src::Target(ptr));
-        let y = {
-            let rec = pair_ty.get_record().unwrap();
-            let field = rec.get("y", None).unwrap().clone();
-            Src::AddressIndirect(a, field.ty.clone(), field.offset as usize)
-        };
-        m.push(y);
-
-        m.expect_stack(vec![
-            Owned,
-            Local("foo".to_string(), pair_ty.clone()),
-            Local("ptr".to_string(), pair_ty.add_ref()),
-            Expr(Ty::int()),
-        ]);
-        m.expect_output(vec![
-            // let foo := Pair { x: 123, y: 456 };
-            Sub(Register(SP), Immediate(2)),
-            Mov(Offset(SP, 0), Immediate(123)),
-            Mov(Offset(SP, 1), Immediate(456)),
-            // let ptr := &foo;
-            LoadAddress(PUSH, Offset(SP, 1)),
-            // ptr[].y
-            Mov(a.ea(), Offset(SP, 0)),
-            Mov(PUSH, a.ea_offset(1)),
-        ]);
-    }
-
-    #[test]
-    fn pointer_assign() {
-        let mut m = Memory2::new();
-        let pair_ty = {
-            let mut pair_ty = TyRecord::new(1);
-            pair_ty.insert("x".to_string(), Ty::int(), None).unwrap();
-            pair_ty.insert("y".to_string(), Ty::int(), None).unwrap();
-            Ty::record(pair_ty)
-        };
-
-        m.init_scope();
-        // let foo := Pair { x: 123, y: 456 };
-        let base = m.push_structure(pair_ty.clone());
-        m.set_dest(
-            Dest::Target(m.target_field(base.clone(), "x").unwrap()),
-            m.immediate(Ty::int(), 123),
-        );
-        m.set_dest(
-            Dest::Target(m.target_field(base.clone(), "y").unwrap()),
-            m.immediate(Ty::int(), 456),
-        );
-        m.assign_local("foo".to_string(), None).unwrap();
-        // let ptr := &foo;
-        let ptr = m.push_address(base);
-        m.assign_local("ptr".to_string(), None).unwrap();
-        // ptr[].y := 789
-        let a = m.get_address_register().unwrap();
-        m.set_dest(Dest::Address(a), Src::Target(ptr));
-        let y_offset = {
-            let rec = pair_ty.get_record().unwrap();
-            let field = rec.get("y", None).unwrap().clone();
-            field.offset as usize
-        };
-        m.set_dest(
-            Dest::AddressIndirect(a, Ty::int(), y_offset),
-            m.immediate(Ty::int(), 789),
-        );
-
-        m.expect_stack(vec![
-            Owned,
-            Local("foo".to_string(), pair_ty.clone()),
-            Local("ptr".to_string(), pair_ty.add_ref()),
-        ]);
-        m.expect_output(vec![
-            // let foo := Pair { x: 123, y: 456 };
-            Sub(Register(SP), Immediate(2)),
-            Mov(Offset(SP, 0), Immediate(123)),
-            Mov(Offset(SP, 1), Immediate(456)),
-            // let ptr := &foo;
-            LoadAddress(PUSH, Offset(SP, 1)),
-            // ptr[].y := 789
-            Mov(a.ea(), Offset(SP, 0)),
-            Mov(a.ea_offset(1), Immediate(789)),
-        ]);
-    }
-
-    #[test]
-    fn sub_calls() {
-        let mut m = Memory2::new();
-
-        // sub add(a: Int, b: Int) -> Int
-        m.begin_sub(
-            "add".to_string(),
-            vec![("a".to_string(), Ty::int()), ("b".to_string(), Ty::int())],
-            Ty::int(),
-        );
-        let r = m.get_data_register().unwrap();
-        m.set_dest(Dest::Data(r), m.identifier("a").unwrap());
-        m.accumulate(IR::Add, Dest::Data(r), m.identifier("b").unwrap());
-
-        m.expect_stack(vec![
-            StackItemKind::Return(Ty::int()),
-            Arg("a".to_string(), Ty::int()),
-            Arg("b".to_string(), Ty::int()),
-            ReturnAddr,
-        ]);
-
-        m.return_sub(Some(Src::PopData(r))).unwrap();
-        m.end_sub().unwrap();
-
-        // sub main()
-        m.begin_sub("main".to_string(), vec![], Ty::void());
-        let add = m.get_sub("add").unwrap();
-        m.begin_call(&add);
-        m.push(Src::Immediate(Ty::int(), 123));
-        m.push(Src::Immediate(Ty::int(), 456));
-        m.end_call(&add);
-
-        m.expect_stack(vec![
-            //
-            ReturnAddr,
-            Expr(Ty::int()),
-        ]);
-
-        m.end_sub().unwrap();
-
-        m.expect_output(vec![
-            // sub add(a: Int, b: Int) -> Int
-            // return a + b
-            Mov(r.ea(), Offset(SP, 2)),
-            Add(r.ea(), Offset(SP, 1)),
-            Mov(Offset(SP, 3), r.ea()),
-            IR::Return,
-            // sub main()
-            // add(123, 456)
-            Sub(Register(SP), Immediate(1)),
-            Mov(PUSH, Immediate(123)),
-            Mov(PUSH, Immediate(456)),
-            Call(add.index as Word),
-            Add(Register(SP), Immediate(2)),
-            // cleanup
-            Add(Register(SP), Immediate(1)),
-            IR::Return,
-        ])
-    }
-}
+//         m.expect_output(vec![
+//             // sub add(a: Int, b: Int) -> Int
+//             // return a + b
+//             Mov(r.ea(), Offset(SP, 2)),
+//             Add(r.ea(), Offset(SP, 1)),
+//             Mov(Offset(SP, 3), r.ea()),
+//             IR::Return,
+//             // sub main()
+//             // add(123, 456)
+//             Sub(Register(SP), Immediate(1)),
+//             Mov(PUSH, Immediate(123)),
+//             Mov(PUSH, Immediate(456)),
+//             Call(add.index as Word),
+//             Add(Register(SP), Immediate(2)),
+//             // cleanup
+//             Add(Register(SP), Immediate(1)),
+//             IR::Return,
+//         ])
+//     }
+// }
