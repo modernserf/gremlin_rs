@@ -400,12 +400,13 @@ impl Memory2 {
 type FrameOffset = usize;
 type AddressOffset = Word;
 type SubIndex = usize;
+type RefLevel = usize;
 
 #[derive(Debug, Clone)]
 enum Item {
     // not yet runtime values, can delay evaluation but need to be materialized for use
     Constant(Ty, Word),
-    Local(Ty, FrameOffset),
+    Local(Ty, FrameOffset, RefLevel),
     // Record(Ty, Vec<(FieldOffset, Item))>
     // Sub(Ty, SubIndex), TODO
     // volatile runtime values, need to be preserved in some contexts
@@ -431,7 +432,10 @@ impl Memory2 {
     fn item_src(&mut self, item: Item) -> (Ty, EA) {
         match item {
             Item::Constant(ty, value) => (ty, EA::Immediate(value)),
-            Item::Local(ty, idx) => (ty, self.stack_offset__(idx)),
+            Item::Local(ty, idx, ref_level) => {
+                assert_eq!(ref_level, 0);
+                (ty, self.stack_offset__(idx))
+            }
             Item::Data(ty, r) => (ty, self.release_register__(r).ea()),
             Item::Address(ty, r) => (ty, self.release_register__(r).ea()),
             Item::AddressIndirect(ty, r, offset) => {
@@ -461,12 +465,26 @@ impl Memory2 {
         idx
     }
 
+    fn push_item(&mut self, item: Item) -> usize {
+        let (ty, src_ea) = match item {
+            Item::Local(ty, offset, 1) => {
+                let idx = self.push_stack_item(Expr(ty));
+                self.output
+                    .push(IR::LoadAddress(PUSH, self.stack_offset__(offset)));
+                return idx;
+            }
+            item => self.item_src(item),
+        };
+        let idx = self.to_stack(ty.clone(), src_ea);
+        idx
+    }
+
     // put into register or push onto stack
     fn materialize_item(&mut self, item: Item) -> Item {
         // most items are already materialized
         match &item {
             Item::Constant(_, _) => {}
-            Item::Local(_, _) => {}
+            Item::Local(_, _, _) => {}
             _ => return item,
         };
         let (ty, src_ea) = self.item_src(item);
@@ -500,7 +518,10 @@ impl Memory2 {
 
         let (dest_ty, dest_ea) = match dest {
             Item::Constant(_, _) => panic!("cannot assign to constant"),
-            Item::Local(ty, idx) => (ty, self.stack_offset__(*idx)),
+            Item::Local(ty, idx, ref_level) => {
+                assert_eq!(*ref_level, 0);
+                (ty, self.stack_offset__(*idx))
+            }
             Item::Data(ty, d) => (ty, d.ea()),
             Item::Address(ty, a) => (ty, a.ea()),
             Item::AddressIndirect(ty, a, o) => (ty, a.ea_offset(*o)),
@@ -511,7 +532,10 @@ impl Memory2 {
         // write low to high
         for i in 0..src_ty.size() {
             match dest {
-                Item::Local(_, idx) => self.update_stack_item(*idx, i as usize),
+                Item::Local(_, idx, ref_level) => {
+                    assert_eq!(*ref_level, 0);
+                    self.update_stack_item(*idx, i as usize)
+                }
                 Item::Stack(_, idx) => self.update_stack_item(*idx, i as usize),
                 _ => {}
             };
@@ -525,10 +549,37 @@ impl Memory2 {
         }
     }
 
+    fn ref_item(&mut self, item: Item) -> Compile<Item> {
+        // let (ty, src_ea) =
+        match item {
+            Item::Local(ty, idx, ref_level) => {
+                return Ok(Item::Local(ty.add_ref(), idx, ref_level + 1));
+            }
+            _ => return Err(InvalidRef),
+        };
+    }
+
+    fn deref_item(&mut self, item: Item) -> Compile<Item> {
+        let item = self.materialize_item(item);
+        match item {
+            Item::Address(ty, a) => return Ok(Item::AddressIndirect(ty.deref()?, a, 0)),
+            Item::AddressIndirect(ty, a, offset) => {
+                self.output.push(IR::Mov(a.ea(), a.ea_offset(offset)));
+                return Ok(Item::AddressIndirect(ty.deref()?, a, offset));
+            }
+            Item::Stack(_, _) => {
+                todo!("how do I deref without a free register?");
+            }
+            _ => {
+                return Err(InvalidDeref);
+            }
+        };
+    }
+
     fn drop_item(&mut self, item: Item) {
         match item {
             Item::Constant(_, _) => {}
-            Item::Local(_, _) => {}
+            Item::Local(_, _, _) => {}
             Item::Data(_, r) => {
                 self.release_register__(r);
             }
@@ -569,6 +620,8 @@ mod item_test {
         Ident(&'static str),
         Add(Box<Expr>, Box<Expr>),
         Assign(Box<Expr>, Box<Expr>),
+        Ref(Box<Expr>),
+        Deref(Box<Expr>),
     }
     impl Expr {
         fn add(l: Expr, r: Expr) -> Expr {
@@ -576,6 +629,12 @@ mod item_test {
         }
         fn assign(l: Expr, r: Expr) -> Expr {
             Expr::Assign(Box::new(l), Box::new(r))
+        }
+        fn ref_(expr: Expr) -> Expr {
+            Expr::Ref(Box::new(expr))
+        }
+        fn deref(expr: Expr) -> Expr {
+            Expr::Deref(Box::new(expr))
         }
     }
 
@@ -588,13 +647,21 @@ mod item_test {
                         .get_scope(name)
                         .ok_or_else(|| UnknownIdentifier(name.to_string()))?;
                     let ty = self.stack[idx].kind.ty().clone();
-                    Ok(Item::Local(ty, idx))
+                    Ok(Item::Local(ty, idx, 0))
+                }
+                Expr::Ref(expr) => {
+                    let item = self.p_expr(*expr)?;
+                    self.ref_item(item)
+                }
+                Expr::Deref(expr) => {
+                    let item = self.p_expr(*expr)?;
+                    self.deref_item(item)
                 }
                 Expr::Assign(left, right) => {
                     let left = self.p_expr(*left)?;
 
                     match &left {
-                        Item::Local(_, _) => {}
+                        Item::Local(_, _, _) => {}
                         Item::AddressIndirect(_, _, _) => {}
                         _ => return Err(InvalidAssignment),
                     };
@@ -631,9 +698,12 @@ mod item_test {
             match stmt {
                 Stmt::Let(name, expr) => {
                     let item = self.p_expr(expr)?;
-                    let (ty, src_ea) = self.item_src(item);
-                    let idx = self.to_stack(ty.clone(), src_ea);
+                    let idx = self.push_item(item);
                     self.insert_scope(name.to_string(), idx);
+                    self.stack[idx].kind = match &self.stack[idx].kind {
+                        Expr(t) => Local(name.to_string(), t.clone()),
+                        _ => unreachable!(),
+                    }
                 }
                 Stmt::Expr(expr) => {
                     let item = self.p_expr(expr)?;
@@ -775,6 +845,76 @@ mod item_test {
             Add(D0.ea(), POP),
             Mov(PUSH, D0.ea()),
         ]);
+    }
+
+    #[test]
+    fn ref_deref() {
+        let mut m = Memory2::new();
+        m.init_scope();
+        m.p_block(vec![
+            //
+            Stmt::Let("foo", Expr::Int(100)),
+            Stmt::Let("ptr", Expr::ref_(Expr::Ident("foo"))),
+            Stmt::Let("bar", Expr::deref(Expr::Ident("ptr"))),
+        ])
+        .unwrap();
+
+        m.expect_output(vec![
+            Mov(PUSH, Immediate(100)),
+            LoadAddress(PUSH, Offset(SP, 1)),
+            Mov(A0.ea(), Offset(SP, 0)),
+            Mov(PUSH, A0.ea_offset(0)),
+        ]);
+    }
+
+    #[test]
+    fn double_ref_deref() {
+        let mut m = Memory2::new();
+        m.init_scope();
+        m.p_block(vec![
+            //
+            Stmt::Let("foo", Expr::Int(100)),
+            Stmt::Let("ptr", Expr::ref_(Expr::Ident("foo"))),
+            Stmt::Let("ptr_ptr", Expr::ref_(Expr::Ident("ptr"))),
+            Stmt::Let("bar", Expr::deref(Expr::deref(Expr::Ident("ptr_ptr")))),
+        ])
+        .unwrap();
+
+        m.expect_output(vec![
+            Mov(PUSH, Immediate(100)),
+            LoadAddress(PUSH, Offset(SP, 1)),
+            LoadAddress(PUSH, Offset(SP, 1)),
+            Mov(A0.ea(), Offset(SP, 0)),
+            Mov(A0.ea(), A0.ea_offset(0)),
+            Mov(PUSH, A0.ea_offset(0)),
+        ]);
+    }
+
+    #[test]
+    fn ref_assignment() {
+        // let mut foo = 100;
+        // let ptr = &mut foo;
+        // *ptr = 200;
+
+        let mut m = Memory2::new();
+        m.init_scope();
+        m.p_block(vec![
+            //
+            Stmt::Let("foo", Expr::Int(100)),
+            Stmt::Let("ptr", Expr::ref_(Expr::Ident("foo"))),
+            Stmt::Expr(Expr::assign(
+                Expr::deref(Expr::Ident("ptr")),
+                Expr::Int(200),
+            )),
+        ])
+        .unwrap();
+
+        m.expect_output(vec![
+            Mov(PUSH, Immediate(100)),
+            LoadAddress(PUSH, Offset(SP, 1)),
+            Mov(A0.ea(), Offset(SP, 0)),
+            Mov(A0.ea_offset(0), Immediate(200)),
+        ])
     }
 }
 
