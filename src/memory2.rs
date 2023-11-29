@@ -216,12 +216,11 @@ struct SubContext {
 // RTS
 
 impl Memory2 {
-    fn get_sub(&self, name: &str) -> Compile<SubRecord> {
-        self.module_scope
-            .subs
-            .get(name)
-            .cloned()
-            .ok_or_else(|| UnknownIdentifier(name.to_string()))
+    fn callable_item(&self, item: Item) -> Compile<SubRecord> {
+        match item {
+            Item::Sub(record) => Ok(record),
+            _ => Err(Expected("subroutine")),
+        }
     }
 
     fn begin_call(&mut self, sub: &SubRecord) {
@@ -236,7 +235,7 @@ impl Memory2 {
         }
     }
 
-    fn end_call(&mut self, sub: &SubRecord) {
+    fn end_call(&mut self, sub: &SubRecord) -> Item {
         self.invalidate_volatile_registers();
         self.clobber_cc_zero();
 
@@ -247,7 +246,9 @@ impl Memory2 {
                 .push(IR::Add(EA::Register(Register::SP), EA::Immediate(to_drop)));
             let new_len = self.stack.len() - to_drop as usize;
             self.stack.truncate(new_len);
-        }
+        };
+        let idx = self.stack.len() - 1;
+        Item::Stack(sub.return_ty(), idx)
     }
 
     fn begin_sub(&mut self, name: String, params: Vec<(String, Ty)>, ret: Ty) {
@@ -460,7 +461,7 @@ enum Item {
     Constant(Ty, Word),
     Local(Ty, FrameOffset, RefLevel),
     // Record(Ty, Vec<(FieldOffset, Item))>
-    // Sub(Ty, SubIndex), TODO
+    Sub(SubRecord),
     // volatile runtime values, need to be preserved in some contexts
     Cond(Ty, IRCond),
     Data(Ty, Data),                              // small data
@@ -496,6 +497,7 @@ impl Memory2 {
             // TODO: ensure this is at top of stack
             Item::Stack(ty, _) => (ty, POP),
             Item::Cond(_, _) => unimplemented!(),
+            Item::Sub(_) => unimplemented!(),
         }
     }
 
@@ -583,6 +585,7 @@ impl Memory2 {
             Item::AddressIndirect(ty, a, o) => (ty, a.ea_offset(*o)),
             Item::Stack(ty, idx) => (ty, self.stack_offset__(*idx)),
             Item::Cond(_, _) => unimplemented!(),
+            Item::Sub(_) => unimplemented!(),
         };
         assert_eq!(src_ty.size(), dest_ty.size());
 
@@ -648,6 +651,7 @@ impl Memory2 {
         match item {
             Item::Constant(_, _) => {}
             Item::Local(_, _, _) => {}
+            Item::Sub(_) => {}
             Item::Cond(_, _) => {
                 self.cc_zero_locked = false;
             }
@@ -681,22 +685,30 @@ mod item_test {
     use crate::runtime::{IRCond::*, Register::SP, EA::*, IR, IR::*};
 
     // mini AST / parser
+
+    enum Module {
+        Sub(&'static str, Vec<(&'static str, Ty)>, Ty, Vec<Stmt>),
+    }
+
     enum Stmt {
         Let(&'static str, Expr),
         Expr(Expr),
         If(Expr, Vec<Stmt>, Vec<Stmt>),
         While(Expr, Vec<Stmt>),
+        Return(Option<Expr>),
     }
 
     enum Expr {
         Int(Word),
         Ident(&'static str),
         Add(Box<Expr>, Box<Expr>),
+        Call(Box<Expr>, Vec<Expr>),
         Cond(IRCond, Box<Expr>, Box<Expr>),
         Assign(Box<Expr>, Box<Expr>),
         Ref(Box<Expr>),
         Deref(Box<Expr>),
     }
+
     impl Expr {
         fn add(l: Expr, r: Expr) -> Expr {
             Expr::Add(Box::new(l), Box::new(r))
@@ -713,6 +725,9 @@ mod item_test {
         fn cond(cond: IRCond, l: Expr, r: Expr) -> Expr {
             Expr::Cond(cond, Box::new(l), Box::new(r))
         }
+        fn call(sub: Expr, args: Vec<Expr>) -> Expr {
+            Expr::Call(Box::new(sub), args)
+        }
     }
 
     impl Memory2 {
@@ -720,11 +735,14 @@ mod item_test {
             match expr {
                 Expr::Int(value) => Ok(Item::Constant(Ty::int(), value)),
                 Expr::Ident(name) => {
-                    let idx = self
-                        .get_scope(name)
-                        .ok_or_else(|| UnknownIdentifier(name.to_string()))?;
-                    let ty = self.stack[idx].kind.ty().clone();
-                    Ok(Item::Local(ty, idx, 0))
+                    if let Some(idx) = self.get_scope(name) {
+                        let ty = self.stack[idx].kind.ty().clone();
+                        return Ok(Item::Local(ty, idx, 0));
+                    }
+                    if let Some(record) = self.module_scope.subs.get(name) {
+                        return Ok(Item::Sub(record.clone()));
+                    }
+                    Err(UnknownIdentifier(name.to_string()))
                 }
                 Expr::Ref(expr) => {
                     let item = self.p_expr(*expr)?;
@@ -775,6 +793,16 @@ mod item_test {
 
                     Ok(Item::Cond(Ty::bool(), cond))
                 }
+                Expr::Call(sub, args) => {
+                    let sub = self.p_expr(*sub)?;
+                    let callable = self.callable_item(sub)?;
+                    self.begin_call(&callable);
+                    for arg in args {
+                        let arg = self.p_expr(arg)?;
+                        self.push_item(arg);
+                    }
+                    Ok(self.end_call(&callable))
+                }
             }
         }
 
@@ -811,6 +839,14 @@ mod item_test {
                     self.loop_end(loop_idx);
                     self.resolve_forward_branch(while_idx);
                 }
+                Stmt::Return(opt_expr) => {
+                    let item = if let Some(expr) = opt_expr {
+                        Some(self.p_expr(expr)?)
+                    } else {
+                        None
+                    };
+                    self.return_sub(item)?;
+                }
                 Stmt::Expr(expr) => {
                     let item = self.p_expr(expr)?;
                     self.drop_item(item);
@@ -821,6 +857,24 @@ mod item_test {
         fn p_block(&mut self, block: Vec<Stmt>) -> Compile<()> {
             for stmt in block {
                 self.p_stmt(stmt)?;
+            }
+            Ok(())
+        }
+
+        fn p_module(&mut self, module: Vec<Module>) -> Compile<()> {
+            for item in module {
+                match item {
+                    Module::Sub(name, params, ret, body) => {
+                        let params = params
+                            .into_iter()
+                            .map(|(name, ty)| (name.to_string(), ty))
+                            .collect();
+
+                        self.begin_sub(name.to_string(), params, ret);
+                        self.p_block(body)?;
+                        self.end_sub()?;
+                    }
+                }
             }
             Ok(())
         }
@@ -1131,6 +1185,51 @@ mod item_test {
             // end
         ])
     }
+
+    #[test]
+    fn sub_calls() {
+        let mut m = Memory2::new();
+        m.p_module(vec![
+            Module::Sub(
+                "add",
+                vec![("a", Ty::int()), ("b", Ty::int())],
+                Ty::int(),
+                vec![
+                    //
+                    Stmt::Return(Some(Expr::add(Expr::Ident("a"), Expr::Ident("b")))),
+                ],
+            ),
+            Module::Sub(
+                "main",
+                vec![],
+                Ty::void(),
+                vec![Stmt::Let(
+                    "result",
+                    Expr::call(Expr::Ident("add"), vec![Expr::Int(123), Expr::Int(456)]),
+                )],
+            ),
+        ])
+        .unwrap();
+
+        m.expect_output(vec![
+            // sub add(a: Int, b: Int) -> Int
+            // return a + b
+            Mov(D0.ea(), Offset(SP, 2)),
+            Add(D0.ea(), Offset(SP, 1)),
+            Mov(Offset(SP, 3), D0.ea()),
+            IR::Return,
+            // sub main()
+            // add(123, 456)
+            Sub(Register(SP), Immediate(1)),
+            Mov(PUSH, Immediate(123)),
+            Mov(PUSH, Immediate(456)),
+            Call(0),
+            Add(Register(SP), Immediate(2)),
+            // cleanup
+            Add(Register(SP), Immediate(1)),
+            IR::Return,
+        ])
+    }
 }
 
 // Loops & Conditionals
@@ -1237,64 +1336,3 @@ impl Memory2 {
 //             Mov(PUSH, Offset(SP, 2)),
 //         ]);
 //     }
-
-//     #[test]
-//     fn sub_calls() {
-//         let mut m = Memory2::new();
-
-//         // sub add(a: Int, b: Int) -> Int
-//         m.begin_sub(
-//             "add".to_string(),
-//             vec![("a".to_string(), Ty::int()), ("b".to_string(), Ty::int())],
-//             Ty::int(),
-//         );
-//         let r = m.get_data_register().unwrap();
-//         m.set_dest(Dest::Data(r), m.identifier("a").unwrap());
-//         m.accumulate(IR::Add, Dest::Data(r), m.identifier("b").unwrap());
-
-//         m.expect_stack(vec![
-//             StackItemKind::Return(Ty::int()),
-//             Arg("a".to_string(), Ty::int()),
-//             Arg("b".to_string(), Ty::int()),
-//             ReturnAddr,
-//         ]);
-
-//         m.return_sub(Some(Src::PopData(r))).unwrap();
-//         m.end_sub().unwrap();
-
-//         // sub main()
-//         m.begin_sub("main".to_string(), vec![], Ty::void());
-//         let add = m.get_sub("add").unwrap();
-//         m.begin_call(&add);
-//         m.push(Src::Immediate(Ty::int(), 123));
-//         m.push(Src::Immediate(Ty::int(), 456));
-//         m.end_call(&add);
-
-//         m.expect_stack(vec![
-//             //
-//             ReturnAddr,
-//             Expr(Ty::int()),
-//         ]);
-
-//         m.end_sub().unwrap();
-
-//         m.expect_output(vec![
-//             // sub add(a: Int, b: Int) -> Int
-//             // return a + b
-//             Mov(r.ea(), Offset(SP, 2)),
-//             Add(r.ea(), Offset(SP, 1)),
-//             Mov(Offset(SP, 3), r.ea()),
-//             IR::Return,
-//             // sub main()
-//             // add(123, 456)
-//             Sub(Register(SP), Immediate(1)),
-//             Mov(PUSH, Immediate(123)),
-//             Mov(PUSH, Immediate(456)),
-//             Call(add.index as Word),
-//             Add(Register(SP), Immediate(2)),
-//             // cleanup
-//             Add(Register(SP), Immediate(1)),
-//             IR::Return,
-//         ])
-//     }
-// }
