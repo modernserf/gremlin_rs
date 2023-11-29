@@ -26,6 +26,7 @@ pub enum CompileError {
     Expected(&'static str),
     InvalidDeref,
     InvalidCast,
+    InvalidAssignment,
     DuplicateField,
     MissingField,
     InvalidRef,
