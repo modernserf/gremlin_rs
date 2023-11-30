@@ -312,6 +312,30 @@ impl Memory2 {
     fn update_stack_item(&mut self, idx: usize, offset: usize) {
         self.stack[idx - offset].last_updated = self.output.len();
     }
+    fn stack_offset(&self, idx: usize) -> EA {
+        EA::Offset(Register::SP, (self.stack.len() - idx - 1) as Word)
+    }
+    fn push_stack_block(&mut self, kind: StackItemKind) -> usize {
+        let size = kind.ty().size();
+        if size == 0 {
+            return 0;
+        }
+        for _ in 1..size {
+            self.push_stack_item(StackItemKind::Owned);
+        }
+        self.push_stack_item(kind)
+    }
+    fn truncate_stack(&mut self, to_remove: usize) {
+        if to_remove == 0 {
+            return;
+        }
+        let new_len = self.stack.len() - to_remove;
+        self.stack.truncate(new_len);
+        self.output.push(IR::Add(
+            EA::Register(Register::SP),
+            EA::Immediate(to_remove as Word),
+        ));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -343,13 +367,9 @@ impl Memory2 {
     fn exit_block(&mut self) {
         let frame = self.scope.pop().expect("scope frame");
         let to_remove = self.stack.len() - frame.start_index;
-        self.stack.truncate(frame.start_index);
 
-        if !frame.did_return && to_remove > 0 {
-            self.output.push(IR::Add(
-                EA::Register(Register::SP),
-                EA::Immediate(to_remove as Word),
-            ));
+        if !frame.did_return {
+            self.truncate_stack(to_remove);
         }
     }
 
@@ -465,7 +485,6 @@ impl Memory2 {
         self.invalidate_register(Address::A0);
         self.invalidate_register(Data::D0);
     }
-
     // TODO: iterate through more items
     fn get_data_register(&mut self, ty: Ty) -> Option<Data> {
         if self.data_registers.contains_key(&Data::D0) {
@@ -488,8 +507,7 @@ impl Memory2 {
             panic!("{:?} in use", r);
         }
     }
-
-    fn release_register__<T: CR>(&mut self, r: T) -> T {
+    fn release_register<T: CR>(&mut self, r: T) -> T {
         if let Some(_) = r.try_remove(self) {
             r
         } else {
@@ -539,21 +557,17 @@ type SubIndex = usize;
 type RefLevel = usize;
 
 impl Memory2 {
-    fn stack_offset__(&self, idx: usize) -> EA {
-        EA::Offset(Register::SP, (self.stack.len() - idx - 1) as Word)
-    }
-
     fn item_src(&mut self, item: Item) -> (Ty, EA) {
         match item {
             Item::Constant(ty, value) => (ty, EA::Immediate(value)),
             Item::Local(ty, idx, ref_level) => {
                 assert_eq!(ref_level, 0);
-                (ty, self.stack_offset__(idx))
+                (ty, self.stack_offset(idx))
             }
-            Item::Data(ty, r) => (ty, self.release_register__(r).ea()),
-            Item::Address(ty, r) => (ty, self.release_register__(r).ea()),
+            Item::Data(ty, r) => (ty, self.release_register(r).ea()),
+            Item::Address(ty, r) => (ty, self.release_register(r).ea()),
             Item::AddressIndirect(ty, r, offset) => {
-                (ty, self.release_register__(r).ea_offset(offset))
+                (ty, self.release_register(r).ea_offset(offset))
             }
             // TODO: ensure this is at top of stack
             Item::Stack(ty, _) => (ty, POP),
@@ -561,10 +575,7 @@ impl Memory2 {
             Item::Sub(_) => unimplemented!(),
             Item::Record(ty, fields) => {
                 // allocate record
-                for _ in 1..ty.size() {
-                    self.push_stack_item(StackItemKind::Owned);
-                }
-                let idx = self.push_stack_item(StackItemKind::Expr(ty.clone()));
+                let idx = self.push_stack_block(StackItemKind::Expr(ty.clone()));
                 self.output.push(IR::Sub(
                     EA::Register(Register::SP),
                     EA::Immediate(ty.size()),
@@ -591,10 +602,9 @@ impl Memory2 {
 
         // write high to low
         for _ in 1..ty.size() {
-            self.push_stack_item(StackItemKind::Owned);
             self.output.push(IR::Mov(PUSH, src_ea));
         }
-        let idx = self.push_stack_item(StackItemKind::Expr(ty));
+        let idx = self.push_stack_block(StackItemKind::Expr(ty));
         self.output.push(IR::Mov(PUSH, src_ea));
         idx
     }
@@ -602,13 +612,13 @@ impl Memory2 {
     fn push_item(&mut self, item: Item) -> usize {
         let (ty, src_ea) = match item {
             Item::Local(ty, offset, 1) => {
-                let idx = self.push_stack_item(StackItemKind::Expr(ty));
+                let idx = self.push_stack_block(StackItemKind::Expr(ty));
                 self.output
-                    .push(IR::LoadAddress(PUSH, self.stack_offset__(offset)));
+                    .push(IR::LoadAddress(PUSH, self.stack_offset(offset)));
                 return idx;
             }
             Item::Cond(ty, cond) => {
-                let idx = self.push_stack_item(StackItemKind::Expr(ty));
+                let idx = self.push_stack_block(StackItemKind::Expr(ty));
                 self.output.push(IR::SetIf(PUSH, cond));
                 return idx;
             }
@@ -658,12 +668,12 @@ impl Memory2 {
             Item::Constant(_, _) => panic!("cannot assign to constant"),
             Item::Local(ty, idx, ref_level) => {
                 assert_eq!(*ref_level, 0);
-                (ty, self.stack_offset__(*idx))
+                (ty, self.stack_offset(*idx))
             }
             Item::Data(ty, d) => (ty, d.ea()),
             Item::Address(ty, a) => (ty, a.ea()),
             Item::AddressIndirect(ty, a, o) => (ty, a.ea_offset(*o)),
-            Item::Stack(ty, idx) => (ty, self.stack_offset__(*idx)),
+            Item::Stack(ty, idx) => (ty, self.stack_offset(*idx)),
             Item::Cond(_, _) => unimplemented!(),
             Item::Sub(_) => unimplemented!(),
             Item::Record(_, _) => unimplemented!(),
@@ -750,24 +760,17 @@ impl Memory2 {
                 self.cc_zero_locked = false;
             }
             Item::Data(_, r) => {
-                self.release_register__(r);
+                self.release_register(r);
             }
             Item::Address(_, a) => {
-                self.release_register__(a);
+                self.release_register(a);
             }
             Item::AddressIndirect(_, a, _) => {
-                self.release_register__(a);
+                self.release_register(a);
             }
             Item::Stack(_, idx) => {
-                let to_drop = self.stack.len() - idx - 1;
-                if to_drop > 0 {
-                    self.output.push(IR::Add(
-                        EA::Register(Register::SP),
-                        EA::Immediate(to_drop as Word),
-                    ));
-                    let new_len = self.stack.len() - to_drop;
-                    self.stack.truncate(new_len);
-                }
+                let to_remove = self.stack.len() - idx - 1;
+                self.truncate_stack(to_remove);
             }
             Item::Record(_, _) => unimplemented!(),
         };
@@ -1022,7 +1025,6 @@ impl Memory2 {
         self.cc_zero_locked = true;
         Ok(())
     }
-
     pub fn forward_branch_if(&mut self, cond: IRCond) -> usize {
         if !self.cc_zero_locked {
             panic!("cc zero vacant");
@@ -1039,7 +1041,6 @@ impl Memory2 {
         self.resolve_forward_branch(true_idx);
         false_idx
     }
-
     pub fn resolve_forward_branch(&mut self, idx: usize) {
         let here = self.output.len();
         let displacement = here - idx - 1;
@@ -1059,7 +1060,6 @@ impl Memory2 {
         self.output
             .push(IR::BranchIf(EA::Immediate(-displacement), IRCond::Always));
     }
-
     fn clobber_cc_zero(&mut self) {
         if self.cc_zero_locked {
             panic!("clobbered cc zero");
@@ -1236,35 +1236,23 @@ impl Memory2 {
             _ => Err(Expected("subroutine")),
         }
     }
-
     fn begin_call(&mut self, sub: &SubRecord) {
         let size = sub.return_ty().size();
         if size > 0 {
-            for _ in 1..size {
-                self.push_stack_item(StackItemKind::Owned);
-            }
-            self.push_stack_item(StackItemKind::Expr(sub.return_ty().clone()));
+            self.push_stack_block(StackItemKind::Expr(sub.return_ty().clone()));
             self.output
                 .push(IR::Sub(EA::Register(Register::SP), EA::Immediate(size)));
         }
     }
-
     fn end_call(&mut self, sub: &SubRecord) -> Item {
         self.invalidate_volatile_registers();
         self.clobber_cc_zero();
 
         self.output.push(IR::Call(sub.index as Word));
-        let to_drop = sub.params_size();
-        if to_drop > 0 {
-            self.output
-                .push(IR::Add(EA::Register(Register::SP), EA::Immediate(to_drop)));
-            let new_len = self.stack.len() - to_drop as usize;
-            self.stack.truncate(new_len);
-        };
+        self.truncate_stack(sub.params_size() as usize);
         let idx = self.stack.len() - 1;
         Item::Stack(sub.return_ty(), idx)
     }
-
     fn begin_sub(&mut self, name: String, params: Vec<(String, Ty)>, ret: Ty) {
         self.scope = Vec::new();
         self.stack = Vec::new();
@@ -1277,22 +1265,11 @@ impl Memory2 {
             params.iter().map(|(_, ty)| ty.clone()).collect(),
             ret.clone(),
         ));
-        let return_idx = if ret.size() > 0 {
-            // return slot
-            for _ in 1..ret.size() {
-                self.push_stack_item(StackItemKind::Owned);
-            }
-            self.push_stack_item(StackItemKind::Return(ret.clone()))
-        } else {
-            0
-        };
+        let return_idx = self.push_stack_block(StackItemKind::Return(ret.clone()));
 
         // params
         for (name, ty) in params.into_iter() {
-            for _ in 1..ty.size() {
-                self.push_stack_item(StackItemKind::Owned);
-            }
-            let idx = self.push_stack_item(StackItemKind::Arg(name.clone(), ty));
+            let idx = self.push_stack_block(StackItemKind::Arg(name.clone(), ty));
             self.insert_scope(name, idx);
         }
         // return addr
@@ -1311,7 +1288,6 @@ impl Memory2 {
             index: self.output.len(),
         });
     }
-
     fn return_sub(&mut self, src: Option<Item>) -> Compile<()> {
         let ctx = self.current_sub.as_mut().unwrap();
         ctx.did_return = true;
@@ -1320,7 +1296,7 @@ impl Memory2 {
 
         let return_dest = Item::Local(ctx.return_ty.clone(), ctx.return_idx, 0);
 
-        let to_drop = self.stack.len() - ctx.return_addr_idx - 1;
+        let to_remove = self.stack.len() - ctx.return_addr_idx - 1;
 
         if let Some(src) = src {
             // TODO: check return ty
@@ -1329,17 +1305,11 @@ impl Memory2 {
             ctx.return_ty.check(&Ty::void())?;
         }
 
-        if to_drop > 0 {
-            self.output.push(IR::Add(
-                EA::Register(Register::SP),
-                EA::Immediate(to_drop as Word),
-            ));
-        }
+        self.truncate_stack(to_remove);
         self.output.push(IR::Return);
 
         Ok(())
     }
-
     fn end_sub(&mut self) -> Compile<()> {
         if !self.current_sub.as_ref().unwrap().did_return {
             self.return_sub(None)?;
