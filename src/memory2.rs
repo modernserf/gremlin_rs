@@ -2,7 +2,7 @@
 
 use crate::runtime::{IRCond, IROp, Register, Word, EA, IR};
 use crate::sub::TySub;
-use crate::ty::Ty;
+use crate::ty::{RecordField, Ty};
 use crate::{Compile, CompileError::*};
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -54,12 +54,14 @@ mod test_utils {
     pub enum Expr {
         Int(Word),
         Ident(&'static str),
+        Record(Ty, Vec<(&'static str, Expr)>),
         Add(Box<Expr>, Box<Expr>),
         Call(Box<Expr>, Vec<Expr>),
         Cond(IRCond, Box<Expr>, Box<Expr>),
         Assign(Box<Expr>, Box<Expr>),
         Ref(Box<Expr>),
         Deref(Box<Expr>),
+        Field(Box<Expr>, &'static str),
     }
 
     impl Expr {
@@ -80,6 +82,9 @@ mod test_utils {
         }
         pub fn call(sub: Expr, args: Vec<Expr>) -> Expr {
             Expr::Call(Box::new(sub), args)
+        }
+        pub fn field(expr: Expr, field_name: &'static str) -> Expr {
+            Expr::Field(Box::new(expr), field_name)
         }
     }
 
@@ -167,6 +172,24 @@ mod test_utils {
                         self.push_item(arg);
                     }
                     Ok(self.end_call(&callable))
+                }
+                Expr::Record(ty, fields) => {
+                    let rec = ty.get_record()?;
+
+                    let mut out = Vec::new();
+                    for (name, expr) in fields {
+                        let field = rec.get(name, None)?;
+                        let item = self.p_expr(expr)?;
+                        field.ty.check(item.ty())?;
+                        out.push((field.clone(), item));
+                    }
+                    Ok(Item::Record(ty, out))
+                }
+                Expr::Field(expr, field_name) => {
+                    let item = self.p_expr(*expr)?;
+                    let rec = item.ty().get_record()?;
+                    let field = rec.get(field_name, None)?;
+                    Ok(self.field_item(field, item)?)
                 }
             }
         }
@@ -482,7 +505,7 @@ enum Item {
     // not yet runtime values, can delay evaluation but need to be materialized for use
     Constant(Ty, Word),
     Local(Ty, FrameOffset, RefLevel),
-    // Record(Ty, Vec<(FieldOffset, Item))>
+    Record(Ty, Vec<(RecordField, Item)>),
     Sub(SubRecord),
     // volatile runtime values, need to be preserved in some contexts
     Cond(Ty, IRCond),
@@ -491,6 +514,22 @@ enum Item {
     AddressIndirect(Ty, Address, AddressOffset), // data accessed thru pointer
     // durable runtime values
     Stack(Ty, FrameOffset), // large data, or ran out of registers
+}
+
+impl Item {
+    fn ty(&self) -> &Ty {
+        match self {
+            Self::Constant(ty, _) => ty,
+            Self::Local(ty, _, _) => ty,
+            Self::Sub(r) => &r.ty,
+            Self::Record(ty, _) => ty,
+            Self::Cond(ty, _) => ty,
+            Self::Data(ty, _) => ty,
+            Self::Address(ty, _) => ty,
+            Self::AddressIndirect(ty, _, _) => ty,
+            Self::Stack(ty, _) => ty,
+        }
+    }
 }
 
 // the result of evaluating an expression
@@ -520,6 +559,24 @@ impl Memory2 {
             Item::Stack(ty, _) => (ty, POP),
             Item::Cond(_, _) => unimplemented!(),
             Item::Sub(_) => unimplemented!(),
+            Item::Record(ty, fields) => {
+                // allocate record
+                for _ in 1..ty.size() {
+                    self.push_stack_item(StackItemKind::Owned);
+                }
+                let idx = self.push_stack_item(StackItemKind::Expr(ty.clone()));
+                self.output.push(IR::Sub(
+                    EA::Register(Register::SP),
+                    EA::Immediate(ty.size()),
+                ));
+                // attach fields
+                for (field, item) in fields {
+                    let dest = Item::Stack(field.ty, idx - (field.offset as usize));
+                    self.apply_item(IR::Mov, &dest, item);
+                }
+
+                (ty, POP)
+            }
         }
     }
 
@@ -555,6 +612,7 @@ impl Memory2 {
                 self.output.push(IR::SetIf(PUSH, cond));
                 return idx;
             }
+
             item => self.item_src(item),
         };
         let idx = self.to_stack(ty.clone(), src_ea);
@@ -608,6 +666,7 @@ impl Memory2 {
             Item::Stack(ty, idx) => (ty, self.stack_offset__(*idx)),
             Item::Cond(_, _) => unimplemented!(),
             Item::Sub(_) => unimplemented!(),
+            Item::Record(_, _) => unimplemented!(),
         };
         assert_eq!(src_ty.size(), dest_ty.size());
 
@@ -668,6 +727,19 @@ impl Memory2 {
             }
         }
     }
+    fn field_item(&mut self, field: &RecordField, item: Item) -> Compile<Item> {
+        match item {
+            Item::Local(_, offset, ref_level) => {
+                assert_eq!(ref_level, 0);
+                Ok(Item::Local(
+                    field.ty.clone(),
+                    offset - field.offset as usize,
+                    ref_level,
+                ))
+            }
+            _ => unimplemented!(),
+        }
+    }
 
     fn drop_item(&mut self, item: Item) {
         match item {
@@ -697,6 +769,7 @@ impl Memory2 {
                     self.stack.truncate(new_len);
                 }
             }
+            Item::Record(_, _) => unimplemented!(),
         };
     }
 }
@@ -706,6 +779,7 @@ mod item_test {
     use super::test_utils::*;
     use super::{Address::*, Data::*, *};
     use crate::runtime::{Register::SP, EA::*, IR::*};
+    use crate::ty::TyRecord;
 
     #[test]
     fn assignment() {
@@ -902,6 +976,37 @@ mod item_test {
             Mov(A0.ea(), Offset(SP, 0)),
             Mov(A0.ea_offset(0), Immediate(200)),
         ])
+    }
+
+    #[test]
+    fn pair() {
+        let mut m = Memory2::new();
+        let pair_ty = {
+            let mut pair_ty = TyRecord::new(1);
+            pair_ty.insert("x".to_string(), Ty::int(), None).unwrap();
+            pair_ty.insert("y".to_string(), Ty::int(), None).unwrap();
+            Ty::record(pair_ty)
+        };
+
+        m.init_scope();
+        m.p_block(vec![
+            Stmt::Let(
+                "p",
+                Expr::Record(
+                    pair_ty.clone(),
+                    vec![("x", Expr::Int(123)), ("y", Expr::Int(456))],
+                ),
+            ),
+            Stmt::Let("q", Expr::field(Expr::Ident("p"), "y")),
+        ])
+        .unwrap();
+
+        m.expect_output(vec![
+            Sub(Register(SP), Immediate(2)),
+            Mov(Offset(SP, 0), Immediate(123)),
+            Mov(Offset(SP, 1), Immediate(456)),
+            Mov(PUSH, Offset(SP, 2)),
+        ]);
     }
 }
 
@@ -1302,51 +1407,3 @@ mod sub_test {
         ])
     }
 }
-
-// mod test {
-//     use super::*;
-//     use crate::{
-//         runtime::{IRCond::*, Register::SP, EA::*, IR, IR::*},
-//         ty::TyRecord,
-//     };
-
-//     #[test]
-//     fn pair() {
-//         let mut m = Memory2::new();
-//         let pair_ty = {
-//             let mut pair_ty = TyRecord::new(1);
-//             pair_ty.insert("x".to_string(), Ty::int(), None).unwrap();
-//             pair_ty.insert("y".to_string(), Ty::int(), None).unwrap();
-//             Ty::record(pair_ty)
-//         };
-
-//         m.init_scope();
-//         // let foo := Pair { x: 123, y: 456 };
-//         let base = m.push_structure(pair_ty.clone());
-//         m.set_dest(
-//             Dest::Target(m.target_field(base.clone(), "x").unwrap()),
-//             m.immediate(Ty::int(), 123),
-//         );
-//         m.set_dest(
-//             Dest::Target(m.target_field(base.clone(), "y").unwrap()),
-//             m.immediate(Ty::int(), 456),
-//         );
-//         m.assign_local("foo".to_string(), None).unwrap();
-//         // foo;
-//         let foo = m.identifier("foo").unwrap();
-//         m.push(foo);
-
-//         m.expect_stack(vec![
-//             Owned,
-//             Local("foo".to_string(), pair_ty.clone()),
-//             Owned,
-//             Expr(pair_ty.clone()),
-//         ]);
-//         m.expect_output(vec![
-//             Sub(Register(SP), Immediate(2)),
-//             Mov(Offset(SP, 0), Immediate(123)),
-//             Mov(Offset(SP, 1), Immediate(456)),
-//             Mov(PUSH, Offset(SP, 2)),
-//             Mov(PUSH, Offset(SP, 2)),
-//         ]);
-//     }
