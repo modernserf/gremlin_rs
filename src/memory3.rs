@@ -15,6 +15,7 @@ type Compile<T> = Result<T, CompileError>;
 enum EA {
     Immediate(Word),
     Data(Data),
+    Address(Address),
     Offset(Address, Word),
     PreDec(Address),
 }
@@ -28,12 +29,14 @@ type DestEA = EA;
 enum Op {
     Mov(DestEA, SrcEA),
     Add(DestEA, SrcEA),
+    LoadAddress(DestEA, SrcEA),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Ty {
     Int,
     Bool,
+    Pointer(Box<Ty>),
 }
 
 impl Ty {
@@ -45,6 +48,18 @@ impl Ty {
                 expected: self.clone(),
                 received: other.clone(),
             })
+        }
+    }
+    fn pointer(self) -> Self {
+        Self::Pointer(Box::new(self))
+    }
+    fn deref(self) -> Compile<Self> {
+        match self {
+            Self::Pointer(ty) => Ok(*ty),
+            ty => Err(ExpectedType {
+                expected: ty.clone().pointer(),
+                received: ty,
+            }),
         }
     }
 }
@@ -164,17 +179,14 @@ impl Memory {
         let id = self.stack.len() - 1;
         self.locals.insert(name, id);
     }
-    // push a copy of the named item onto the stack, and increment resource usage.
+    // push a copy of the named item onto the stack
     pub fn get_local(&mut self, name: &str) -> Compile<()> {
         let id = self
             .locals
             .get(name)
             .ok_or_else(|| UnknownIdentifier(name.to_string()))?;
         let mut item = self.stack[*id].clone();
-        item.parent = match &item.loc {
-            Loc::Const(_) => None,
-            _ => Some(*id),
-        };
+        item.parent = item.parent.or(Some(*id));
         self.stack.push(item);
 
         Ok(())
@@ -195,20 +207,23 @@ impl Memory {
             return;
         }
 
-        let src = self.item_src_release(item.clone());
-
         item.parent = None;
         if let Some(r) = self.get_data_register() {
             let dest = EA::Data(r);
+            let src = self.item_src(item.clone());
             self.output.push(Op::Mov(dest, src));
-            item.loc = Loc::Data(r)
+            item.loc = Loc::Data(r);
         } else {
-            self.frame_offset += 1;
-            self.output.push(Op::Mov(PUSH, src));
-            item.loc = Loc::Stack(self.frame_offset)
+            self.item_to_stack(item);
         }
     }
-    fn item_src_release(&mut self, item: StackItem) -> EA {
+    fn item_to_stack(&mut self, item: &mut StackItem) {
+        let src = self.item_src(item.clone());
+        self.frame_offset += 1;
+        self.output.push(Op::Mov(PUSH, src));
+        item.loc = Loc::Stack(self.frame_offset)
+    }
+    fn item_src(&mut self, item: StackItem) -> EA {
         match item.loc {
             Loc::Const(value) => EA::Immediate(value),
             Loc::Data(data) => {
@@ -217,14 +232,27 @@ impl Memory {
                 }
                 EA::Data(data)
             }
+            Loc::Address(addr) => {
+                if item.parent.is_none() {
+                    self.dec_address_register(addr);
+                }
+                EA::Address(addr)
+            }
+            Loc::AddressIndirect(addr, offset) => EA::Offset(addr, offset),
             Loc::Stack(offset) => {
                 let stack_offset = self.frame_offset - offset;
                 EA::Offset(Address::A7, stack_offset)
             }
+            Loc::StackIndirect(frame_offset, indirect_offset) => {
+                let stack_offset = self.frame_offset - frame_offset;
+                let src = EA::Offset(Address::A7, stack_offset);
+                self.output.push(Op::Mov(EA::Address(Address::A0), src));
+                EA::Offset(Address::A0, indirect_offset)
+            }
         }
     }
-    fn loc_dest(&mut self, loc: &Loc) -> EA {
-        match loc {
+    fn item_dest(&mut self, item: &StackItem) -> EA {
+        match &item.loc {
             Loc::Data(data) => EA::Data(*data),
             Loc::Stack(offset) => {
                 let stack_offset = self.frame_offset - *offset;
@@ -247,15 +275,15 @@ impl Memory {
             }
             (Loc::Const(l), _) => {
                 self.materialize_item(&mut right);
-                let dest = self.loc_dest(&right.loc);
+                let dest = self.item_dest(&right);
                 let src = EA::Immediate(*l);
                 self.output.push(Op::Add(dest, src));
                 self.stack.push(right);
             }
             _ => {
                 self.materialize_item(&mut left);
-                let dest = self.loc_dest(&left.loc);
-                let src = self.item_src_release(right);
+                let dest = self.item_dest(&left);
+                let src = self.item_src(right);
                 self.output.push(Op::Add(dest, src));
                 self.stack.push(left);
             }
@@ -263,17 +291,60 @@ impl Memory {
 
         Ok(())
     }
-    pub fn make_ref(&mut self) -> Compile<()> {
+    fn load_address(&mut self, item: StackItem) {
+        let ty = item.ty.clone().pointer();
+        let src = self.item_src(item);
+        if let Some(addr) = self.get_address_register() {
+            self.output.push(Op::LoadAddress(EA::Address(addr), src));
+            self.stack.push(StackItem {
+                ty,
+                loc: Loc::Address(addr),
+                parent: None,
+            });
+        } else {
+            self.frame_offset += 1;
+            self.output.push(Op::LoadAddress(PUSH, src));
+            self.stack.push(StackItem {
+                ty,
+                loc: Loc::Stack(self.frame_offset),
+                parent: None,
+            });
+        }
+    }
+    pub fn make_pointer(&mut self) {
+        let mut item = self.stack.pop().unwrap();
+        dbg!(&item);
+        if let Some(parent_id) = item.parent {
+            let mut parent_item = self.stack[parent_id].clone();
+            if let Loc::Stack(_) = parent_item.loc {
+                // load the existing stack value directly
+                self.load_address(parent_item);
+            } else {
+                // update the item to be stack-based, then load the address
+                self.item_to_stack(&mut parent_item);
+                self.stack[parent_id] = parent_item.clone();
+                self.load_address(parent_item);
+            }
+        } else {
+            // create a temporary item, then load its address
+            self.item_to_stack(&mut item);
+            self.load_address(item);
+        }
+    }
+    pub fn deref_pointer(&mut self) -> Compile<()> {
         let item = self.stack.pop().unwrap();
-        // ok, so a ref needs to point to something on the stack
-        // if we have a temporary value, we can just make a copy
-        // but if we have a local, we want the _original_ local to be on the stack
-        // this shouldn't be a problem for previous code that has treated it like
-        // a const or a register, but it does mean that we need to be able to
-        // find the original value from the item
-
-        // match item.loc {}
-        todo!()
+        let ty = item.ty.deref()?;
+        let loc = match item.loc {
+            Loc::Address(a) => Loc::AddressIndirect(a, 0),
+            Loc::Stack(offset) => Loc::StackIndirect(offset, 0),
+            _ => unreachable!(),
+        };
+        self.stack.push(StackItem {
+            ty,
+            loc,
+            parent: None,
+        });
+        Ok(())
     }
 }
 
@@ -285,21 +356,27 @@ struct StackItem {
 }
 
 impl StackItem {
+    // TODO: come up with some reason for this
     fn is_materialized(&self) -> bool {
         match &self.loc {
             Loc::Const(_) => false,
+            Loc::AddressIndirect(_, _) => false,
+            Loc::StackIndirect(_, _) => false,
             _ => self.parent.is_none(),
         }
     }
 }
 
-type Borrowed = bool;
+type IndirectOffset = Word;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Loc {
     Const(Word),
     Data(Data),
+    Address(Address),
+    AddressIndirect(Address, IndirectOffset),
     Stack(FrameOffset),
+    StackIndirect(FrameOffset, IndirectOffset),
 }
 
 #[cfg(test)]
@@ -378,7 +455,7 @@ mod test {
             StackItem {
                 ty: Ty::Int,
                 loc: Loc::Const(123),
-                parent: None,
+                parent: Some(0),
             },
             StackItem {
                 ty: Ty::Int,
@@ -501,5 +578,51 @@ mod test {
                 received: Ty::Bool,
             },
         )
+    }
+
+    #[test]
+    fn pointers() {
+        let mut m = Memory::new();
+        m.push_int(100);
+        m.assign_local("foo".to_string());
+        m.get_local("foo").unwrap();
+        m.make_pointer();
+        m.assign_local("ptr".to_string());
+        m.get_local("ptr").unwrap();
+        m.deref_pointer().unwrap();
+        m.materialize();
+
+        m.expect_output(vec![
+            Mov(PUSH, Immediate(100)),
+            LoadAddress(Address(A2), Offset(A7, 0)),
+            Mov(Data(D2), Offset(A2, 0)),
+        ]);
+    }
+
+    #[test]
+    fn pointer_on_stack() {
+        let mut m = Memory::new();
+        m.push_int(100);
+        m.assign_local("foo".to_string());
+        for _ in 0..6 {
+            m.get_local("foo").unwrap();
+            m.make_pointer();
+        }
+        m.assign_local("ptr".to_string());
+        m.get_local("ptr").unwrap();
+        m.deref_pointer().unwrap();
+        m.materialize();
+
+        m.expect_output(vec![
+            Mov(PUSH, Immediate(100)),
+            LoadAddress(Address(A2), Offset(A7, 0)),
+            LoadAddress(Address(A3), Offset(A7, 0)),
+            LoadAddress(Address(A4), Offset(A7, 0)),
+            LoadAddress(Address(A5), Offset(A7, 0)),
+            LoadAddress(Address(A6), Offset(A7, 0)),
+            LoadAddress(PUSH, Offset(A7, 0)),
+            Mov(Address(A0), Offset(A7, 0)),
+            Mov(Data(D2), Offset(A0, 0)),
+        ]);
     }
 }
