@@ -3,6 +3,7 @@ mod expr;
 mod lexer;
 mod memory;
 mod memory2;
+mod memory3;
 mod module;
 mod op;
 mod runtime;
