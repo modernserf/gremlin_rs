@@ -147,10 +147,23 @@ enum Loc {
     StackIndirect(FrameOffset, IndirectOffset),
 }
 
+struct ScopeFrame {
+    base_id: StackID,
+    locals: HashMap<String, StackID>,
+}
+impl ScopeFrame {
+    fn root() -> Self {
+        Self {
+            base_id: 0,
+            locals: HashMap::new(),
+        }
+    }
+}
+
 struct Memory {
     output: Vec<Op>,
     stack: Vec<StackItem>,
-    locals: HashMap<String, StackID>,
+    scope: Vec<ScopeFrame>,
     frame_offset: FrameOffset,
     used_data_registers: [usize; 8],
     used_address_registers: [usize; 8],
@@ -162,7 +175,7 @@ impl Memory {
         Self {
             output: Vec::new(),
             stack: Vec::new(),
-            locals: HashMap::new(),
+            scope: vec![ScopeFrame::root()],
             frame_offset: 0,
             used_data_registers: [0; 8],
             used_address_registers: [0; 8],
@@ -208,26 +221,49 @@ impl Memory {
     // assign name to the top stack item
     pub fn define_local(&mut self, name: String) {
         let id = self.stack.len() - 1;
-        self.locals.insert(name, id);
+        let top_frame = self.scope.len() - 1;
+        self.scope[top_frame].locals.insert(name, id);
     }
     // push a copy of the named item onto the stack
     pub fn get_local(&mut self, name: &str) -> Compile<()> {
-        let id = self
-            .locals
-            .get(name)
-            .ok_or_else(|| UnknownIdentifier(name.to_string()))?;
-        let parent = &self.stack[*id];
-        let ty = parent.ty.clone();
-        let id = match &parent.loc {
-            Loc::Id(id) => *id,
-            _ => *id,
-        };
-        self.stack.push(StackItem {
-            ty,
-            loc: Loc::Id(id),
-        });
-        Ok(())
+        for frame in self.scope.iter().rev() {
+            if let Some(id) = frame.locals.get(name) {
+                let parent = &self.stack[*id];
+                let ty = parent.ty.clone();
+                let id = match &parent.loc {
+                    Loc::Id(id) => *id,
+                    _ => *id,
+                };
+                self.stack.push(StackItem {
+                    ty,
+                    loc: Loc::Id(id),
+                });
+                return Ok(());
+            }
+        }
+        Err(UnknownIdentifier(name.to_string()))
     }
+    pub fn begin_scope(&mut self) {
+        self.scope.push(ScopeFrame {
+            base_id: self.stack.len(),
+            locals: HashMap::new(),
+        });
+    }
+    pub fn end_scope(&mut self) {
+        let frame = self.scope.pop().unwrap();
+        for item in self.stack.drain(frame.base_id..).collect::<Vec<_>>() {
+            match item.loc {
+                Loc::Address(a) => {
+                    self.dec_address_register(a);
+                }
+                Loc::Data(d) => {
+                    self.dec_data_register(d);
+                }
+                _ => {}
+            }
+        }
+    }
+
     // if the top item of the stack is a constant or borrowed, turn it into a value
     pub fn materialize(&mut self) {
         let mut item = self.stack.pop().unwrap();
@@ -766,5 +802,41 @@ mod test {
             LoadAddress(Address(A2), Offset(A7, 0)),
             Mov(Offset(A2, 0), Immediate(200)),
         ]);
+    }
+
+    #[test]
+    fn scope() {
+        let mut m = Memory::new();
+        m.begin_scope();
+        for i in 0..8 {
+            m.push_int(i);
+            m.materialize();
+        }
+        m.end_scope();
+        m.push_int(8);
+        m.materialize();
+
+        m.expect_output(vec![
+            Mov(Data(D2), Immediate(0)),
+            Mov(Data(D3), Immediate(1)),
+            Mov(Data(D4), Immediate(2)),
+            Mov(Data(D5), Immediate(3)),
+            Mov(Data(D6), Immediate(4)),
+            Mov(Data(D7), Immediate(5)),
+            Mov(PUSH, Immediate(6)),
+            Mov(PUSH, Immediate(7)),
+            Mov(Data(D2), Immediate(8)),
+        ]);
+    }
+
+    #[test]
+    fn scope_bindings() {
+        let mut m = Memory::new();
+        m.begin_scope();
+        m.push_int(100);
+        m.define_local("foo".to_string());
+        m.end_scope();
+
+        expect_err(m.get_local("foo"), UnknownIdentifier("foo".to_string()))
     }
 }
