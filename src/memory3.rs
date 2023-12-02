@@ -12,7 +12,7 @@ use CompileError::*;
 
 type Compile<T> = Result<T, CompileError>;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EA {
     Immediate(Word),
     Data(Data),
@@ -26,21 +26,33 @@ const PUSH: EA = EA::PreDec(Address::A7);
 type SrcEA = EA;
 type DestEA = EA;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
     Mov(DestEA, SrcEA),
-    Add(DestEA, SrcEA),
     LoadAddress(DestEA, SrcEA),
+    Add(DestEA, SrcEA),
+    // TODO: MoveM -- list registers saved / restored
+    Save,
+    Restore,
+    Return,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Ty {
+    Void,
     Int,
     Bool,
     Pointer(Box<Ty>),
 }
 
 impl Ty {
+    // in bytes
+    fn size(&self) -> Word {
+        match self {
+            Self::Void => 0,
+            _ => 4,
+        }
+    }
     fn check(&self, other: &Ty) -> Compile<()> {
         if self == other {
             Ok(())
@@ -167,6 +179,8 @@ struct Memory {
     frame_offset: FrameOffset,
     used_data_registers: [usize; 8],
     used_address_registers: [usize; 8],
+    return_frame_offset: FrameOffset,
+    return_ty: Ty,
 }
 
 // a register machine pretending to be a stack machine
@@ -179,6 +193,8 @@ impl Memory {
             frame_offset: 0,
             used_data_registers: [0; 8],
             used_address_registers: [0; 8],
+            return_frame_offset: 0,
+            return_ty: Ty::Void,
         }
     }
     fn get_data_register(&mut self) -> Option<Data> {
@@ -218,6 +234,21 @@ impl Memory {
             loc: Loc::Const(if value { 1 } else { 0 }),
         });
     }
+    pub fn push_data_arg(&mut self, ty: Ty, register: Data) {
+        assert_eq!(self.used_data_registers[register as usize], 0);
+        self.used_data_registers[register as usize] = 1;
+        self.stack.push(StackItem {
+            ty,
+            loc: Loc::Data(register),
+        });
+    }
+    pub fn push_stack_arg(&mut self, ty: Ty) {
+        self.frame_offset += ty.size();
+        self.stack.push(StackItem {
+            ty,
+            loc: Loc::Stack(self.frame_offset),
+        });
+    }
     // assign name to the top stack item
     pub fn define_local(&mut self, name: String) {
         let id = self.stack.len() - 1;
@@ -251,6 +282,7 @@ impl Memory {
     }
     pub fn end_scope(&mut self) {
         let frame = self.scope.pop().unwrap();
+        let mut to_drop = 0;
         for item in self.stack.drain(frame.base_id..).collect::<Vec<_>>() {
             match item.loc {
                 Loc::Address(a) => {
@@ -259,8 +291,16 @@ impl Memory {
                 Loc::Data(d) => {
                     self.dec_data_register(d);
                 }
+                Loc::Stack(_) => {
+                    to_drop += item.ty.size();
+                }
                 _ => {}
             }
+        }
+        if to_drop > 0 {
+            self.frame_offset -= to_drop;
+            self.output
+                .push(Op::Add(EA::Address(Address::A7), EA::Immediate(to_drop)));
         }
     }
 
@@ -289,7 +329,7 @@ impl Memory {
     }
     fn item_to_stack(&mut self, item: &mut StackItem) {
         let src = self.item_src(item.clone());
-        self.frame_offset += 1;
+        self.frame_offset += item.ty.size();
         self.output.push(Op::Mov(PUSH, src));
         item.loc = Loc::Stack(self.frame_offset)
     }
@@ -388,7 +428,7 @@ impl Memory {
                 loc: Loc::Address(addr),
             });
         } else {
-            self.frame_offset += 1;
+            self.frame_offset += ty.size();
             self.output.push(Op::LoadAddress(PUSH, src));
             self.stack.push(StackItem {
                 ty,
@@ -444,6 +484,7 @@ impl Memory {
             Loc::StackIndirect(frame_offset, indirect_offset) => {
                 let stack_offset = self.frame_offset - frame_offset;
                 let src = EA::Offset(Address::A7, stack_offset);
+                // TODO: stash subroutine arg using A0, if applicable
                 self.output.push(Op::Mov(EA::Address(Address::A0), src));
                 EA::Offset(Address::A0, indirect_offset)
             }
@@ -471,6 +512,39 @@ impl Memory {
         let src = self.item_src(right);
         self.output.push(Op::Mov(dest, src));
         Ok(())
+    }
+    pub fn sub_begin(&mut self, return_ty: Ty) -> Compile<()> {
+        self.return_ty = return_ty;
+        // allocate return addr
+        self.frame_offset += 4;
+        // save registers
+        self.frame_offset += 40;
+        self.output.push(Op::Save);
+        self.return_frame_offset = self.frame_offset;
+        Ok(())
+    }
+    pub fn sub_return(&mut self) -> Compile<()> {
+        let item = self.stack.pop().unwrap();
+        self.return_ty.check(&item.ty)?;
+        // TODO: handle returning on stack or with addr
+        let src = self.item_src(item);
+        self.output.push(Op::Mov(EA::Data(Data::D0), src));
+        self.sub_return__();
+        Ok(())
+    }
+    pub fn sub_return_void(&mut self) -> Compile<()> {
+        self.return_ty.check(&Ty::Void)?;
+        self.sub_return__();
+        Ok(())
+    }
+    fn sub_return__(&mut self) {
+        let to_drop = self.frame_offset - self.return_frame_offset;
+        if to_drop > 0 {
+            self.output
+                .push(Op::Add(EA::Address(Address::A7), EA::Immediate(to_drop)));
+        }
+        self.output.push(Op::Restore);
+        self.output.push(Op::Return);
     }
 }
 
@@ -825,6 +899,7 @@ mod test {
             Mov(Data(D7), Immediate(5)),
             Mov(PUSH, Immediate(6)),
             Mov(PUSH, Immediate(7)),
+            Add(Address(A7), Immediate(8)),
             Mov(Data(D2), Immediate(8)),
         ]);
     }
@@ -838,5 +913,72 @@ mod test {
         m.end_scope();
 
         expect_err(m.get_local("foo"), UnknownIdentifier("foo".to_string()))
+    }
+
+    #[test]
+    fn subroutine() {
+        let mut m = Memory::new();
+        m.push_data_arg(Ty::Int, D0);
+        m.define_local("x".to_string());
+        m.push_data_arg(Ty::Int, D1);
+        m.define_local("y".to_string());
+        m.sub_begin(Ty::Int).unwrap();
+
+        m.get_local("x").unwrap();
+        m.get_local("y").unwrap();
+        m.add().unwrap();
+        m.sub_return().unwrap();
+
+        m.expect_output(vec![
+            Save,
+            Mov(Data(D2), Data(D0)),
+            Add(Data(D2), Data(D1)),
+            Mov(Data(D0), Data(D2)),
+            Restore,
+            Return,
+        ]);
+    }
+
+    #[test]
+    fn subroutine_stack_cleanup() {
+        let mut m: Memory = Memory::new();
+        m.sub_begin(Ty::Void).unwrap();
+        for i in 0..10 {
+            m.push_int(i);
+            m.materialize();
+        }
+        m.sub_return_void().unwrap();
+
+        m.expect_output(vec![
+            Save,
+            Mov(Data(D2), Immediate(0)),
+            Mov(Data(D3), Immediate(1)),
+            Mov(Data(D4), Immediate(2)),
+            Mov(Data(D5), Immediate(3)),
+            Mov(Data(D6), Immediate(4)),
+            Mov(Data(D7), Immediate(5)),
+            Mov(PUSH, Immediate(6)),
+            Mov(PUSH, Immediate(7)),
+            Mov(PUSH, Immediate(8)),
+            Mov(PUSH, Immediate(9)),
+            Add(Address(A7), Immediate(16)),
+            Restore,
+            Return,
+        ]);
+    }
+
+    #[test]
+    fn subroutine_return_err() {
+        let mut m = Memory::new();
+        m.sub_begin(Ty::Int).unwrap();
+        m.push_bool(true);
+
+        expect_err(
+            m.sub_return(),
+            ExpectedType {
+                expected: Ty::Int,
+                received: Ty::Bool,
+            },
+        );
     }
 }
