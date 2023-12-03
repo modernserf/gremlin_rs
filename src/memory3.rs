@@ -84,6 +84,7 @@ enum Ty {
     Int,
     Bool,
     Pointer(Box<Ty>),
+    VarPointer(Box<Ty>),
 }
 
 impl Ty {
@@ -107,9 +108,13 @@ impl Ty {
     fn pointer(self) -> Self {
         Self::Pointer(Box::new(self))
     }
+    fn var_pointer(self) -> Self {
+        Self::VarPointer(Box::new(self))
+    }
     fn deref(self) -> Compile<Self> {
         match self {
             Self::Pointer(ty) => Ok(*ty),
+            Self::VarPointer(ty) => Ok(*ty),
             ty => Err(ExpectedType {
                 expected: ty.clone().pointer(),
                 received: ty,
@@ -483,7 +488,11 @@ impl Memory {
         Ok(())
     }
     fn load_address(&mut self, item: StackItem, is_var: bool) {
-        let ty = item.ty.clone().pointer();
+        let ty = if is_var {
+            item.ty.clone().var_pointer()
+        } else {
+            item.ty.clone().pointer()
+        };
         let src = self.item_src(item);
         if let Some(addr) = self.get_address_register() {
             self.output.push(Op::LoadAddress(EA::Address(addr), src));
