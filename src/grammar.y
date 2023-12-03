@@ -1,4 +1,4 @@
-%token INT IDENT TYPE_IDENT TRUE FALSE UNDEFINED
+%token INT IDENT TYPE_IDENT CHARS STRING TRUE FALSE UNDEFINED
 %token ARRAY AS CASE CONST DEFER DO ELIF ELSE END IF LET LOOP MATCH ONEOF RECORD RETURN SUB THEN TYPE WHILE VAR
 
 %nonassoc ":="
@@ -10,7 +10,7 @@
 
 %%
 
-block: %empty | stmt block;
+block: %empty | stmt block | ';' block;
 
 stmt:
     LET assign_body  ';'
@@ -26,7 +26,6 @@ stmt:
 |   MATCH expr THEN case_list END
 |   DEFER block END
 |   expr ";"
-|   ";"
 ;
 
 assign_body: 
@@ -51,6 +50,7 @@ binding: IDENT;
 
 type_expr: TYPE_IDENT
 |   TYPE_IDENT '.' TYPE_IDENT
+|   TYPE_IDENT '{' '}'
 |   '&' type_expr
 |   '&' VAR type_expr
 |   RECORD '{' record_type_fields '}'  
@@ -108,16 +108,17 @@ base_expr:
 |   TRUE
 |   FALSE
 |   UNDEFINED
+|   STRING
+|   CHARS
     // subroutine call
 |   base_expr '(' sub_args ')'
     // deref pointer
 |   base_expr '[' ']'
-    // index array or bitset
+    // index array or bitset member
 |   base_expr '[' expr ']'
     // record field
 |   base_expr '.' IDENT
-    // bitset field
-|   base_expr '.' TYPE_IDENT
+|   base_expr '.' CASE
 |   empty_record_or_bitset_literal
 |   record_literal
 |   bitset_literal
