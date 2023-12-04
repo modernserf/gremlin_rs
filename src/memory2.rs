@@ -1070,7 +1070,7 @@ impl Memory2 {
 #[cfg(test)]
 mod cond_test {
     use super::test_utils::*;
-    use super::{Address::*, Data::*, *};
+    use super::{Data::*, *};
     use crate::runtime::{IRCond::*, Register::SP, EA::*, IR::*};
 
     #[test]
@@ -1329,7 +1329,7 @@ impl Memory2 {
 #[cfg(test)]
 mod sub_test {
     use super::test_utils::*;
-    use super::{Address::*, Data::*, *};
+    use super::{Data::*, *};
     use crate::runtime::{Register::SP, EA::*, IR, IR::*};
 
     #[test]

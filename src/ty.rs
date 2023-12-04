@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::block::*;
 use crate::lexer::*;
 use crate::runtime::*;
@@ -400,7 +401,7 @@ impl TyRecord {
     pub fn get_case(&self, k: &str) -> Compile<Word> {
         self.cases.get(k).copied().ok_or(Expected("case"))
     }
-    pub fn resolve_var(&self, name: &str, ty: &Ty) -> Self {
+    pub fn resolve_var(&self, _: &str, _: &Ty) -> Self {
         unimplemented!()
     }
 }

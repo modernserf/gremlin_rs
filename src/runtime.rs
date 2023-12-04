@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub type Word = i32;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

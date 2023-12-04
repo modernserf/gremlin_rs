@@ -3,13 +3,13 @@ mod expr;
 mod lexer;
 mod memory;
 mod memory2;
-mod memory3;
 mod module;
 mod op;
 mod runtime;
 mod stmt;
 mod sub;
 mod ty;
+mod v2;
 
 use crate::lexer::*;
 use crate::module::*;
