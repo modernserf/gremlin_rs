@@ -9,6 +9,7 @@ pub enum EA {
     Offset(Address, Word),
     PreDec(Address),
     PostInc(Address),
+    PCIndexed(Data, Word),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -207,6 +208,10 @@ impl EA {
                 out.push(addr as Byte + 32);
                 write_16_le(offset, out);
             }
+            EA::PCIndexed(data, offset) => {
+                out.push(data as Byte + 40);
+                write_16_le(offset, out);
+            }
             _ => unimplemented!(),
         }
     }
@@ -223,6 +228,10 @@ impl EA {
             32 => {
                 let offset = read_16_le(i, data);
                 Self::Offset(ADDR_IDX[reg as usize], offset)
+            }
+            40 => {
+                let offset = read_16_le(i, data);
+                Self::PCIndexed(DATA_IDX[reg as usize], offset)
             }
             _ => unreachable!(),
         };
@@ -251,6 +260,13 @@ impl Writer {
     }
     pub fn mov(&mut self, dest: EA, src: EA) {
         self.op2(Op::Mov, Op::MovI, dest, src);
+    }
+    pub fn fixup_pc_indexed_mov(&mut self, at: Word, to: Word) {
+        let mut patch = Vec::new();
+        let next_idx = at + 4;
+        write_16_le(to - next_idx, &mut patch);
+        self.out[at as usize + 2] = patch[0];
+        self.out[at as usize + 3] = patch[1];
     }
     pub fn load_address(&mut self, dest: Address, src: Address, offset: Word) {
         self.out.push(Op::Lea as Byte);
@@ -343,6 +359,20 @@ impl Writer {
             self.out.push(Op::ReturnAndDeallocate as Byte);
             write_16_le(to_drop, &mut self.out);
         }
+    }
+    pub fn data_32(&mut self, data: &[Word]) -> Word {
+        let fixup = self.out.len() as Word;
+        for item in data.iter() {
+            write_32_le(*item, &mut self.out);
+        }
+        fixup
+    }
+    pub fn string(&mut self, data: &str) -> Word {
+        let fixup = self.out.len() as Word;
+        for b in data.as_bytes() {
+            self.out.push(*b);
+        }
+        fixup
     }
     fn op2(&mut self, op: Op, op_i: Op, dest: EA, src: EA) {
         match src {
@@ -649,6 +679,12 @@ impl VM {
                 self.inc_address(a);
                 *self.get_memory_word(addr)
             }
+            // FIXME: this just gets a byte, should have separate word/byte modes
+            EA::PCIndexed(d, offset) => {
+                let idx = self.data[d as usize];
+                let byte = self.program[(self.pc + idx + offset) as usize];
+                byte as Word
+            }
         }
     }
     fn get_dest(&mut self) -> &mut Word {
@@ -671,6 +707,7 @@ impl VM {
                 self.inc_address(a);
                 self.get_memory_word(addr)
             }
+            EA::PCIndexed(_, _) => unreachable!(),
         }
     }
     fn inc_address(&mut self, a: Address) {
@@ -842,5 +879,27 @@ mod test {
 
         let vm = w.run();
         vm.expect_stack(vec![124]);
+    }
+
+    #[test]
+    fn read_data() {
+        let mut w = Writer::new();
+        let fixup_main = w.branch(Cond::Always, 0);
+        w.halt();
+        let str = w.string("Hello");
+
+        let main = w.branch_dest();
+        w.fixup_branch(fixup_main, main);
+        w.mov(Data(D0), Immediate(0));
+        let loop_ = w.branch_dest();
+        // TODO: use mov_byte, write forward instead of backward
+        w.mov(PreDec(A7), PCIndexed(D0, 0));
+        w.fixup_pc_indexed_mov(loop_, str);
+        w.add(Data(D0), Immediate(1));
+        w.cmp(Data(D0), Immediate(5));
+        w.branch(Cond::NotZero, loop_);
+
+        let vm = w.run();
+        vm.expect_stack(vec![111, 108, 108, 101, 72]);
     }
 }
