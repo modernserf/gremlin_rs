@@ -258,6 +258,10 @@ end
 add(Point{x: 1, y: 2}, Point{x: 3, y: 4});
 ```
 
+### chained calls
+
+`l..add(r)`
+
 ### Nested functions
 
 There's no implicit heap allocation in this language, so closures will require more ceremony than in other languages -- e.g. a subroutine that takes a "callback" would also need to take a pointer to the callback's context value
