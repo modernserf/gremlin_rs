@@ -57,14 +57,54 @@ const ADDR_IDX: [Address; 8] = [
     Address::A7,
 ];
 
+#[derive(Debug)]
+pub enum Cond {
+    Always,
+    Zero,
+    NotZero,
+    Negative,
+    NegativeZero,
+    Positive,
+    PositiveZero,
+}
+
 enum Op {
-    Halt = 0,
-    MovI,
+    Halt = 0x00,
+    MovI = 0x01,
     Mov,
     Lea,
     Pea,
-    AddI,
+    AddI = 0x10,
     Add,
+    SubI,
+    Sub,
+    MulI,
+    Mul,
+    DivI,
+    Div,
+    CmpI,
+    Cmp,
+    Neg,
+    AndI = 0x20,
+    And,
+    OrI,
+    Or,
+    XorI,
+    Xor,
+    Not,
+    Branch = 0x30,
+    BranchZero = 0x31,
+    BranchNotZero = 0x32,
+    BranchNegative = 0x33,
+    BranchNegativeZero = 0x34,
+    BranchPositive = 0x35,
+    BranchPositiveZero = 0x36,
+
+    BranchSubroutine = 0x3F,
+    // JumpAddress = 0x40,
+    // JumpSubroutineAddress = 0x41,
+    Return = 0x42,
+    ReturnAndDeallocate = 0x43,
 }
 
 impl Op {
@@ -76,8 +116,38 @@ impl Op {
             2 => Mov,
             3 => Lea,
             4 => Pea,
-            5 => AddI,
-            6 => Add,
+            0x05..=0x0F => unimplemented!(),
+            0x10 => AddI,
+            0x11 => Add,
+            0x12 => SubI,
+            0x13 => Sub,
+            0x14 => MulI,
+            0x15 => Mul,
+            0x16 => DivI,
+            0x17 => Div,
+            0x18 => CmpI,
+            0x19 => Cmp,
+            0x1A => Neg,
+            0x1B..=0x1F => unimplemented!(),
+            0x20 => AndI,
+            0x21 => And,
+            0x22 => OrI,
+            0x23 => Or,
+            0x24 => XorI,
+            0x25 => Xor,
+            0x26 => Not,
+            0x27..=0x2F => unimplemented!(),
+            0x30 => Branch,
+            0x31 => BranchZero,         // ==
+            0x32 => BranchNotZero,      // !=
+            0x33 => BranchNegative,     // <
+            0x34 => BranchNegativeZero, // <=
+            0x35 => BranchPositive,     // >
+            0x36 => BranchPositiveZero, // >=
+            0x37..=0x3E => unimplemented!(),
+            0x3f => BranchSubroutine,
+            0x42 => Return,
+            0x43 => ReturnAndDeallocate,
             _ => unreachable!(),
         }
     }
@@ -90,24 +160,25 @@ fn write_32_le(value: Word, out: &mut Vec<Byte>) {
     out.push(((value >> 24) & 0xFF) as Byte);
 }
 
-fn write_16_le(value: Word, out: &mut Vec<Byte>) {
-    assert_eq!(value, value & 0xFFFF);
+fn read_32_le(i: &mut Word, data: &[Byte]) -> Word {
+    let out = data[*i as usize] as Word
+        + ((data[*i as usize + 1] as Word) << 8)
+        + ((data[*i as usize + 2] as Word) << 16)
+        + ((data[*i as usize + 3] as Word) << 24);
+    *i += 4;
+    out
+}
+
+fn write_16_le(value_32: Word, out: &mut Vec<Byte>) {
+    let value = value_32 as i16;
     out.push((value & 0xFF) as Byte);
     out.push(((value >> 8) & 0xFF) as Byte);
 }
 
-fn read_32_le(i: &mut usize, data: &[Byte]) -> Word {
-    let out = data[*i] as Word
-        + ((data[*i + 1] as Word) << 8)
-        + ((data[*i + 2] as Word) << 16)
-        + ((data[*i + 3] as Word) << 24);
-    *i += 4;
-    out
-}
-fn read_16_le(i: &mut usize, data: &[Byte]) -> Word {
-    let out = data[*i] as Word + ((data[*i + 1] as Word) << 8);
+fn read_16_le(i: &mut Word, data: &[Byte]) -> Word {
+    let out = data[*i as usize] as i16 + ((data[*i as usize + 1] as i16) << 8);
     *i += 2;
-    out
+    out as Word
 }
 
 fn pack_lea_pair(src: Address, dest: Address, out: &mut Vec<Byte>) {
@@ -115,8 +186,8 @@ fn pack_lea_pair(src: Address, dest: Address, out: &mut Vec<Byte>) {
     out.push(packed);
 }
 
-fn unpack_lea_pair(i: &mut usize, data: &[Byte]) -> (Address, Address) {
-    let byte = data[*i];
+fn unpack_lea_pair(i: &mut Word, data: &[Byte]) -> (Address, Address) {
+    let byte = data[*i as usize];
     *i += 1;
     let src = ADDR_IDX[(byte & 0x0F) as usize];
     let dest = ADDR_IDX[((byte & 0xF0) >> 4) as usize];
@@ -139,8 +210,8 @@ impl EA {
             _ => unimplemented!(),
         }
     }
-    fn read(i: &mut usize, data: &[Byte]) -> Self {
-        let byte = data[*i];
+    fn read(i: &mut Word, data: &[Byte]) -> Self {
+        let byte = data[*i as usize];
         *i += 1;
         let reg = byte & 0b111;
         let mode = byte & 0b11111000;
@@ -157,7 +228,7 @@ impl EA {
         };
         out
     }
-    fn read_immediate(i: &mut usize, data: &[Byte]) -> Self {
+    fn read_immediate(i: &mut Word, data: &[Byte]) -> Self {
         let out = read_32_le(i, data);
         EA::Immediate(out)
     }
@@ -179,18 +250,7 @@ impl Writer {
         self.out.push(Op::Halt as Byte)
     }
     pub fn mov(&mut self, dest: EA, src: EA) {
-        match src {
-            EA::Immediate(value) => {
-                self.out.push(Op::MovI as Byte);
-                write_32_le(value, &mut self.out);
-                dest.write(&mut self.out);
-            }
-            src => {
-                self.out.push(Op::Mov as Byte);
-                src.write(&mut self.out);
-                dest.write(&mut self.out);
-            }
-        }
+        self.op2(Op::Mov, Op::MovI, dest, src);
     }
     pub fn load_address(&mut self, dest: Address, src: Address, offset: Word) {
         self.out.push(Op::Lea as Byte);
@@ -203,14 +263,96 @@ impl Writer {
         write_16_le(offset, &mut self.out);
     }
     pub fn add(&mut self, dest: EA, src: EA) {
+        self.op2(Op::Add, Op::AddI, dest, src);
+    }
+    pub fn sub(&mut self, dest: EA, src: EA) {
+        self.op2(Op::Sub, Op::SubI, dest, src);
+    }
+    pub fn mul(&mut self, dest: EA, src: EA) {
+        self.op2(Op::Mul, Op::MulI, dest, src);
+    }
+    pub fn div(&mut self, dest: EA, src: EA) {
+        self.op2(Op::Div, Op::DivI, dest, src);
+    }
+    pub fn cmp(&mut self, dest: EA, src: EA) {
+        self.op2(Op::Cmp, Op::CmpI, dest, src);
+    }
+    pub fn neg(&mut self, dest: EA) {
+        self.out.push(Op::Neg as Byte);
+        dest.write(&mut self.out);
+    }
+    pub fn and(&mut self, dest: EA, src: EA) {
+        self.op2(Op::And, Op::AndI, dest, src);
+    }
+    pub fn or(&mut self, dest: EA, src: EA) {
+        self.op2(Op::Or, Op::OrI, dest, src);
+    }
+    pub fn xor(&mut self, dest: EA, src: EA) {
+        self.op2(Op::Xor, Op::XorI, dest, src);
+    }
+    pub fn not(&mut self, dest: EA) {
+        self.out.push(Op::Not as Byte);
+        dest.write(&mut self.out);
+    }
+    pub fn branch_dest(&self) -> Word {
+        self.out.len() as Word
+    }
+
+    pub fn branch(&mut self, cond: Cond, idx: Word) -> Word {
+        let fixup = self.out.len() as Word;
+        let op = match cond {
+            Cond::Always => Op::Branch,
+            Cond::Zero => Op::BranchZero,
+            Cond::NotZero => Op::BranchNotZero,
+            Cond::Negative => Op::BranchNegative,
+            Cond::NegativeZero => Op::BranchNegativeZero,
+            Cond::Positive => Op::BranchPositive,
+            Cond::PositiveZero => Op::BranchPositiveZero,
+        };
+        self.out.push(op as Byte);
+        let next_idx = (self.out.len() + 2) as Word;
+        write_16_le(idx - next_idx, &mut self.out);
+        fixup
+    }
+    pub fn fixup_branch(&mut self, at: Word, to: Word) {
+        let mut patch = Vec::new();
+        let next_idx = at + 3;
+        write_16_le(to - next_idx, &mut patch);
+        self.out[at as usize + 1] = patch[0];
+        self.out[at as usize + 2] = patch[1];
+    }
+    pub fn branch_subroutine(&mut self, idx: Word) -> Word {
+        let fixup = self.out.len() as Word;
+        self.out.push(Op::BranchSubroutine as Byte);
+        let next_idx = (self.out.len() + 4) as Word;
+        write_32_le(idx - next_idx, &mut self.out);
+        fixup
+    }
+    pub fn fixup_branch_subroutine(&mut self, at: Word, to: Word) {
+        let mut patch = Vec::new();
+        let next_idx = at + 5;
+        write_32_le(to - next_idx, &mut patch);
+        for i in 0..4 {
+            self.out[at as usize + 1 + i] = patch[i];
+        }
+    }
+    pub fn ret(&mut self, to_drop: Word) {
+        if to_drop == 0 {
+            self.out.push(Op::Return as Byte);
+        } else {
+            self.out.push(Op::ReturnAndDeallocate as Byte);
+            write_16_le(to_drop, &mut self.out);
+        }
+    }
+    fn op2(&mut self, op: Op, op_i: Op, dest: EA, src: EA) {
         match src {
             EA::Immediate(value) => {
-                self.out.push(Op::AddI as Byte);
+                self.out.push(op_i as Byte);
                 write_32_le(value, &mut self.out);
                 dest.write(&mut self.out);
             }
             src => {
-                self.out.push(Op::Add as Byte);
+                self.out.push(op as Byte);
                 src.write(&mut self.out);
                 dest.write(&mut self.out);
             }
@@ -221,7 +363,7 @@ impl Writer {
 pub struct VM {
     data: [Word; 8],
     addr: [Word; 8],
-    pc: usize,
+    pc: Word,
     memory: Vec<Word>,
     program: Vec<Byte>,
     run_mode: RunMode,
@@ -234,6 +376,7 @@ enum RunMode {
     Run,
 }
 
+#[derive(Debug)]
 struct Flags {
     extend: bool,
     negative: bool,
@@ -305,18 +448,157 @@ impl VM {
             AddI => {
                 let src = self.get_src_immediate();
                 let dest = self.get_dest();
-                *dest += src;
-                // TODO: overflow, carry
-                let res = *dest;
-                self.set_flags(res);
+                let sum = *dest as i64 + src as i64;
+                *dest = sum as Word;
+                self.set_math_flags(sum);
             }
             Add => {
                 let src = self.get_src();
                 let dest = self.get_dest();
-                *dest += src;
-                // TODO: overflow, carry
+                let sum = *dest as i64 + src as i64;
+                *dest = sum as Word;
+                self.set_math_flags(sum);
+            }
+            SubI => {
+                let src = self.get_src_immediate();
+                let dest = self.get_dest();
+                let sum = *dest as i64 - src as i64;
+                *dest = sum as Word;
+                self.set_math_flags(sum);
+            }
+            Sub => {
+                let src = self.get_src();
+                let dest = self.get_dest();
+                let sum = *dest as i64 - src as i64;
+                *dest = sum as Word;
+                self.set_math_flags(sum);
+            }
+            MulI => todo!(),
+            Mul => todo!(),
+            DivI => todo!(),
+            Div => todo!(),
+            CmpI => {
+                let src = self.get_src_immediate();
+                let dest = self.get_dest();
+                let sum = *dest as i64 - src as i64;
+                self.set_math_flags(sum);
+            }
+            Cmp => {
+                let src = self.get_src();
+                let dest = self.get_dest();
+                let sum = *dest as i64 - src as i64;
+                self.set_math_flags(sum);
+            }
+            Neg => {
+                let dest = self.get_dest();
+                *dest = -*dest;
                 let res = *dest;
                 self.set_flags(res);
+            }
+            AndI => {
+                let src = self.get_src_immediate();
+                let dest = self.get_dest();
+                *dest &= src;
+                let res = *dest;
+                self.set_flags(res);
+            }
+            And => {
+                let src = self.get_src();
+                let dest = self.get_dest();
+                *dest &= src;
+                let res = *dest;
+                self.set_flags(res);
+            }
+            OrI => {
+                let src = self.get_src_immediate();
+                let dest = self.get_dest();
+                *dest |= src;
+                let res = *dest;
+                self.set_flags(res);
+            }
+            Or => {
+                let src = self.get_src();
+                let dest = self.get_dest();
+                *dest |= src;
+                let res = *dest;
+                self.set_flags(res);
+            }
+            XorI => {
+                let src = self.get_src_immediate();
+                let dest = self.get_dest();
+                *dest ^= src;
+                let res = *dest;
+                self.set_flags(res);
+            }
+            Xor => {
+                let src = self.get_src();
+                let dest = self.get_dest();
+                *dest ^= src;
+                let res = *dest;
+                self.set_flags(res);
+            }
+            Not => {
+                let dest = self.get_dest();
+                *dest = !*dest;
+                let res = *dest;
+                self.set_flags(res);
+            }
+            Branch => {
+                let disp = read_16_le(&mut self.pc, &self.program);
+                self.pc += disp;
+            }
+            BranchZero => {
+                let disp = read_16_le(&mut self.pc, &self.program);
+                if self.flags.zero {
+                    self.pc += disp;
+                }
+            }
+            BranchNotZero => {
+                let disp = read_16_le(&mut self.pc, &self.program);
+                if !self.flags.zero {
+                    self.pc += disp;
+                }
+            }
+            BranchNegative => {
+                let disp = read_16_le(&mut self.pc, &self.program);
+                if self.flags.negative && !self.flags.zero {
+                    self.pc += disp;
+                }
+            }
+            BranchNegativeZero => {
+                let disp = read_16_le(&mut self.pc, &self.program);
+                if self.flags.negative || self.flags.zero {
+                    self.pc += disp;
+                }
+            }
+            BranchPositive => {
+                let disp = read_16_le(&mut self.pc, &self.program);
+                if !self.flags.negative && !self.flags.zero {
+                    self.pc += disp;
+                }
+            }
+            BranchPositiveZero => {
+                let disp = read_16_le(&mut self.pc, &self.program);
+                if !self.flags.negative || self.flags.zero {
+                    self.pc += disp;
+                }
+            }
+            BranchSubroutine => {
+                let disp = read_32_le(&mut self.pc, &self.program);
+                self.dec_address(Address::A7);
+                *self.get_memory_word(self.addr[7]) = self.pc;
+                self.pc += disp;
+            }
+            Return => {
+                let addr = *self.get_memory_word(self.addr[7]);
+                self.inc_address(Address::A7);
+                self.pc = addr
+            }
+            ReturnAndDeallocate => {
+                let to_drop = read_16_le(&mut self.pc, &self.program);
+                let addr = *self.get_memory_word(self.addr[7]);
+                self.addr[7] += to_drop + 4;
+                self.pc = addr
             }
         }
     }
@@ -327,9 +609,15 @@ impl VM {
         self.flags.overflow = false;
         self.flags.carry = false;
     }
-
+    fn set_math_flags(&mut self, value: i64) {
+        self.flags.negative = value < 0;
+        self.flags.zero = value == 0;
+        self.flags.overflow = (value > 0) && ((value & (1 << 31)) > 0);
+        self.flags.carry = (value & (1 << 32)) > 0;
+        self.flags.extend = self.flags.carry;
+    }
     fn get_op(&mut self) -> Op {
-        let op = Op::from_byte(self.program[self.pc]);
+        let op = Op::from_byte(self.program[self.pc as usize]);
         self.pc += 1;
         op
     }
@@ -461,5 +749,98 @@ mod test {
 
         vm.run();
         vm.expect_stack(vec![456, 123, 456, 123]);
+    }
+
+    #[test]
+    fn add_overflow() {
+        let mut w = Writer::new();
+        w.mov(Data(D0), Immediate(100));
+        w.add(Data(D0), Immediate(200));
+        w.mov(Data(D1), Immediate(300));
+        w.add(Data(D0), Data(D1));
+        w.halt();
+        w.mov(Data(D3), Immediate(i32::MAX));
+        w.add(Data(D3), Immediate(1));
+
+        let mut vm = w.run();
+        vm.expect_data(D0, 600);
+
+        vm.run();
+        assert!(vm.flags.overflow);
+    }
+
+    #[test]
+    fn cmp() {
+        let mut w = Writer::new();
+        w.mov(Data(D0), Immediate(100));
+        w.cmp(Data(D0), Immediate(100));
+        let vm = w.run();
+        vm.expect_data(D0, 100);
+        assert!(vm.flags.zero);
+    }
+
+    #[test]
+    fn branch() {
+        let mut w = Writer::new();
+        w.mov(Data(D0), Immediate(0));
+
+        let begin = w.branch_dest();
+        w.cmp(Data(D0), Immediate(3));
+        let fixup = w.branch(Cond::Zero, 0);
+        w.add(Data(D0), Immediate(1));
+        w.branch(Cond::Always, begin);
+        let end = w.branch_dest();
+        w.fixup_branch(fixup, end);
+
+        w.mov(Data(D1), Immediate(123));
+
+        let vm = w.run();
+        vm.expect_data(D0, 3);
+        vm.expect_data(D1, 123);
+    }
+
+    #[test]
+    fn subroutine() {
+        let mut w = Writer::new();
+        let fixup_main = w.branch(Cond::Always, 0);
+
+        // sub add_1 (a: Int) -> Int do return a + 1 end
+        let add_1 = w.branch_dest();
+        w.add(Data(D0), Immediate(1));
+        w.ret(0);
+        w.halt();
+
+        // sub main() do add_1(123) end
+        let main = w.branch_dest();
+        w.fixup_branch(fixup_main, main);
+        w.mov(Data(D0), Immediate(123));
+        w.branch_subroutine(add_1);
+
+        let vm = w.run();
+        vm.expect_data(D0, 124);
+    }
+
+    #[test]
+    fn subroutine_stack_args() {
+        let mut w = Writer::new();
+        let fixup_main = w.branch(Cond::Always, 0);
+
+        // sub add_1 (a: Int) -> Int do return a + 1 end
+        let add_1 = w.branch_dest();
+        w.mov(Data(D0), Offset(A7, 4));
+        w.add(Data(D0), Immediate(1));
+        w.mov(Offset(A7, 8), Data(D0));
+        w.ret(4);
+        w.halt();
+
+        // sub main() do add_1(123) end
+        let main = w.branch_dest();
+        w.fixup_branch(fixup_main, main);
+        w.sub(Address(A7), Immediate(4));
+        w.mov(PreDec(A7), Immediate(123));
+        w.branch_subroutine(add_1);
+
+        let vm = w.run();
+        vm.expect_stack(vec![124]);
     }
 }
