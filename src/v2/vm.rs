@@ -1,5 +1,6 @@
 pub type Word = i32;
 pub type Byte = u8;
+pub const WORD_BYTES: Word = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EA {
@@ -7,6 +8,7 @@ pub enum EA {
     Data(Data),
     Address(Address),
     Offset(Address, Word),
+    OffsetIndexed(Address, Data, Word),
     PreDec(Address),
     PostInc(Address),
     PCIndexed(Data, Word),
@@ -24,7 +26,7 @@ pub enum Data {
     D7,
 }
 
-const DATA_IDX: [Data; 8] = [
+pub const DATA_IDX: [Data; 8] = [
     Data::D0,
     Data::D1,
     Data::D2,
@@ -47,7 +49,7 @@ pub enum Address {
     A7, // stack pointer
 }
 
-const ADDR_IDX: [Address; 8] = [
+pub const ADDR_IDX: [Address; 8] = [
     Address::A0,
     Address::A1,
     Address::A2,
@@ -75,6 +77,8 @@ enum Op {
     Mov,
     Lea,
     Pea,
+    MoveMPush,
+    MoveMPop,
     AddI = 0x10,
     Add,
     SubI,
@@ -106,6 +110,8 @@ enum Op {
     // JumpSubroutineAddress = 0x41,
     Return = 0x42,
     ReturnAndDeallocate = 0x43,
+    Link = 0x44,
+    Unlink = 0x45,
 }
 
 impl Op {
@@ -117,6 +123,8 @@ impl Op {
             2 => Mov,
             3 => Lea,
             4 => Pea,
+            5 => MoveMPush,
+            6 => MoveMPop,
             0x05..=0x0F => unimplemented!(),
             0x10 => AddI,
             0x11 => Add,
@@ -149,6 +157,8 @@ impl Op {
             0x3f => BranchSubroutine,
             0x42 => Return,
             0x43 => ReturnAndDeallocate,
+            0x44 => Link,
+            0x45 => Unlink,
             _ => unreachable!(),
         }
     }
@@ -196,6 +206,18 @@ fn unpack_lea_pair(i: &mut Word, data: &[Byte]) -> (Address, Address) {
 }
 
 impl EA {
+    pub fn offset(self, offset: Word) -> Option<Self> {
+        match self {
+            Self::Offset(a, o) => Some(Self::Offset(a, o + offset)),
+            ea => {
+                if offset == 0 {
+                    Some(ea)
+                } else {
+                    None
+                }
+            }
+        }
+    }
     fn write(self, out: &mut Vec<Byte>) {
         match self {
             EA::Data(data) => {
@@ -360,6 +382,71 @@ impl Writer {
             write_16_le(to_drop, &mut self.out);
         }
     }
+
+    pub fn link(&mut self, addr: Address, displacement: Word) {
+        self.out.push(Op::Link as Byte);
+        self.out.push(addr as Byte);
+        self.out.push(-displacement as Byte);
+    }
+    pub fn unlink(&mut self, addr: Address) {
+        self.out.push(Op::Unlink as Byte);
+        self.out.push(addr as Byte);
+    }
+
+    pub fn movem_push(&mut self, dest: EA, data: &[Data], addr: &[Address]) -> Word {
+        let fixup = self.out.len() as Word;
+        self.out.push(Op::MoveMPush as Byte);
+        let (data, addr) = self.movem_register_list(data, addr);
+        self.out.push(data);
+        self.out.push(addr);
+
+        dest.write(&mut self.out);
+        fixup
+    }
+    pub fn fixup_movem_push(&mut self, at: Word, dest: EA, data: &[Data], addr: &[Address]) {
+        let at = at as usize;
+        self.out.push(Op::MoveMPush as Byte);
+        let (data, addr) = self.movem_register_list(data, addr);
+        self.out[at + 1] = data;
+        self.out[at + 2] = addr;
+        let mut patch = Vec::new();
+        dest.write(&mut patch);
+        for (i, byte) in patch.into_iter().enumerate() {
+            self.out[at + i + 3] = byte;
+        }
+    }
+    pub fn movem_pop(&mut self, data: &[Data], addr: &[Address], src: EA) -> Word {
+        let fixup = self.out.len() as Word;
+        self.out.push(Op::MoveMPop as Byte);
+        let (data, addr) = self.movem_register_list(data, addr);
+        self.out.push(data);
+        self.out.push(addr);
+        src.write(&mut self.out);
+        fixup
+    }
+    pub fn fixup_movem_pop(&mut self, at: Word, data: &[Data], addr: &[Address], src: EA) {
+        let at = at as usize;
+        let (data, addr) = self.movem_register_list(data, addr);
+        self.out[at + 1] = data;
+        self.out[at + 2] = addr;
+        let mut patch = Vec::new();
+        src.write(&mut patch);
+        for (i, byte) in patch.into_iter().enumerate() {
+            self.out[at + i + 3] = byte;
+        }
+    }
+    fn movem_register_list(&mut self, data: &[Data], addr: &[Address]) -> (Byte, Byte) {
+        let mut data_byte = 0;
+        for d in data {
+            data_byte |= 1 << *d as Byte;
+        }
+        let mut addr_byte = 0;
+        for a in addr {
+            addr_byte |= 1 << *a as Byte;
+        }
+        (data_byte, addr_byte)
+    }
+
     pub fn data_32(&mut self, data: &[Word]) -> Word {
         let fixup = self.out.len() as Word;
         for item in data.iter() {
@@ -630,6 +717,59 @@ impl VM {
                 self.addr[7] += to_drop + 4;
                 self.pc = addr
             }
+            Link => {
+                let a = self.get_byte();
+                let displacement = self.get_byte() as Word;
+                // push old fp onto stack
+                self.addr[7] -= WORD_BYTES;
+                *self.get_memory_word(self.addr[7]) = self.addr[a as usize];
+                // set current fp to sp
+                self.addr[a as usize] = self.addr[7];
+                // allocate displacement
+                self.addr[7] -= displacement;
+            }
+            Unlink => {
+                let a = self.get_byte();
+                // deallocate stack
+                self.addr[7] = self.addr[a as usize];
+                // restore previous frame pointer
+                self.addr[a as usize] = *self.get_memory_word(self.addr[7]);
+                self.addr[7] += WORD_BYTES;
+            }
+            MoveMPush => {
+                let data = self.get_byte();
+                let addr = self.get_byte();
+                let mut idx = self.get_ea_addr();
+                for i in 0..8 {
+                    if (data & (1 << i)) != 0 {
+                        *self.get_memory_word(idx) = self.data[i as usize];
+                        idx += WORD_BYTES;
+                    }
+                }
+                for i in 0..8 {
+                    if (addr & (1 << i)) != 0 {
+                        *self.get_memory_word(idx) = self.addr[i as usize];
+                        idx += WORD_BYTES;
+                    }
+                }
+            }
+            MoveMPop => {
+                let data = self.get_byte();
+                let addr = self.get_byte();
+                let mut idx = self.get_ea_addr();
+                for i in 0..8 {
+                    if (data & (1 << i)) != 0 {
+                        self.data[i as usize] = *self.get_memory_word(idx);
+                        idx += WORD_BYTES;
+                    }
+                }
+                for i in 0..8 {
+                    if (addr & (1 << i)) != 0 {
+                        self.addr[i as usize] = *self.get_memory_word(idx);
+                        idx += WORD_BYTES;
+                    }
+                }
+            }
         }
     }
 
@@ -659,6 +799,11 @@ impl VM {
         assert_eq!(address, address & !0b11);
         &mut self.memory[(address >> 2) as usize]
     }
+    fn get_byte(&mut self) -> Byte {
+        let byte = self.program[self.pc as usize];
+        self.pc += 1;
+        byte
+    }
     fn get_src(&mut self) -> Word {
         let src = EA::read(&mut self.pc, &mut self.program);
         match src {
@@ -668,6 +813,11 @@ impl VM {
             EA::Offset(a, offset) => {
                 let addr = self.addr[a as usize];
                 *self.get_memory_word(addr + offset)
+            }
+            EA::OffsetIndexed(a, d, offset) => {
+                let addr = self.addr[a as usize];
+                let index = self.data[d as usize];
+                *self.get_memory_word(addr + index + offset)
             }
             EA::PreDec(a) => {
                 self.dec_address(a);
@@ -697,6 +847,11 @@ impl VM {
                 let addr = self.addr[a as usize];
                 self.get_memory_word(addr + offset)
             }
+            EA::OffsetIndexed(a, d, offset) => {
+                let addr = self.addr[a as usize];
+                let index = self.data[d as usize];
+                self.get_memory_word(addr + index + offset)
+            }
             EA::PreDec(a) => {
                 self.dec_address(a);
                 let addr = self.addr[a as usize];
@@ -707,6 +862,26 @@ impl VM {
                 self.inc_address(a);
                 self.get_memory_word(addr)
             }
+            EA::PCIndexed(_, _) => unreachable!(),
+        }
+    }
+    fn get_ea_addr(&mut self) -> Word {
+        let dest = EA::read(&mut self.pc, &mut self.program);
+        match dest {
+            EA::Immediate(_) => unreachable!(),
+            EA::Data(d) => unreachable!(),
+            EA::Address(a) => unreachable!(),
+            EA::Offset(a, offset) => {
+                let addr = self.addr[a as usize];
+                addr + offset
+            }
+            EA::OffsetIndexed(a, d, offset) => {
+                let addr = self.addr[a as usize];
+                let index = self.data[d as usize];
+                addr + index + offset
+            }
+            EA::PreDec(a) => unreachable!(),
+            EA::PostInc(a) => unreachable!(),
             EA::PCIndexed(_, _) => unreachable!(),
         }
     }
@@ -879,6 +1054,40 @@ mod test {
 
         let vm = w.run();
         vm.expect_stack(vec![124]);
+    }
+
+    #[test]
+    fn subroutine_save_registers() {
+        let mut w = Writer::new();
+        let fixup_main = w.branch(Cond::Always, 0);
+
+        // sub origin_distance(p: Point) -> Int
+        let sub = w.branch_dest();
+        w.link(A6, -4);
+        w.movem_push(Offset(A6, -4), &[D2], &[]);
+
+        w.mov(Data(D2), Offset(A6, 8));
+        w.add(Data(D2), Offset(A6, 12));
+        w.mov(Data(D0), Data(D2));
+
+        w.movem_pop(&[D2], &[], Offset(A6, -4));
+        w.unlink(A6);
+        w.ret(8);
+        w.halt();
+
+        // sub main()
+        let main = w.branch_dest();
+        w.fixup_branch(fixup_main, main);
+
+        w.mov(Data(D2), Immediate(20));
+        w.mov(PreDec(A7), Immediate(3));
+        w.mov(PreDec(A7), Immediate(5));
+        w.branch_subroutine(sub);
+        w.mov(PreDec(A7), Data(D0));
+        w.mov(PreDec(A7), Data(D2));
+
+        let vm = w.run();
+        vm.expect_stack(vec![20, 8]);
     }
 
     #[test]

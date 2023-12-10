@@ -1,6 +1,6 @@
 use std::{collections::HashMap, mem};
 
-use super::{Compile, CompileError::*, Word};
+use super::{vm::WORD_BYTES, Compile, CompileError::*, Word};
 
 type OneOfId = Word;
 type RecordId = Word;
@@ -30,6 +30,12 @@ pub enum Ty {
     },
 }
 
+impl Default for Ty {
+    fn default() -> Self {
+        Ty::Void
+    }
+}
+
 impl Ty {
     pub fn size(&self) -> Option<Word> {
         match self {
@@ -51,10 +57,15 @@ impl Ty {
                 }
                 return Some(sum);
             }
-            _ => Some(4),
+            _ => Some(WORD_BYTES),
         }
     }
-
+    pub fn use_address_register(&self) -> bool {
+        match self {
+            Ty::Pointer(_) | Ty::VarPointer(_) | Ty::Sub { .. } => true,
+            _ => false,
+        }
+    }
     pub fn unify(&self, other: &Ty) -> Compile<Ty> {
         TypeUnifier::unify(self, other)
     }
