@@ -8,6 +8,14 @@ A low level programming language
 
 Current status: a bunch of different fragmentary implementations
 
+# project stuff
+
+Update coverage:
+
+```
+cargo llvm-cov --lcov --output-path lcov.info
+```
+
 # Language overview
 
 ## Comments

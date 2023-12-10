@@ -475,6 +475,11 @@ impl Writer {
             }
         }
     }
+
+    #[cfg(test)]
+    pub fn expect_output(&self, other: Writer) {
+        assert_eq!(self.out, other.out);
+    }
 }
 
 pub struct VM {
