@@ -947,8 +947,8 @@ impl VM {
         let dest = EA::read(&mut self.pc, &mut self.program);
         match dest {
             EA::Immediate(_) => unreachable!(),
-            EA::Data(d) => unreachable!(),
-            EA::Address(a) => unreachable!(),
+            EA::Data(_) => unreachable!(),
+            EA::Address(_) => unreachable!(),
             EA::Offset(a, offset) => {
                 let addr = self.addr[a as usize];
                 addr + offset
@@ -958,8 +958,8 @@ impl VM {
                 let index = self.data[d as usize];
                 addr + index + offset
             }
-            EA::PreDec(a) => unreachable!(),
-            EA::PostInc(a) => unreachable!(),
+            EA::PreDec(_) => unreachable!(),
+            EA::PostInc(_) => unreachable!(),
             EA::PCIndexed(_, _) => unreachable!(),
         }
     }
@@ -1245,5 +1245,81 @@ mod test {
 
         let vm = w.run();
         vm.expect_data(D0, 150);
+    }
+
+    #[test]
+    fn bump_allocator() {
+        let mut w = Writer::new();
+        let heap_tip = Offset(A5, 0);
+        w.mov(Address(A5), Immediate(0));
+        w.mov(heap_tip, Immediate(WORD_BYTES));
+
+        let to_main = w.branch(Cond::Always, 0);
+
+        // sub alloc (size: D0) -> A0
+        let alloc = w.branch_dest();
+        {
+            let size = Data(D0);
+            let ret = Address(A0);
+            w.mov(ret, heap_tip);
+            w.add(heap_tip, size);
+            w.ret(0);
+        };
+
+        // sub free (ptr: A0)
+        let free = w.branch_dest();
+        {
+            let ptr = Address(A0);
+            w.mov(heap_tip, ptr);
+            w.ret(0);
+        };
+
+        // sub cons(h: D0, t: A0) -> A0
+        let cons = w.branch_dest();
+        {
+            w.mov(PreDec(A7), Address(A0));
+            w.mov(PreDec(A7), Data(D0));
+            w.mov(Data(D0), Immediate(WORD_BYTES * 2));
+            w.branch_subroutine(alloc);
+            w.mov(Offset(A0, 0), PostInc(A7));
+            w.mov(Offset(A0, WORD_BYTES), PostInc(A7));
+            w.ret(0);
+        };
+
+        // sub sum(list: A0) -> D0
+        let sum = w.branch_dest();
+        {
+            w.cmp(Address(A0), Immediate(0));
+            let to_else = w.branch(Cond::NotZero, 0);
+            w.mov(Data(D0), Immediate(0));
+            w.ret(0);
+
+            let else_ = w.branch_dest();
+            w.fixup_branch(to_else, else_);
+            // let value = list[].head
+            w.mov(PreDec(A7), Offset(A0, 0));
+            // list = list[].tail
+            w.mov(Address(A0), Offset(A0, WORD_BYTES));
+            w.branch_subroutine(sum);
+            w.add(Data(D0), PostInc(A7));
+            w.ret(0);
+        }
+
+        let main = w.branch_dest();
+        w.fixup_branch(to_main, main);
+        {
+            w.mov(Address(A0), Immediate(0));
+            w.mov(Data(D0), Immediate(10));
+            w.branch_subroutine(cons);
+            w.mov(Data(D0), Immediate(20));
+            w.branch_subroutine(cons);
+            w.mov(Data(D0), Immediate(30));
+            w.branch_subroutine(cons);
+
+            w.branch_subroutine(sum);
+        };
+
+        let vm = w.run();
+        vm.expect_data(D0, 60);
     }
 }
