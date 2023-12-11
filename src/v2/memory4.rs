@@ -474,6 +474,11 @@ impl Memory {
             movem_pops: Vec::new(),
         }
     }
+    fn sub_init(&mut self) {
+        let mut next = Self::new();
+        next.out = std::mem::take(&mut self.out);
+        *self = next;
+    }
 
     // base exprs
     fn item_constant(&mut self, value: Word) {
@@ -542,6 +547,61 @@ impl Memory {
     }
     fn add_assign(&mut self) {
         self.op_assign(Writer::add)
+    }
+
+    fn call(&mut self, idx: SubIndex, params: &[Ty], return_ty: Ty) {
+        let mut builder = SubBuilder::new(idx);
+
+        let mut param_storage = Vec::new();
+        for param in params {
+            let storage = builder.get_param_storage(*param);
+            match storage {
+                Storage::Data(d) => {
+                    self.spill(d);
+                }
+                Storage::Address(_, a) => {
+                    self.spill(a);
+                }
+                _ => {}
+            };
+            param_storage.push(storage);
+        }
+        let ret_storage = builder.get_return_storage(return_ty);
+        match ret_storage {
+            Storage::Data(d) => {
+                self.spill(d);
+            }
+            Storage::Address(_, a) => {
+                self.spill(a);
+            }
+            _ => {}
+        };
+
+        let frame_stack_difference = WORD_BYTES * 2;
+        let to_alloc = builder.frame_offset - frame_stack_difference;
+        self.stack_size += to_alloc;
+        if to_alloc > 0 {
+            self.out
+                .sub(EA::Address(Address::A7), EA::Immediate(to_alloc));
+        }
+
+        let next_len = self.stack.len() - params.len();
+        let args = self.stack.drain(next_len..).collect::<Vec<_>>();
+        for (i, arg) in args.iter().enumerate() {
+            let src = arg.ea(self);
+            let dest = match param_storage[i] {
+                Storage::Data(d) => EA::Data(d),
+                Storage::Address(_, a) => EA::Address(a),
+                Storage::Frame(_, offset) => {
+                    EA::Offset(Address::A7, offset - frame_stack_difference)
+                }
+                _ => unreachable!(),
+            };
+            self.mov_multiple(arg.ty(), dest, src);
+        }
+
+        self.out.branch_subroutine(idx);
+        self.stack.push(Item::Storage(ret_storage));
     }
 
     // statements
@@ -642,7 +702,8 @@ impl Memory {
         self.out.fixup_branch(builder.to_end, end);
     }
 
-    fn begin_subroutine(&mut self) -> SubBuilder {
+    fn subroutine_begin(&mut self) -> SubBuilder {
+        self.sub_init();
         let idx = self.out.branch_dest();
         SubBuilder::new(idx)
     }
@@ -873,7 +934,6 @@ impl Memory {
         self.spill_storage(storage);
         return true;
     }
-
     fn spill(&mut self, register: impl Register) {
         let mut locals = std::mem::take(&mut self.locals);
         for (idx, local) in locals.iter_mut().enumerate() {
@@ -1106,7 +1166,7 @@ mod test {
     #[test]
     fn subroutine() {
         let mut m = Memory::new();
-        let mut add2 = m.begin_subroutine();
+        let mut add2 = m.subroutine_begin();
         let l = m.subroutine_param(&mut add2, INT);
         let r = m.subroutine_param(&mut add2, INT);
         m.subroutine_return_param(&mut add2, INT);
@@ -1119,7 +1179,22 @@ mod test {
 
         m.subroutine_end();
 
+        let mut main = m.subroutine_begin();
+        m.subroutine_end_params(&mut main);
+
+        m.item_constant(1);
+        let a = m.define_let();
+
+        m.item_constant(2);
+        m.item_identifier(a);
+        m.call(add2.idx, &[INT, INT], INT);
+
+        m.subroutine_return_void();
+        m.subroutine_end();
+
         m.expect_output(|w| {
+            let add2 = w.branch_dest();
+            // add2
             let displacememt = WORD_BYTES * 1;
             w.link(A6, -displacememt);
             w.movem_push(Offset(A6, -displacememt), &[D2], &[]);
@@ -1134,13 +1209,32 @@ mod test {
             w.ret(0);
 
             w.halt();
+
+            // main
+            w.link(A6, 0);
+            w.movem_push(Offset(A6, 0), &[], &[]);
+
+            // let a = 1
+            w.mov(Data(D0), Immediate(1));
+
+            // add2(2, a);
+            w.mov(PreDec(A7), Data(D0)); // spill
+            w.mov(Data(D0), Immediate(2)); // assign args
+            w.mov(Data(D1), Offset(A7, 0));
+            w.branch_subroutine(add2);
+
+            w.movem_pop(&[], &[], Offset(A6, 0));
+            w.unlink(A6);
+            w.ret(0);
+
+            w.halt();
         });
     }
 
     #[test]
     fn conditional() {
         let mut m = Memory::new();
-        let mut sub = m.begin_subroutine();
+        let mut sub = m.subroutine_begin();
         let x = m.subroutine_param(&mut sub, INT);
         m.subroutine_return_param(&mut sub, INT);
         m.subroutine_end_params(&mut sub);

@@ -281,6 +281,12 @@ pub struct Writer {
     out: Vec<Byte>,
 }
 
+impl Default for Writer {
+    fn default() -> Self {
+        Self { out: Vec::new() }
+    }
+}
+
 impl Writer {
     pub fn new() -> Self {
         Self { out: Vec::new() }
