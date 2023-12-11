@@ -319,6 +319,7 @@ impl Writer {
         self.op2(Op::Sub, Op::SubI, dest, src);
     }
     pub fn mul(&mut self, dest: EA, src: EA) {
+        // TODO: use shifts with constant src
         self.op2(Op::Mul, Op::MulI, dest, src);
     }
     pub fn div(&mut self, dest: EA, src: EA) {
