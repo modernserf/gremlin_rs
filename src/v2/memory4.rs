@@ -376,6 +376,8 @@ struct Scope {
 }
 
 type SubIndex = Word;
+type IfIdx = Word;
+type LoopIdx = Word;
 
 struct SubBuilder {
     idx: SubIndex,
@@ -436,6 +438,7 @@ impl SubBuilder {
 
 struct Memory {
     locals: Vec<Local>,
+    // TODO: Do I still want the stack?
     stack: Vec<Item>,
     stack_size: Word,
     block_scopes: Vec<Scope>,
@@ -575,6 +578,48 @@ impl Memory {
         self.locals.push(Local { storage });
         id
     }
+    fn if_begin(&mut self, cond: Cond) -> IfIdx {
+        let right = self.pop_item();
+        let left = self.pop_item();
+        let base = left.ea(self);
+        let comp = right.ea(self);
+        self.out.cmp(base, comp);
+        let if_idx = self.out.branch(cond, 0);
+        self.scope_begin();
+        if_idx
+    }
+    fn if_else(&mut self, if_idx: IfIdx) -> IfIdx {
+        self.scope_end();
+        let else_idx = self.out.branch(Cond::Always, 0);
+        self.out.fixup_branch(if_idx, else_idx);
+        self.scope_begin();
+        else_idx
+    }
+    fn if_end(&mut self, if_idx: IfIdx) {
+        self.scope_end();
+        let end_idx = self.out.branch_dest();
+        self.out.fixup_branch(if_idx, end_idx);
+    }
+
+    fn loop_begin(&mut self) -> LoopIdx {
+        let loop_header = self.out.branch(Cond::Always, 0);
+        self.scope_begin();
+        loop_header
+    }
+    fn loop_check_begin(&mut self, loop_header: LoopIdx) {
+        self.scope_end();
+        let dest = self.out.branch_dest();
+        self.out.fixup_branch(loop_header, dest);
+    }
+    fn loop_check(&mut self, cond: Cond, loop_header: LoopIdx) {
+        let right = self.pop_item();
+        let left = self.pop_item();
+        let base = left.ea(self);
+        let comp = right.ea(self);
+        self.out.cmp(base, comp);
+        let loop_begin_idx = loop_header + 3;
+        self.out.branch(cond, loop_begin_idx);
+    }
 
     fn begin_subroutine(&mut self) -> SubBuilder {
         let idx = self.out.branch_dest();
@@ -632,6 +677,19 @@ impl Memory {
                 .fixup_movem_pop(*idx, &used_data, &used_addr, EA::Offset(Address::A6, -size));
         }
         self.out.halt()
+    }
+    // top level
+    fn begin_program(&mut self) {
+        // writes a jump to a to-be-defined main function, sets up "globals"
+        unimplemented!()
+    }
+    fn begin_module(&mut self) {
+        // writes an "error-not a program" op, sets up "globals"
+        unimplemented!()
+    }
+    fn begin_main_subroutine(&mut self) -> SubBuilder {
+        // fixup begin_program jump, init sub builder
+        unimplemented!()
     }
 
     // utils
@@ -817,8 +875,10 @@ impl Memory {
         // deallocate stack
         let to_drop = self.stack_size - scope.initial_stack_size;
         self.stack_size = scope.initial_stack_size;
-        self.out
-            .add(EA::Address(Address::A7), EA::Immediate(to_drop));
+        if to_drop > 0 {
+            self.out
+                .add(EA::Address(Address::A7), EA::Immediate(to_drop));
+        }
 
         // forget locals
         self.locals.truncate(scope.initial_locals_size);
@@ -828,6 +888,7 @@ impl Memory {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::v2::vm::{Address::*, Data::*, EA::*};
 
     const INT: Ty = Ty {
         ref_level: 0,
@@ -956,8 +1017,8 @@ mod test {
 
         m.expect_locals(vec![
             //
-            Storage::Address(array_ty.pointer(), Address::A0),
-            Storage::Data(INT, Data::D0),
+            Storage::Address(array_ty.pointer(), A0),
+            Storage::Data(INT, D0),
         ]);
     }
 
@@ -968,31 +1029,29 @@ mod test {
         m.add_ref();
 
         m.expect_output(|w| {
-            w.mov(EA::PreDec(Address::A7), EA::Immediate(123));
-            w.load_address(Address::A0, Address::A7, 0);
+            w.mov(PreDec(A7), Immediate(123));
+            w.load_address(A0, A7, 0);
         });
 
         m.expect_stack(vec![
             //
-            Item::Storage(Storage::Address(INT.pointer(), Address::A0)),
+            Item::Storage(Storage::Address(INT.pointer(), A0)),
         ]);
 
         m.deref(0);
         m.expect_output(|w| {
-            w.mov(EA::PreDec(Address::A7), EA::Immediate(123));
-            w.load_address(Address::A0, Address::A7, 0);
-            w.mov(EA::Data(Data::D0), EA::Offset(Address::A0, 0));
+            w.mov(PreDec(A7), Immediate(123));
+            w.load_address(A0, A7, 0);
+            w.mov(Data(D0), Offset(A0, 0));
         });
         m.expect_stack(vec![
             //
-            Item::Storage(Storage::Data(INT, Data::D0)),
+            Item::Storage(Storage::Data(INT, D0)),
         ]);
     }
 
     #[test]
     fn subroutine() {
-        use crate::v2::vm::{Address::*, Data::*, EA::*, *};
-
         let mut m = Memory::new();
         let mut add2 = m.begin_subroutine();
         let l = m.subroutine_param(&mut add2, INT);
@@ -1018,6 +1077,47 @@ mod test {
             w.mov(Data(D0), Data(D2));
 
             w.movem_pop(&[D2], &[], Offset(A6, -displacememt));
+            w.unlink(A6);
+            w.ret(0);
+
+            w.halt();
+        });
+    }
+
+    #[test]
+    fn conditional() {
+        let mut m = Memory::new();
+        let mut sub = m.begin_subroutine();
+        let x = m.subroutine_param(&mut sub, INT);
+        m.subroutine_return_param(&mut sub, INT);
+        m.subroutine_end_params(&mut sub);
+
+        m.item_identifier(x);
+        m.item_constant(INT, 10);
+        let if_idx = m.if_begin(Cond::Zero);
+
+        m.item_constant(INT, 1);
+        m.subroutine_return_value();
+        m.if_end(if_idx);
+
+        m.item_constant(INT, 0);
+        m.subroutine_return_value();
+        m.subroutine_end();
+
+        m.expect_output(|w| {
+            w.link(A6, 0);
+            w.movem_push(Offset(A6, 0), &[], &[]);
+
+            w.cmp(Data(D0), Immediate(10));
+            w.branch(Cond::Zero, 33);
+
+            w.mov(Data(D0), Immediate(1));
+            w.movem_pop(&[], &[], Offset(A6, 0));
+            w.unlink(A6);
+            w.ret(0);
+
+            w.mov(Data(D0), Immediate(0));
+            w.movem_pop(&[], &[], Offset(A6, 0));
             w.unlink(A6);
             w.ret(0);
 
