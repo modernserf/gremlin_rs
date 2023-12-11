@@ -109,6 +109,12 @@ struct Ty {
 }
 
 impl Ty {
+    fn word() -> Self {
+        Self {
+            base_size: WORD_BYTES,
+            ref_level: 0,
+        }
+    }
     fn size(&self) -> Word {
         if self.ref_level > 0 {
             WORD_BYTES
@@ -141,9 +147,8 @@ type ItemId = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Storage {
-    Undefined(Ty),
-    Constant(Ty, Word),
-    Data(Ty, Data),
+    Constant(Word),
+    Data(Data),
     Address(Ty, Address),
     ConditionCode(Ty),
     Frame(Ty, Word),
@@ -153,9 +158,8 @@ enum Storage {
 impl Storage {
     fn ty(&self) -> Ty {
         match *self {
-            Self::Undefined(ty) => ty,
-            Self::Constant(ty, _) => ty,
-            Self::Data(ty, _) => ty,
+            Self::Constant(_) => Ty::word(),
+            Self::Data(_) => Ty::word(),
             Self::Address(ty, _) => ty,
             Self::ConditionCode(ty) => ty,
             Self::Frame(ty, _) => ty,
@@ -164,11 +168,8 @@ impl Storage {
     }
     fn ea(&self, memory: &mut Memory) -> EA {
         match self {
-            Self::Undefined(_) => {
-                panic!("cannot take src of undefined value")
-            }
-            Self::Constant(_, value) => EA::Immediate(*value),
-            Self::Data(_, r) => {
+            Self::Constant(value) => EA::Immediate(*value),
+            Self::Data(r) => {
                 memory.data_registers.mark(*r);
                 EA::Data(*r)
             }
@@ -215,7 +216,7 @@ impl Storage {
     }
     fn to_dest(self, memory: &mut Memory) -> Storage {
         match self {
-            Self::Constant(ty, value) => memory.ea_to_storage(EA::Immediate(value), ty),
+            Self::Constant(value) => memory.ea_to_storage(EA::Immediate(value), Ty::word()),
             _ => self,
         }
     }
@@ -250,16 +251,6 @@ impl LValue {
             }
         }
         ea
-    }
-    fn try_constant(&self, memory: &mut Memory) -> Option<Storage> {
-        if self.base_offset != 0 || self.deref_offsets.len() > 0 {
-            return None;
-        }
-        let base_storage = memory.get_storage(self.item_id);
-        match base_storage {
-            Storage::Constant(_, _) => Some(base_storage),
-            _ => None,
-        }
     }
     fn get_field(mut self, ty: Ty, offset: Word) -> LValue {
         self.ty = ty;
@@ -331,11 +322,11 @@ impl Item {
     }
     fn index_src(&self, memory: &mut Memory, stride: Word, index: Storage) -> EA {
         match index {
-            Storage::Constant(_, value) => {
+            Storage::Constant(value) => {
                 let addr = memory.deref_register(&self);
                 EA::Offset(addr, value * stride)
             }
-            Storage::Data(_, data) => {
+            Storage::Data(data) => {
                 if stride != 1 {
                     memory.out.mul(EA::Data(data), EA::Immediate(stride));
                 }
@@ -363,11 +354,10 @@ impl Item {
         let src = self.index_src(memory, 1, offset);
         memory.ea_to_storage(src, item_ty)
     }
-    fn try_constant(&self, memory: &mut Memory) -> Option<Storage> {
+    fn try_constant(&self) -> Option<Word> {
         match self {
-            Self::Storage(s @ Storage::Constant(_, _)) => Some(*s),
-            Self::Storage(_) => None,
-            Self::LValue(l) => l.try_constant(memory),
+            Self::Storage(Storage::Constant(value)) => Some(*value),
+            _ => None,
         }
     }
     fn add_ref(&self, memory: &mut Memory) -> Storage {
@@ -420,10 +410,10 @@ impl SubBuilder {
     fn get_data_storage(&mut self, ty: Ty) -> Storage {
         if !self.used_registers[0] {
             self.used_registers[0] = true;
-            Storage::Data(ty, Data::D0)
+            Storage::Data(Data::D0)
         } else if !self.used_registers[1] {
             self.used_registers[1] = true;
-            Storage::Data(ty, Data::D1)
+            Storage::Data(Data::D1)
         } else {
             self.get_frame_storage(ty)
         }
@@ -486,14 +476,15 @@ impl Memory {
     }
 
     // base exprs
-    fn item_undefined(&mut self, ty: Ty) {
-        self.stack.push(Item::Storage(Storage::Undefined(ty)))
+    fn item_constant(&mut self, value: Word) {
+        self.stack.push(Item::Storage(Storage::Constant(value)))
     }
-    fn item_constant(&mut self, ty: Ty, value: Word) {
-        self.stack.push(Item::Storage(Storage::Constant(ty, value)))
+    fn item_undefined(&mut self, ty: Ty) {
+        let storage = self.reserve_storage(ty);
+        self.stack.push(Item::Storage(storage))
     }
     fn item_identifier(&mut self, id: ItemId) {
-        let ty = self.locals[id].storage.ty();
+        let ty = self.get_storage(id).ty();
 
         self.stack.push(Item::LValue(LValue {
             ty,
@@ -542,63 +533,30 @@ impl Memory {
     fn assign(&mut self) {
         let value = self.pop_item();
         let target = self.pop_lvalue();
-
-        match (target.try_constant(self), value.try_constant(self)) {
-            (Some(Storage::Constant(_, _)), Some(Storage::Constant(ty, value))) => {
-                self.locals[target.item_id].storage = Storage::Constant(ty, value);
-            }
-            (Some(Storage::Constant(_, _)), _) => {
-                let src = value.ea(self);
-                let storage = self.ea_to_storage(src, target.ty);
-                self.locals[target.item_id].storage = storage;
-            }
-            (_, _) => {
-                let src = value.ea(self);
-                let dest = target.ea(self);
-                self.mov_multiple(value.ty(), dest, src);
-            }
-        }
+        let src = value.ea(self);
+        let dest = target.ea(self);
+        self.mov_multiple(value.ty(), dest, src);
     }
     fn add(&mut self) {
-        let right = self.pop_item();
-        let left = self.pop_item();
-        let lc = left.try_constant(self);
-        let rc = right.try_constant(self);
-        match (lc, rc) {
-            (Some(Storage::Constant(ty, l)), Some(Storage::Constant(_, r))) => {
-                self.stack.push(Item::Storage(Storage::Constant(ty, l + r)));
-            }
-            (Some(Storage::Constant(_, l)), _) => {
-                let src = EA::Immediate(l);
-                let right = right.to_dest(self);
-                let dest = right.ea(self);
-                self.out.add(dest, src);
-                self.stack.push(Item::Storage(right));
-            }
-            (_, _) => {
-                let src = right.ea(self);
-                let left = left.to_dest(self);
-                let dest = left.ea(self);
-                self.out.add(dest, src);
-                self.stack.push(Item::Storage(left));
-            }
-        }
+        self.op(Writer::add, |l, r| l + r);
     }
     fn add_assign(&mut self) {
-        let right = self.pop_item();
-        let left = self.pop_lvalue();
-        let dest = left.ea(self);
-        let src = right.ea(self);
-        self.out.add(dest, src);
+        self.op_assign(Writer::add)
     }
+
     // statements
-    // TODO: separate define_const, define_let (register or stack), define_var (always on stack)
+    // let: in register or on stack
     fn define_let(&mut self) -> ItemId {
-        // let item = self.pop_item();
-        // let storage = item
-        //     .try_constant(self)
-        //     .unwrap_or_else(|| item.to_dest(self));
         let storage = self.pop_item().to_dest(self);
+        let id = self.locals.len();
+        self.locals.push(Local { storage });
+        id
+    }
+    // var: always on stack
+    fn define_var(&mut self) -> ItemId {
+        let item = self.pop_item();
+        let src = item.ea(self);
+        let storage = self.ea_to_stack(src, item.ty());
         let id = self.locals.len();
         self.locals.push(Local { storage });
         id
@@ -765,6 +723,18 @@ impl Memory {
     fn pop_item(&mut self) -> Item {
         self.stack.pop().unwrap()
     }
+    fn reserve_storage(&mut self, ty: Ty) -> Storage {
+        if ty.use_address_register() {
+            let a = self.get_address_register();
+            Storage::Address(ty, a)
+        } else if ty.size() > WORD_BYTES {
+            self.stack_size += ty.size();
+            Storage::Stack(ty, self.stack_size)
+        } else {
+            let d = self.get_data_register();
+            Storage::Data(d)
+        }
+    }
     fn ea_to_storage(&mut self, src: EA, ty: Ty) -> Storage {
         if ty.use_address_register() {
             let a = self.get_address_register();
@@ -778,9 +748,14 @@ impl Memory {
             } else {
                 let d = self.get_data_register();
                 self.out.mov(EA::Data(d), src);
-                Storage::Data(ty, d)
+                Storage::Data(d)
             }
         }
+    }
+    fn ea_to_stack(&mut self, src: EA, ty: Ty) -> Storage {
+        self.push_multiple(ty, src);
+        self.stack_size += ty.size();
+        Storage::Stack(ty, self.stack_size)
     }
     fn push_multiple(&mut self, ty: Ty, src: EA) {
         let words = ty.size() / WORD_BYTES;
@@ -812,8 +787,36 @@ impl Memory {
                 .mov(dest.offset(offset).unwrap(), src.offset(offset).unwrap());
         }
     }
+    fn op_assign(&mut self, op: fn(&mut Writer, EA, EA)) {
+        let right = self.pop_item();
+        let left = self.pop_lvalue();
+        let dest = left.ea(self);
+        let src = right.ea(self);
+        op(&mut self.out, dest, src);
+    }
+
+    fn op(&mut self, op: fn(&mut Writer, EA, EA), const_f: fn(Word, Word) -> Word) {
+        let right = self.pop_item();
+        let left = self.pop_item();
+        match (left.try_constant(), right.try_constant()) {
+            (Some(l), Some(r)) => {
+                self.stack
+                    .push(Item::Storage(Storage::Constant(const_f(l, r))));
+            }
+            _ => {
+                let src = right.ea(self);
+                let left = left.to_dest(self);
+                let dest = left.ea(self);
+                op(&mut self.out, dest, src);
+                self.stack.push(Item::Storage(left));
+            }
+        }
+    }
     fn get_storage(&self, id: ItemId) -> Storage {
         self.locals[id].storage
+    }
+    fn get_storage_mut(&mut self, id: ItemId) -> &mut Storage {
+        &mut self.locals[id].storage
     }
     fn load_address(&mut self, ea: EA) -> Address {
         let (src_a, o) = match ea {
@@ -862,7 +865,7 @@ impl Memory {
         let src = register.ea();
         match storage {
             Storage::Address(_, addr) if EA::Address(*addr) == src => {}
-            Storage::Data(_, data) if EA::Data(*data) == src => {}
+            Storage::Data(data) if EA::Data(*data) == src => {}
             _ => {
                 return false;
             }
@@ -926,11 +929,11 @@ impl Memory {
             match dest {
                 EA::Address(a) => {
                     self.out.mov(EA::Address(a), src);
-                    self.locals[id].storage = Storage::Address(ty, a);
+                    *self.get_storage_mut(id) = Storage::Address(ty, a);
                 }
                 EA::Data(d) => {
                     self.out.mov(EA::Data(d), src);
-                    self.locals[id].storage = Storage::Data(ty, d);
+                    *self.get_storage_mut(id) = Storage::Data(d);
                 }
                 _ => unreachable!(),
             };
@@ -985,42 +988,29 @@ mod test {
     #[test]
     fn constants() {
         let mut m = Memory::new();
-        m.item_constant(INT, 10);
-        m.item_constant(INT, 20);
+        m.item_constant(10);
+        m.item_constant(20);
         m.add();
         m.expect_stack(vec![
             //
-            Item::Storage(Storage::Constant(INT, 30)),
+            Item::Storage(Storage::Constant(30)),
         ]);
     }
 
     #[test]
     fn identifiers() {
         let mut m = Memory::new();
-        m.item_constant(INT, 10);
+        m.item_constant(10);
         let x = m.define_let();
-        m.expect_locals(vec![
-            //
-            Storage::Data(INT, D0),
-        ]);
 
         m.item_identifier(x);
-        m.expect_stack(vec![
-            //
-            Item::LValue(LValue {
-                ty: INT,
-                item_id: 0,
-                base_offset: 0,
-                deref_offsets: vec![],
-            }),
-        ]);
-
-        m.item_constant(INT, 20);
+        m.item_constant(20);
         m.assign();
-        m.expect_locals(vec![
-            //
-            Storage::Data(INT, D0),
-        ]);
+
+        m.expect_output(|w| {
+            w.mov(Data(D0), Immediate(10));
+            w.mov(Data(D0), Immediate(20));
+        });
     }
 
     #[test]
@@ -1038,9 +1028,9 @@ mod test {
         };
         let mut m = Memory::new();
         m.item_structure(point);
-        m.item_constant(INT, 10);
+        m.item_constant(10);
         m.item_structure_offset(0);
-        m.item_constant(INT, 20);
+        m.item_constant(20);
         m.item_structure_offset(WORD_BYTES);
 
         m.expect_stack(vec![
@@ -1064,31 +1054,31 @@ mod test {
         };
 
         m.item_structure(array_ty);
-        m.item_constant(INT, 10);
+        m.item_constant(10);
         m.item_structure_offset(0);
-        m.item_constant(INT, 20);
+        m.item_constant(20);
         m.item_structure_offset(WORD_BYTES);
-        m.item_constant(INT, 30);
+        m.item_constant(30);
         m.item_structure_offset(WORD_BYTES * 2);
         m.add_ref();
         let array = m.define_let();
 
         m.item_identifier(array);
-        m.item_constant(INT, 1);
+        m.item_constant(1);
         m.index(INT);
         m.define_let();
 
         m.expect_locals(vec![
             //
             Storage::Address(array_ty.pointer(), A0),
-            Storage::Data(INT, D0),
+            Storage::Data(D0),
         ]);
     }
 
     #[test]
     fn ref_deref() {
         let mut m = Memory::new();
-        m.item_constant(INT, 123);
+        m.item_constant(123);
         m.add_ref();
 
         m.expect_output(|w| {
@@ -1109,7 +1099,7 @@ mod test {
         });
         m.expect_stack(vec![
             //
-            Item::Storage(Storage::Data(INT, D0)),
+            Item::Storage(Storage::Data(D0)),
         ]);
     }
 
@@ -1156,14 +1146,14 @@ mod test {
         m.subroutine_end_params(&mut sub);
 
         m.item_identifier(x);
-        m.item_constant(INT, 10);
+        m.item_constant(10);
         let if_idx = m.if_begin(Cond::Zero);
 
-        m.item_constant(INT, 1);
+        m.item_constant(1);
         m.subroutine_return_value();
         m.if_end(if_idx);
 
-        m.item_constant(INT, 0);
+        m.item_constant(0);
         m.subroutine_return_value();
         m.subroutine_end();
 
@@ -1172,19 +1162,62 @@ mod test {
             w.movem_push(Offset(A6, 0), &[], &[]);
 
             w.cmp(Data(D0), Immediate(10));
-            w.branch(Cond::Zero, 33);
+            let to_else = w.branch(Cond::Zero, 0);
 
             w.mov(Data(D0), Immediate(1));
             w.movem_pop(&[], &[], Offset(A6, 0));
             w.unlink(A6);
             w.ret(0);
 
+            let else_idx = w.branch_dest();
+            w.fixup_branch(to_else, else_idx);
             w.mov(Data(D0), Immediate(0));
             w.movem_pop(&[], &[], Offset(A6, 0));
             w.unlink(A6);
             w.ret(0);
 
             w.halt();
+        });
+    }
+
+    #[test]
+    fn while_() {
+        let mut m = Memory::new();
+        m.item_constant(0);
+        let sum = m.define_let();
+        m.item_constant(0);
+        let idx = m.define_let();
+
+        let loop_ = m.loop_begin();
+        // sum += i;
+        m.item_identifier(sum);
+        m.item_identifier(idx);
+        m.add_assign();
+
+        // i += 1;
+        m.item_identifier(idx);
+        m.item_constant(1);
+        m.add_assign();
+
+        // while i < 5
+        m.loop_check_begin(loop_);
+        m.item_identifier(idx);
+        m.item_constant(5);
+        m.loop_check(Cond::Negative, loop_);
+
+        m.expect_output(|w| {
+            w.mov(Data(D0), Immediate(0));
+            w.mov(Data(D1), Immediate(0));
+            let l = w.branch(Cond::Always, 0);
+            let begin = w.branch_dest();
+
+            w.add(Data(D0), Data(D1));
+            w.add(Data(D1), Immediate(1));
+
+            let check = w.branch_dest();
+            w.fixup_branch(l, check);
+            w.cmp(Data(D1), Immediate(5));
+            w.branch(Cond::Negative, begin);
         });
     }
 
@@ -1197,23 +1230,23 @@ mod test {
         };
 
         m.item_structure(array_ty);
-        m.item_constant(INT, 10);
+        m.item_constant(10);
         m.item_structure_offset(0);
-        m.item_constant(INT, 20);
+        m.item_constant(20);
         m.item_structure_offset(WORD_BYTES);
-        m.item_constant(INT, 30);
+        m.item_constant(30);
         m.item_structure_offset(WORD_BYTES * 2);
         m.add_ref();
         let array = m.define_let();
-        m.item_constant(INT, WORD_BYTES * 3);
+        m.item_constant(WORD_BYTES * 3);
         let len = m.define_let();
 
-        m.item_constant(INT, 0);
+        m.item_constant(0);
         let sum = m.define_let();
 
         m.item_identifier(array);
         m.item_identifier(len);
-        m.item_constant(INT, 0);
+        m.item_constant(0);
         let (item, iter_builder) = m.iter_begin(INT);
 
         m.item_identifier(sum);
@@ -1232,8 +1265,10 @@ mod test {
             w.mov(Data(D0), Immediate(WORD_BYTES * 3)); // len
             w.mov(Data(D1), Immediate(0)); // item
             w.mov(Data(D2), Immediate(0)); // offset
+
+            let begin_idx = w.branch_dest();
             w.cmp(Data(D2), Data(D0));
-            w.branch(Cond::Zero, 75);
+            let to_end = w.branch(Cond::Zero, 0);
 
             // item
             w.mov(Data(D3), OffsetIndexed(A0, D2, 0));
@@ -1241,7 +1276,9 @@ mod test {
             w.add(Data(D1), Data(D3));
 
             w.add(Data(D2), Immediate(WORD_BYTES));
-            w.branch(Cond::Always, 52);
+            w.branch(Cond::Always, begin_idx);
+            let end_idx = w.branch_dest();
+            w.fixup_branch(to_end, end_idx);
         });
     }
 }
