@@ -234,12 +234,24 @@ impl EA {
                 out.push(data as Byte + 40);
                 write_16_le(offset, out);
             }
+            EA::OffsetIndexed(addr, data, offset) => {
+                let pair = ((addr as Byte) << 3) + data as Byte;
+                out.push(pair + 0b11000000);
+                write_16_le(offset, out);
+            }
             _ => unimplemented!(),
         }
     }
     fn read(i: &mut Word, data: &[Byte]) -> Self {
         let byte = data[*i as usize];
         *i += 1;
+        if byte & 0b11000000 != 0 {
+            let a = ADDR_IDX[((byte >> 3) & 0b111) as usize];
+            let d = DATA_IDX[(byte & 0b111) as usize];
+            let offset = read_16_le(i, data);
+            return Self::OffsetIndexed(a, d, offset);
+        }
+
         let reg = byte & 0b111;
         let mode = byte & 0b11111000;
         let out = match mode {
@@ -595,10 +607,35 @@ impl VM {
                 *dest = sum as Word;
                 self.set_math_flags(sum);
             }
-            MulI => todo!(),
-            Mul => todo!(),
-            DivI => todo!(),
-            Div => todo!(),
+            MulI => {
+                let src = self.get_src_immediate();
+                let dest = self.get_dest();
+                let sum = *dest as i64 * src as i64;
+                *dest = sum as Word;
+                self.set_math_flags(sum);
+            }
+            Mul => {
+                let src = self.get_src();
+                let dest = self.get_dest();
+                let sum = *dest as i64 * src as i64;
+                *dest = sum as Word;
+                self.set_math_flags(sum);
+            }
+            DivI => {
+                let src = self.get_src_immediate();
+                let dest = self.get_dest();
+                // TODO: div by zero trap
+                let sum = *dest as i64 / src as i64;
+                *dest = sum as Word;
+                self.set_math_flags(sum);
+            }
+            Div => {
+                let src = self.get_src();
+                let dest = self.get_dest();
+                let sum = *dest as i64 / src as i64;
+                *dest = sum as Word;
+                self.set_math_flags(sum);
+            }
             CmpI => {
                 let src = self.get_src_immediate();
                 let dest = self.get_dest();
@@ -987,6 +1024,33 @@ mod test {
     }
 
     #[test]
+    fn arithmetic() {
+        let mut w = Writer::new();
+        w.mov(Data(D0), Immediate(100));
+        w.sub(Data(D0), Immediate(50));
+        w.mul(Data(D0), Immediate(3));
+        w.div(Data(D0), Immediate(10));
+        w.neg(Data(D0));
+
+        let vm = w.run();
+        vm.expect_data(D0, -15);
+    }
+
+    #[test]
+    fn logic() {
+        let mut w = Writer::new();
+        w.mov(Data(D0), Immediate(0b01));
+        w.or(Data(D0), Immediate(0b11));
+        w.and(Data(D0), Immediate(0b10));
+        w.not(Data(D0));
+        w.not(Data(D0));
+        w.xor(Data(D0), Immediate(0b11));
+
+        let vm = w.run();
+        vm.expect_data(D0, 0b001);
+    }
+
+    #[test]
     fn cmp() {
         let mut w = Writer::new();
         w.mov(Data(D0), Immediate(100));
@@ -1115,5 +1179,35 @@ mod test {
 
         let vm = w.run();
         vm.expect_stack(vec![111, 108, 108, 101, 72]);
+    }
+
+    #[test]
+    fn array() {
+        let mut w = Writer::new();
+        let array = A0;
+        w.mov(PreDec(A7), Immediate(50));
+        w.mov(PreDec(A7), Immediate(40));
+        w.mov(PreDec(A7), Immediate(30));
+        w.mov(PreDec(A7), Immediate(20));
+        w.mov(PreDec(A7), Immediate(10));
+        w.mov(Address(array), Address(A7));
+
+        let sum = D0;
+        w.mov(Data(sum), Immediate(0));
+        let index = D1;
+        w.mov(Data(index), Immediate(0));
+        let to_do_while = w.branch(Cond::Always, 0);
+
+        let begin = w.branch_dest();
+        w.add(Data(sum), OffsetIndexed(array, index, 0));
+        w.add(Data(index), Immediate(WORD_BYTES));
+
+        let do_while = w.branch_dest();
+        w.fixup_branch(to_do_while, do_while);
+        w.cmp(Data(index), Immediate(5 * WORD_BYTES));
+        w.branch(Cond::NotZero, begin);
+
+        let vm = w.run();
+        vm.expect_data(D0, 150);
     }
 }
