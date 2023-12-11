@@ -400,6 +400,10 @@ impl Writer {
         self.out.push(addr as Byte);
         self.out.push(-displacement as Byte);
     }
+    pub fn fixup_link(&mut self, at: Word, addr: Address, displacement: Word) {
+        self.out[(at + 1) as usize] = addr as Byte;
+        self.out[(at + 2) as usize] = -displacement as Byte;
+    }
     pub fn unlink(&mut self, addr: Address) {
         self.out.push(Op::Unlink as Byte);
         self.out.push(addr as Byte);
@@ -417,7 +421,6 @@ impl Writer {
     }
     pub fn fixup_movem_push(&mut self, at: Word, dest: EA, data: &[Data], addr: &[Address]) {
         let at = at as usize;
-        self.out.push(Op::MoveMPush as Byte);
         let (data, addr) = self.movem_register_list(data, addr);
         self.out[at + 1] = data;
         self.out[at + 2] = addr;

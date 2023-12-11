@@ -226,24 +226,10 @@ impl Storage {
             _ => panic!("invalid deref"),
         }
     }
-    fn index(self, memory: &mut Memory, ty: Ty, index: Storage) -> Storage {
-        let size = ty.size();
-        match index {
-            Storage::Constant(_, value) => return self.deref(memory, value * size),
-            Storage::Data(_, data) => {
-                let addr = self.deref_register(memory);
-                // TODO: use shifts
-                memory.out.mul(EA::Data(data), EA::Immediate(size));
-                memory.ea_to_storage(EA::OffsetIndexed(addr, data, 0), ty)
-            }
-            Storage::Frame(_, _) | Storage::Stack(_, _) => {
-                let index_ty = index.ty();
-                let data = memory.get_data_register();
-                let src = self.ea(memory);
-                memory.out.mov(EA::Data(data), src);
-                self.index(memory, ty, Storage::Data(index_ty, data))
-            }
-            _ => panic!("invalid index"),
+    fn to_dest(self, memory: &mut Memory) -> Storage {
+        match self {
+            Self::Constant(ty, value) => memory.ea_to_storage(EA::Immediate(value), ty),
+            _ => self,
         }
     }
 }
@@ -257,6 +243,12 @@ struct LValue {
 }
 
 impl LValue {
+    fn storage(&self, memory: &mut Memory) -> Storage {
+        if self.base_offset != 0 || self.deref_offsets.len() > 0 {
+            return self.to_dest(memory);
+        }
+        memory.get_storage(self.item_id)
+    }
     fn ea(&self, memory: &mut Memory) -> EA {
         let storage = memory.get_storage(self.item_id);
         let mut ea = storage.ea(memory).offset(self.base_offset).unwrap();
@@ -297,27 +289,24 @@ impl LValue {
         self.deref_offsets.push(offset);
         self
     }
-    fn to_storage(self, memory: &mut Memory) -> Storage {
-        if let Some(const_storage) = self.try_constant(memory) {
-            return const_storage;
-        }
+    // This conflates a couple of different things and ends up not quite doing either of them:
+    // - resolving derefs/offsets
+    // - getting a viable dest
+    //
+    // fn to_storage(self) -> Storage {
+
+    // }
+    fn to_dest(&self, memory: &mut Memory) -> Storage {
         let src = self.ea(memory);
         memory.ea_to_storage(src, self.ty)
     }
-    fn index(self, memory: &mut Memory, ty: Ty, index: Storage) -> LValue {
-        let storage = self.to_storage(memory);
-        let item_storage = storage.index(memory, ty, index);
-        let item_id = memory.locals.len();
-        memory.locals.push(Local {
-            storage: item_storage,
-        });
-        LValue {
-            ty,
-            item_id,
-            base_offset: 0,
-            deref_offsets: vec![],
-        }
-    }
+    // fn to_storage(self, memory: &mut Memory) -> Storage {
+    //     if let Some(const_storage) = self.try_constant(memory) {
+    //         return const_storage;
+    //     }
+    //     let src = self.ea(memory);
+    //     memory.ea_to_storage(src, self.ty)
+    // }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,10 +334,16 @@ impl Item {
             Self::LValue(lvalue) => Self::LValue(lvalue.get_field(ty, offset)),
         }
     }
-    fn to_storage(self, memory: &mut Memory) -> Storage {
+    fn storage(&self, memory: &mut Memory) -> Storage {
         match self {
-            Self::Storage(storage) => storage,
-            Self::LValue(lvalue) => lvalue.to_storage(memory),
+            Self::Storage(storage) => *storage,
+            Self::LValue(lvalue) => lvalue.storage(memory),
+        }
+    }
+    fn to_dest(self, memory: &mut Memory) -> Storage {
+        match self {
+            Self::Storage(storage) => storage.to_dest(memory),
+            Self::LValue(lvalue) => lvalue.to_dest(memory),
         }
     }
     fn deref(self, memory: &mut Memory, offset: Word) -> Item {
@@ -358,9 +353,33 @@ impl Item {
         }
     }
     fn index(self, memory: &mut Memory, ty: Ty, index: Storage) -> Item {
-        match self {
-            Self::Storage(storage) => Self::Storage(storage.index(memory, ty, index)),
-            Self::LValue(lvalue) => Self::LValue(lvalue.index(memory, ty, index)),
+        let size = ty.size();
+        match index {
+            Storage::Constant(_, value) => return self.deref(memory, value * size),
+            Storage::Data(_, data) => {
+                let addr = self.deref_register(memory);
+                // TODO: use shifts
+                memory.out.mul(EA::Data(data), EA::Immediate(size));
+                let storage = memory.ea_to_storage(EA::OffsetIndexed(addr, data, 0), ty);
+                Item::Storage(storage)
+            }
+            Storage::Frame(_, _) | Storage::Stack(_, _) => {
+                let index_ty = index.ty();
+                let data = memory.get_data_register();
+                let src = self.ea(memory);
+                memory.out.mov(EA::Data(data), src);
+                self.index(memory, ty, Storage::Data(index_ty, data))
+            }
+            _ => panic!("invalid index"),
+        }
+    }
+    // TODO: helper method on memory
+    fn deref_register(self, memory: &mut Memory) -> Address {
+        let base_ea = self.ea(memory);
+        match base_ea {
+            EA::Address(r) => r,
+            EA::Offset(r, o) => memory.deref_memory(r, o),
+            _ => panic!("invalid deref"),
         }
     }
     fn try_constant(&self, memory: &mut Memory) -> Option<Storage> {
@@ -369,6 +388,9 @@ impl Item {
             Self::Storage(_) => None,
             Self::LValue(l) => l.try_constant(memory),
         }
+    }
+    fn add_ref(&self, memory: &mut Memory) -> Storage {
+        self.storage(memory).add_ref(memory)
     }
 }
 
@@ -500,11 +522,11 @@ impl Memory {
     }
     fn item_record_field(&mut self, offset: Word) {
         let item = self.stack.pop().unwrap();
-        let record = self.pop_item_storage();
+        let record = self.pop_item();
         let src = item.ea(self);
         let dest = record.ea(self).offset(offset).unwrap();
         self.mov_multiple(item.ty(), dest, src);
-        self.stack.push(Item::Storage(record));
+        self.stack.push(record);
     }
     // complex exprs
     fn get_field(&mut self, ty: Ty, offset: Word) {
@@ -513,8 +535,8 @@ impl Memory {
         self.stack.push(next)
     }
     fn add_ref(&mut self) {
-        let mut storage = self.pop_item_storage();
-        let next = storage.add_ref(self);
+        let item = self.pop_item();
+        let next = item.add_ref(self);
         self.stack.push(Item::Storage(next));
     }
     fn deref(&mut self, offset: Word) {
@@ -523,7 +545,8 @@ impl Memory {
         self.stack.push(deref)
     }
     fn index(&mut self, ty: Ty) {
-        let index = self.pop_item_storage();
+        let index = self.pop_item();
+        let index = index.storage(self);
         let array = self.stack.pop().unwrap();
         let next = array.index(self, ty, index);
         self.stack.push(next)
@@ -549,20 +572,24 @@ impl Memory {
         }
     }
     fn add(&mut self) {
-        let right = self.pop_item_storage();
-        let left = self.pop_item_storage();
-        match (left, right) {
-            (Storage::Constant(ty, l), Storage::Constant(_, r)) => {
+        let right = self.pop_item();
+        let left = self.pop_item();
+        let lc = left.try_constant(self);
+        let rc = right.try_constant(self);
+        match (lc, rc) {
+            (Some(Storage::Constant(ty, l)), Some(Storage::Constant(_, r))) => {
                 self.stack.push(Item::Storage(Storage::Constant(ty, l + r)));
             }
-            (Storage::Constant(_, l), right) => {
+            (Some(Storage::Constant(_, l)), _) => {
                 let src = EA::Immediate(l);
+                let right = right.to_dest(self);
                 let dest = right.ea(self);
                 self.out.add(dest, src);
                 self.stack.push(Item::Storage(right));
             }
-            (left, right) => {
+            (_, _) => {
                 let src = right.ea(self);
+                let left = left.to_dest(self);
                 let dest = left.ea(self);
                 self.out.add(dest, src);
                 self.stack.push(Item::Storage(left));
@@ -571,7 +598,8 @@ impl Memory {
     }
     // statements
     fn define_let(&mut self) -> ItemId {
-        let storage = self.pop_item_storage();
+        let item = self.pop_item();
+        let storage = item.to_dest(self);
         let id = self.locals.len();
         self.locals.push(Local { storage });
         id
@@ -596,14 +624,14 @@ impl Memory {
         self.out.link(Address::A6, 0);
         let idx = self.out.movem_push(EA::Offset(Address::A6, 0), &[], &[]);
         self.movem_push_idx = idx;
-        self.params_size = builder.frame_offset;
+        self.params_size = builder.frame_offset - (WORD_BYTES * 2);
     }
     fn subroutine_return_void(&mut self) {
         assert!(self.return_storage.is_none());
         self.subroutine_return_base();
     }
     fn subroutine_return_value(&mut self) {
-        let value = self.pop_item_storage();
+        let value = self.pop_item();
         let return_storage = self.return_storage.unwrap();
         let src = value.ea(self);
         let dest = return_storage.ea(self);
@@ -620,6 +648,8 @@ impl Memory {
         let used_data = self.data_registers.used_in_range(2..=7);
         let used_addr = self.address_registers.used_in_range(2..=4);
         let size = (used_data.len() + used_addr.len()) as Word * WORD_BYTES;
+        self.out
+            .fixup_link(self.movem_push_idx - 3, Address::A6, -size);
         self.out.fixup_movem_push(
             self.movem_push_idx,
             EA::Offset(Address::A6, -size),
@@ -640,10 +670,13 @@ impl Memory {
             Item::LValue(lvalue) => lvalue,
         }
     }
-    fn pop_item_storage(&mut self) -> Storage {
-        let item = self.stack.pop().unwrap();
-        item.to_storage(self)
+    fn pop_item(&mut self) -> Item {
+        self.stack.pop().unwrap()
     }
+    // fn pop_item_storage(&mut self) -> Storage {
+    //     let item = self.stack.pop().unwrap();
+    //     item.to_storage(self)
+    // }
     fn ea_to_storage(&mut self, src: EA, ty: Ty) -> Storage {
         if ty.use_address_register() {
             let a = self.get_address_register();
@@ -735,8 +768,8 @@ impl Memory {
     fn try_spill_storage(&mut self, storage: &mut Storage, register: impl Register) -> bool {
         let src = register.ea();
         match storage {
-            Storage::Address(ty, addr) if EA::Address(*addr) == src => {}
-            Storage::Data(ty, data) if EA::Data(*data) == src => {}
+            Storage::Address(_, addr) if EA::Address(*addr) == src => {}
+            Storage::Data(_, data) if EA::Data(*data) == src => {}
             _ => {
                 return false;
             }
@@ -849,7 +882,7 @@ mod test {
     #[test]
     fn smoke_test() {
         let m = Memory::new();
-        m.expect_output(|w| {});
+        m.expect_output(|_| {});
         m.expect_stack(vec![]);
     }
 
@@ -952,5 +985,41 @@ mod test {
             //
             Item::Storage(Storage::Data(INT, Data::D0)),
         ]);
+    }
+
+    #[test]
+    fn subroutine() {
+        use crate::v2::vm::{Address::*, Data::*, EA::*, *};
+
+        let mut m = Memory::new();
+        let mut add2 = m.begin_subroutine();
+        let l = m.subroutine_param(&mut add2, INT);
+        let r = m.subroutine_param(&mut add2, INT);
+        m.subroutine_return_param(&mut add2, INT);
+        m.subroutine_end_params(&mut add2);
+
+        m.item_identifier(l);
+        m.item_identifier(r);
+        m.add();
+        m.subroutine_return_value();
+
+        m.subroutine_end();
+
+        m.expect_output(|w| {
+            let displacememt = WORD_BYTES * 1;
+            w.link(A6, -displacememt);
+            w.movem_push(Offset(A6, -displacememt), &[D2], &[]);
+
+            w.mov(Data(D2), Data(D0));
+            w.add(Data(D2), Data(D1));
+
+            w.mov(Data(D0), Data(D2));
+
+            w.movem_pop(&[D2], &[], Offset(A6, -displacememt));
+            w.unlink(A6);
+            w.ret(0);
+
+            w.halt();
+        });
     }
 }
