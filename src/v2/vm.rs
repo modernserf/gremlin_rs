@@ -79,6 +79,7 @@ enum Op {
     Pea,
     MoveMPush,
     MoveMPop,
+    LeaPC,
     AddI = 0x10,
     Add,
     SubI,
@@ -106,7 +107,7 @@ enum Op {
     BranchPositiveZero = 0x36,
 
     BranchSubroutine = 0x3F,
-    // JumpAddress = 0x40,
+    JumpAddress = 0x40,
     // JumpSubroutineAddress = 0x41,
     Return = 0x42,
     ReturnAndDeallocate = 0x43,
@@ -125,6 +126,7 @@ impl Op {
             4 => Pea,
             5 => MoveMPush,
             6 => MoveMPop,
+            7 => LeaPC,
             0x05..=0x0F => unimplemented!(),
             0x10 => AddI,
             0x11 => Add,
@@ -155,6 +157,7 @@ impl Op {
             0x36 => BranchPositiveZero, // >=
             0x37..=0x3E => unimplemented!(),
             0x3f => BranchSubroutine,
+            0x40 => JumpAddress,
             0x42 => Return,
             0x43 => ReturnAndDeallocate,
             0x44 => Link,
@@ -318,6 +321,10 @@ impl Writer {
         pack_lea_pair(src, Address::A7, &mut self.out);
         write_16_le(offset, &mut self.out);
     }
+    pub fn load_address_pc(&mut self, dest: Address) {
+        self.out.push(Op::LeaPC as Byte);
+        self.out.push(dest as Byte);
+    }
     pub fn add(&mut self, dest: EA, src: EA) {
         self.op2(Op::Add, Op::AddI, dest, src);
     }
@@ -353,6 +360,11 @@ impl Writer {
     }
     pub fn branch_dest(&self) -> Word {
         self.out.len() as Word
+    }
+
+    pub fn jmp_addr(&mut self, addr: Address) {
+        self.out.push(Op::JumpAddress as Byte);
+        self.out.push(addr as Byte);
     }
 
     pub fn branch(&mut self, cond: Cond, idx: Word) -> Word {
@@ -497,7 +509,15 @@ impl Writer {
             }
         }
     }
-
+    pub fn fixup_jump_table(&mut self, idx: Word) {
+        let here = self.branch_dest();
+        let displacement = here - idx;
+        let mut out = Vec::new();
+        write_32_le(displacement, &mut out);
+        for i in 0..4 {
+            self.out[(idx + i) as usize] = out[i as usize];
+        }
+    }
     #[cfg(test)]
     pub fn expect_output(&self, other: Writer) {
         assert_eq!(self.out, other.out);
@@ -580,6 +600,12 @@ impl VM {
                 let (src, dest) = unpack_lea_pair(&mut self.pc, &self.program);
                 let offset = read_16_le(&mut self.pc, &self.program);
                 self.addr[dest as usize] = self.addr[src as usize] + offset;
+            }
+            LeaPC => {
+                self.addr[self.get_byte() as usize] = self.pc;
+            }
+            JumpAddress => {
+                self.pc = self.addr[self.get_byte() as usize];
             }
             Pea => {
                 let (src, _) = unpack_lea_pair(&mut self.pc, &self.program);

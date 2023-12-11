@@ -443,6 +443,48 @@ struct IterBuilder {
     to_end: LoopIdx,
 }
 
+struct MatchBuilder {
+    jmp_idx: Word,
+    checked_cases: Vec<bool>,
+    case_ends: Vec<Word>,
+}
+
+impl MatchBuilder {
+    fn new(jmp_idx: Word, case_count: usize) -> Self {
+        Self {
+            jmp_idx,
+            case_ends: Vec::new(),
+            checked_cases: vec![false; case_count],
+        }
+    }
+    fn case(&mut self, index: usize) -> Word {
+        if self.checked_cases[index] {
+            panic!("duplicate case")
+        }
+        self.checked_cases[index] = true;
+        self.jmp_idx + ((index as Word) * WORD_BYTES)
+    }
+    fn case_end(&mut self, end_idx: Word) {
+        self.case_ends.push(end_idx)
+    }
+    fn default_case(&mut self) -> Vec<Word> {
+        let mut cases_to_patch = Vec::new();
+        for i in 0..self.checked_cases.len() {
+            if !self.checked_cases[i] {
+                cases_to_patch.push(self.case(i));
+            }
+        }
+        cases_to_patch
+    }
+    fn done(&self) {
+        for checked in self.checked_cases.iter() {
+            if !checked {
+                panic!("not all cases checked")
+            }
+        }
+    }
+}
+
 struct Memory {
     locals: Vec<Local>,
     stack: Vec<Item>,
@@ -700,6 +742,60 @@ impl Memory {
         self.out.branch(Cond::Always, builder.begin);
         let end = self.out.branch_dest();
         self.out.fixup_branch(builder.to_end, end);
+    }
+
+    fn match_begin(&mut self, table_size: usize) -> MatchBuilder {
+        let idx = self.pop_item();
+        // load index into data register
+        let d = match idx {
+            Item::Storage(Storage::Data(d)) => d,
+            _ => {
+                let d = self.get_data_register();
+                self.spill(d);
+                let src = idx.ea(self);
+                self.out.mov(EA::Data(d), src);
+                d
+            }
+        };
+        // index -> offset (todo use shift)
+        self.out.mul(EA::Data(d), EA::Immediate(4));
+
+        // load current PC into address register
+        let a = self.get_address_register();
+        self.spill(a);
+        self.out.load_address_pc(a);
+        // add displacement to address
+        let base_displacement = 2;
+        self.out
+            .add(EA::Address(a), EA::PCIndexed(d, base_displacement));
+        // jump to address
+        self.out.jmp_addr(a);
+        let jmp_idx = self.out.branch_dest();
+        self.out.data_32(&vec![0; table_size]);
+        MatchBuilder::new(jmp_idx, table_size)
+    }
+    fn match_case(&mut self, builder: &mut MatchBuilder, case_id: usize) {
+        let case_fixup = builder.case(case_id);
+        self.out.fixup_jump_table(case_fixup);
+        self.scope_begin();
+    }
+    fn match_default_case(&mut self, builder: &mut MatchBuilder) {
+        let remaining_cases = builder.default_case();
+        for case in remaining_cases {
+            self.out.fixup_jump_table(case);
+        }
+        self.scope_begin();
+    }
+    fn match_case_end(&mut self, builder: &mut MatchBuilder) {
+        self.scope_end();
+        let idx = self.out.branch(Cond::Always, 0);
+        builder.case_end(idx);
+    }
+    fn match_end(&mut self, builder: MatchBuilder) {
+        let end = self.out.branch_dest();
+        for case_end in builder.case_ends {
+            self.out.fixup_branch(case_end, end);
+        }
     }
 
     fn subroutine_begin(&mut self) -> SubBuilder {
@@ -1373,6 +1469,76 @@ mod test {
             w.branch(Cond::Always, begin_idx);
             let end_idx = w.branch_dest();
             w.fixup_branch(to_end, end_idx);
+        });
+    }
+
+    #[test]
+    fn jump_table() {
+        let mut m = Memory::new();
+
+        m.item_constant(10);
+        let e = m.define_let();
+
+        m.item_undefined(INT);
+        let res = m.define_let();
+
+        m.item_identifier(e);
+        let mut mb = m.match_begin(5);
+
+        m.match_case(&mut mb, 0);
+        m.item_identifier(res);
+        m.item_constant(10);
+        m.assign();
+        m.match_case_end(&mut mb);
+
+        m.match_case(&mut mb, 1);
+        m.item_identifier(res);
+        m.item_constant(20);
+        m.assign();
+        m.match_case_end(&mut mb);
+
+        m.match_default_case(&mut mb);
+        m.item_identifier(res);
+        m.item_constant(0);
+        m.assign();
+        m.match_case_end(&mut mb);
+
+        m.match_end(mb);
+
+        m.expect_output(|w| {
+            w.mov(Data(D0), Immediate(10));
+            // Data(D1) := undefined
+
+            w.mov(Data(D2), Data(D0));
+            w.mul(Data(D2), Immediate(4));
+            w.load_address_pc(A0);
+            w.add(Address(A0), PCIndexed(D2, 2));
+            w.jmp_addr(A0);
+            let jmp_table = w.branch_dest();
+            w.data_32(&[0, 0, 0, 0, 0]);
+            let mut end_fixups = Vec::new();
+
+            w.fixup_jump_table(jmp_table);
+            w.mov(Data(D1), Immediate(10));
+            let idx = w.branch(Cond::Always, 0);
+            end_fixups.push(idx);
+
+            w.fixup_jump_table(jmp_table + WORD_BYTES);
+            w.mov(Data(D1), Immediate(20));
+            let idx = w.branch(Cond::Always, 0);
+            end_fixups.push(idx);
+
+            w.fixup_jump_table(jmp_table + (WORD_BYTES * 2));
+            w.fixup_jump_table(jmp_table + (WORD_BYTES * 3));
+            w.fixup_jump_table(jmp_table + (WORD_BYTES * 4));
+            w.mov(Data(D1), Immediate(0));
+            let idx = w.branch(Cond::Always, 0);
+            end_fixups.push(idx);
+
+            let end = w.branch_dest();
+            for fixup in end_fixups.into_iter() {
+                w.fixup_branch(fixup, end);
+            }
         });
     }
 }
