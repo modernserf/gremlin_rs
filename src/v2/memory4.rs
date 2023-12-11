@@ -329,27 +329,38 @@ impl Item {
             Self::LValue(lvalue) => Self::LValue(lvalue.deref(offset)),
         }
     }
-    fn index(self, memory: &mut Memory, item_ty: Ty, index: Storage) -> Storage {
-        let size = item_ty.size();
-        let src = match index {
+    fn index_src(&self, memory: &mut Memory, stride: Word, index: Storage) -> EA {
+        match index {
             Storage::Constant(_, value) => {
                 let addr = memory.deref_register(&self);
-                EA::Offset(addr, value)
+                EA::Offset(addr, value * stride)
             }
             Storage::Data(_, data) => {
+                if stride != 1 {
+                    memory.out.mul(EA::Data(data), EA::Immediate(stride));
+                }
                 let addr = memory.deref_register(&self);
-                memory.out.mul(EA::Data(data), EA::Immediate(size));
                 EA::OffsetIndexed(addr, data, 0)
             }
             Storage::Frame(_, _) | Storage::Stack(_, _) => {
                 let data = memory.get_data_register();
                 let src = self.ea(memory);
                 memory.out.mov(EA::Data(data), src);
+                if stride != 1 {
+                    memory.out.mul(EA::Data(data), EA::Immediate(stride));
+                }
                 let addr = memory.deref_register(&self);
                 EA::OffsetIndexed(addr, data, 0)
             }
             _ => panic!("invalid index"),
-        };
+        }
+    }
+    fn index(self, memory: &mut Memory, item_ty: Ty, index: Storage) -> Storage {
+        let src = self.index_src(memory, item_ty.size(), index);
+        memory.ea_to_storage(src, item_ty)
+    }
+    fn fast_index(self, memory: &mut Memory, item_ty: Ty, offset: Storage) -> Storage {
+        let src = self.index_src(memory, 1, offset);
         memory.ea_to_storage(src, item_ty)
     }
     fn try_constant(&self, memory: &mut Memory) -> Option<Storage> {
@@ -436,9 +447,14 @@ impl SubBuilder {
     }
 }
 
+struct IterBuilder {
+    item_ty: Ty,
+    begin: LoopIdx,
+    to_end: LoopIdx,
+}
+
 struct Memory {
     locals: Vec<Local>,
-    // TODO: Do I still want the stack?
     stack: Vec<Item>,
     stack_size: Word,
     block_scopes: Vec<Scope>,
@@ -568,12 +584,21 @@ impl Memory {
             }
         }
     }
+    fn add_assign(&mut self) {
+        let right = self.pop_item();
+        let left = self.pop_lvalue();
+        let dest = left.ea(self);
+        let src = right.ea(self);
+        self.out.add(dest, src);
+    }
     // statements
+    // TODO: separate define_const, define_let (register or stack), define_var (always on stack)
     fn define_let(&mut self) -> ItemId {
-        let item = self.pop_item();
-        let storage = item
-            .try_constant(self)
-            .unwrap_or_else(|| item.to_dest(self));
+        // let item = self.pop_item();
+        // let storage = item
+        //     .try_constant(self)
+        //     .unwrap_or_else(|| item.to_dest(self));
+        let storage = self.pop_item().to_dest(self);
         let id = self.locals.len();
         self.locals.push(Local { storage });
         id
@@ -619,6 +644,44 @@ impl Memory {
         self.out.cmp(base, comp);
         let loop_begin_idx = loop_header + 3;
         self.out.branch(cond, loop_begin_idx);
+    }
+
+    fn iter_begin(&mut self, item_ty: Ty) -> (ItemId, IterBuilder) {
+        let offset = self.pop_item().to_dest(self);
+        self.locals.push(Local { storage: offset });
+
+        let length = self.pop_item();
+        let array = self.pop_item();
+        self.scope_begin();
+
+        let begin = self.out.branch_dest();
+        let offset_ea = offset.ea(self);
+        let length_ea = length.ea(self);
+        self.out.cmp(offset_ea, length_ea);
+        let to_end = self.out.branch(Cond::Zero, 0);
+
+        let item = array.fast_index(self, item_ty, offset);
+        let item_id = self.locals.len();
+        self.locals.push(Local { storage: item });
+        (
+            item_id,
+            IterBuilder {
+                item_ty,
+                begin,
+                to_end,
+            },
+        )
+    }
+    fn iter_end(&mut self, builder: IterBuilder) {
+        self.scope_end();
+        let offset = self.locals.pop().unwrap().storage;
+        let offset_ea = offset.ea(self);
+        self.out
+            .add(offset_ea, EA::Immediate(builder.item_ty.size()));
+
+        self.out.branch(Cond::Always, builder.begin);
+        let end = self.out.branch_dest();
+        self.out.fixup_branch(builder.to_end, end);
     }
 
     fn begin_subroutine(&mut self) -> SubBuilder {
@@ -932,13 +995,13 @@ mod test {
     }
 
     #[test]
-    fn constant_identifiers() {
+    fn identifiers() {
         let mut m = Memory::new();
         m.item_constant(INT, 10);
         let x = m.define_let();
         m.expect_locals(vec![
             //
-            Storage::Constant(INT, 10),
+            Storage::Data(INT, D0),
         ]);
 
         m.item_identifier(x);
@@ -956,7 +1019,7 @@ mod test {
         m.assign();
         m.expect_locals(vec![
             //
-            Storage::Constant(INT, 20),
+            Storage::Data(INT, D0),
         ]);
     }
 
@@ -1122,6 +1185,63 @@ mod test {
             w.ret(0);
 
             w.halt();
+        });
+    }
+
+    #[test]
+    fn foreach() {
+        let mut m = Memory::new();
+        let array_ty = Ty {
+            base_size: WORD_BYTES * 3,
+            ref_level: 0,
+        };
+
+        m.item_structure(array_ty);
+        m.item_constant(INT, 10);
+        m.item_structure_offset(0);
+        m.item_constant(INT, 20);
+        m.item_structure_offset(WORD_BYTES);
+        m.item_constant(INT, 30);
+        m.item_structure_offset(WORD_BYTES * 2);
+        m.add_ref();
+        let array = m.define_let();
+        m.item_constant(INT, WORD_BYTES * 3);
+        let len = m.define_let();
+
+        m.item_constant(INT, 0);
+        let sum = m.define_let();
+
+        m.item_identifier(array);
+        m.item_identifier(len);
+        m.item_constant(INT, 0);
+        let (item, iter_builder) = m.iter_begin(INT);
+
+        m.item_identifier(sum);
+        m.item_identifier(item);
+        m.add_assign();
+
+        m.iter_end(iter_builder);
+
+        m.expect_output(|w| {
+            w.sub(Address(A7), Immediate(WORD_BYTES * 3));
+            w.mov(Offset(A7, 0), Immediate(10));
+            w.mov(Offset(A7, WORD_BYTES), Immediate(20));
+            w.mov(Offset(A7, WORD_BYTES * 2), Immediate(30));
+            w.load_address(A0, A7, 0);
+
+            w.mov(Data(D0), Immediate(WORD_BYTES * 3)); // len
+            w.mov(Data(D1), Immediate(0)); // item
+            w.mov(Data(D2), Immediate(0)); // offset
+            w.cmp(Data(D2), Data(D0));
+            w.branch(Cond::Zero, 75);
+
+            // item
+            w.mov(Data(D3), OffsetIndexed(A0, D2, 0));
+            // sum += item
+            w.add(Data(D1), Data(D3));
+
+            w.add(Data(D2), Immediate(WORD_BYTES));
+            w.branch(Cond::Always, 52);
         });
     }
 }
