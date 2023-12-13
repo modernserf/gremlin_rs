@@ -37,25 +37,67 @@ impl VM {
     }
     fn run_1(&mut self) {
         let instr = self.mem_u16(self.pc);
-        match Tag0::from_instr(instr) {
-            Tag0::Zero => todo!(),
-            Tag0::AddQ => todo!(),
-            Tag0::Add => {
-                let reg_id = (instr >> 9 & 0b111) as usize;
-                let mode = (instr >> 6) & 0b111;
+        let tag = instr >> 12;
+        let reg = (instr >> 9 & 0b111) as usize;
+        let mode = (instr >> 6) & 0b111;
+
+        match (tag, reg, mode) {
+            // MOVE
+            (0b0001, _, _) => {
+                let src = self.ea_read(Size::Byte);
+                let dest = self.ea_read_inner(Size::Byte, mode, reg);
+                self.ea_apply(dest, src, Size::Byte, |_, r| r);
+            }
+            (0b0011, _, _) => {
+                let src = self.ea_read(Size::Short);
+                let dest = self.ea_read_inner(Size::Short, mode, reg);
+                self.ea_apply(dest, src, Size::Short, |_, r| r);
+            }
+            (0b0010, _, _) => {
+                let src = self.ea_read(Size::Word);
+                let dest = self.ea_read_inner(Size::Word, mode, reg);
+                self.ea_apply(dest, src, Size::Word, |_, r| r);
+            }
+            // ADDI
+            (0b0000, 0b011, _) => {
+                let (size, dest) = match mode {
+                    0 => (Size::Byte, self.ea_read(Size::Byte)),
+                    1 => (Size::Short, self.ea_read(Size::Short)),
+                    2 => (Size::Word, self.ea_read(Size::Word)),
+                    _ => unreachable!(),
+                };
+                let src = self.immediate_read(size);
+                self.ea_apply(dest, src, size, |l, r| l + r);
+            }
+            // ADDQ
+            (0b0101, _, _) => {
+                let quick = (instr >> 9) & 0b111;
+                let quick = if quick == 0 { 8 } else { quick as i32 };
+                let mode = (instr >> 6) & 0b11;
+                let (size, dest) = match mode {
+                    0 => (Size::Byte, self.ea_read(Size::Byte)),
+                    1 => (Size::Short, self.ea_read(Size::Short)),
+                    2 => (Size::Word, self.ea_read(Size::Word)),
+                    _ => unreachable!(),
+                };
+                self.ea_apply(dest, EAView::Immediate(quick), size, |l, r| l + r);
+            }
+            // ADD / ADDA
+            (0b1101, _, _) => {
                 let (size, src, dest) = match mode {
-                    0 => (Size::Byte, self.ea_read(Size::Byte), EAView::Data(reg_id)),
-                    1 => (Size::Short, self.ea_read(Size::Short), EAView::Data(reg_id)),
-                    2 => (Size::Word, self.ea_read(Size::Word), EAView::Data(reg_id)),
-                    3 => (Size::Byte, EAView::Data(reg_id), self.ea_read(Size::Byte)),
-                    4 => (Size::Short, EAView::Data(reg_id), self.ea_read(Size::Short)),
-                    5 => (Size::Word, EAView::Data(reg_id), self.ea_read(Size::Word)),
-                    6 => (Size::Short, self.ea_read(Size::Short), EAView::Addr(reg_id)),
-                    7 => (Size::Word, self.ea_read(Size::Word), EAView::Addr(reg_id)),
+                    0 => (Size::Byte, self.ea_read(Size::Byte), EAView::Data(reg)),
+                    1 => (Size::Short, self.ea_read(Size::Short), EAView::Data(reg)),
+                    2 => (Size::Word, self.ea_read(Size::Word), EAView::Data(reg)),
+                    3 => (Size::Byte, EAView::Data(reg), self.ea_read(Size::Byte)),
+                    4 => (Size::Short, EAView::Data(reg), self.ea_read(Size::Short)),
+                    5 => (Size::Word, EAView::Data(reg), self.ea_read(Size::Word)),
+                    6 => (Size::Short, self.ea_read(Size::Short), EAView::Addr(reg)),
+                    7 => (Size::Word, self.ea_read(Size::Word), EAView::Addr(reg)),
                     _ => unreachable!(),
                 };
                 self.ea_apply(dest, src, size, |l, r| l + r);
             }
+            _ => unimplemented!(),
         }
     }
     // big endian
@@ -127,6 +169,9 @@ impl VM {
 
         let reg_id = (instr & 0b111) as usize;
         let mode = (instr >> 3) & 0b111;
+        self.ea_read_inner(size, mode, reg_id)
+    }
+    fn ea_read_inner(&mut self, size: Size, mode: u16, reg_id: usize) -> EAView {
         match (mode, reg_id) {
             (0, d) => EAView::Data(d),
             (1, a) => EAView::Addr(a),
@@ -167,19 +212,21 @@ impl VM {
                 EAView::Memory(offset)
             }
             (7, 2) => {
+                let pc_base = self.pc;
                 let disp = self.mem_i16(self.pc) as i32;
                 self.pc += 2;
-                EAView::Memory(self.pc + disp)
+                EAView::Memory(pc_base + disp)
             }
             (7, 3) => {
+                let pc_base = self.pc;
                 let register = self.mem_u8(self.pc) as usize;
                 let offset = self.mem_u8(self.pc + 1) as i32;
                 self.pc += 2;
                 let id = register & !0b1000;
                 if register == id {
-                    EAView::Memory(self.pc + self.data[id] + offset)
+                    EAView::Memory(pc_base + self.data[id] + offset)
                 } else {
-                    EAView::Memory(self.pc + self.addr[id] + offset)
+                    EAView::Memory(pc_base + self.addr[id] + offset)
                 }
             }
             (7, 4) => {
@@ -192,6 +239,25 @@ impl VM {
                 EAView::Immediate(value)
             }
             _ => unreachable!(),
+        }
+    }
+    fn immediate_read(&mut self, size: Size) -> EAView {
+        match size {
+            Size::Byte => {
+                let value = self.mem_u8(self.pc + 1) as i32;
+                self.pc += 2;
+                EAView::Immediate(value)
+            }
+            Size::Short => {
+                let value = self.mem_i16(self.pc) as i32;
+                self.pc += 2;
+                EAView::Immediate(value)
+            }
+            Size::Word => {
+                let value = self.mem_i32(self.pc) as i32;
+                self.pc += 4;
+                EAView::Immediate(value)
+            }
         }
     }
 }
@@ -210,29 +276,6 @@ fn quick_zero(word: i32) -> Option<Quick> {
         _ => None,
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tag0 {
-    Zero = 0,
-    Add = 0b1101,
-    AddQ = 0b0101,
-}
-impl Tag0 {
-    fn from_instr(instr: u16) -> Self {
-        match instr >> 12 {
-            0 => Self::Zero,
-            0b1101 => Self::Add,
-            0b0101 => Self::AddQ,
-            _ => unimplemented!(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tag1 {
-    AddI = 0b0110,
-}
-
 struct Asm {
     out: Vec<u8>,
 }
@@ -249,7 +292,7 @@ impl Asm {
                     Size::Short => 1,
                     Size::Word => 2,
                 };
-                self.tag4_reg3_mode3_ea(Tag0::Add, d as u16, op_mode);
+                self.tag4_reg3_mode3_ea(0b1101, d as u16, op_mode);
                 self.push_ea(size, src);
             }
             (src, EA::Addr(a)) => {
@@ -258,7 +301,7 @@ impl Asm {
                     Size::Short => 6,
                     Size::Word => 7,
                 };
-                self.tag4_reg3_mode3_ea(Tag0::Add, a as u16, op_mode);
+                self.tag4_reg3_mode3_ea(0b1101, a as u16, op_mode);
                 self.push_ea(size, src);
             }
             (EA::Data(d), dest) => {
@@ -267,15 +310,25 @@ impl Asm {
                     Size::Short => 4,
                     Size::Word => 5,
                 };
-                self.tag4_reg3_mode3_ea(Tag0::Add, d as u16, op_mode);
+                self.tag4_reg3_mode3_ea(0b1101, d as u16, op_mode);
                 self.push_ea(size, dest);
             }
             (EA::Immediate(x), dest) => {
                 if let Some(q) = quick_positive(x) {
-                    self.tag4_quick3_size3_ea(Tag0::AddQ, q, size);
+                    let mode = match size {
+                        Size::Byte => 0,
+                        Size::Short => 1,
+                        Size::Word => 2,
+                    };
+                    self.tag4_reg3_mode3_ea(0b0101, q, mode);
                     self.push_ea(size, dest);
                 } else {
-                    self.tag4_tag4_size3_ea_imm(Tag0::Zero, Tag1::AddI, size);
+                    let mode = match size {
+                        Size::Byte => 0,
+                        Size::Short => 1,
+                        Size::Word => 2,
+                    };
+                    self.tag4_reg3_mode3_ea(0, 0b011, mode);
                     self.push_ea(size, dest);
                     self.push_immediate(size, x);
                 }
@@ -283,27 +336,32 @@ impl Asm {
             _ => unimplemented!(),
         }
     }
+    pub fn mov(&mut self, size: Size, src: EA, dest: EA) {
+        let tag = match size {
+            Size::Byte => 0b0001,
+            Size::Short => 0b0011,
+            Size::Word => 0b0010,
+        };
+        let mut dest_dummy = vec![0];
+        dest.write(size, &mut dest_dummy);
+        let reg = dest_dummy[0] & 0b111;
+        let mode = (dest_dummy[0] >> 3) & 0b111;
+        self.tag4_reg3_mode3_ea(tag, reg as u16, mode as u16);
+        self.push_ea(size, src);
+        self.out.extend(dest_dummy[1..].iter());
+    }
+    pub fn data(&mut self, data: &[u8]) {
+        for byte in data {
+            self.out.push(*byte);
+        }
+        if (self.out.len() & 1) == 1 {
+            self.out.push(0);
+        }
+    }
+
     // instruction formats
-    fn tag4_reg3_mode3_ea(&mut self, tag0: Tag0, register: u16, op_mode: u16) {
-        let base = ((tag0 as u16) << 12) + (register << 9) + (op_mode << 6);
-        self.push_u16(base);
-    }
-    fn tag4_quick3_size3_ea(&mut self, tag0: Tag0, quick: Quick, size: Size) {
-        let size_code = match size {
-            Size::Byte => 0,
-            Size::Short => 1,
-            Size::Word => 2,
-        };
-        let base = ((tag0 as u16) << 12) + (quick << 9) + (size_code << 6);
-        self.push_u16(base);
-    }
-    fn tag4_tag4_size3_ea_imm(&mut self, tag0: Tag0, tag1: Tag1, size: Size) {
-        let size_code = match size {
-            Size::Byte => 0,
-            Size::Short => 1,
-            Size::Word => 2,
-        };
-        let base = ((tag0 as u16) << 12) + ((tag1 as u16) << 8) + (size_code << 6);
+    fn tag4_reg3_mode3_ea(&mut self, tag: u16, register: u16, mode: u16) {
+        let base = (tag << 12) + (register << 9) + (mode << 6);
         self.push_u16(base);
     }
     fn push_u16(&mut self, value: u16) {
@@ -338,23 +396,13 @@ impl Asm {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::v2::register::*;
-
-    impl VM {
-        fn set_memory_i32(&mut self, addr: i32, value: i32) {
-            self.ea_apply(
-                EAView::Memory(addr),
-                EAView::Immediate(value),
-                Size::Word,
-                |_, value| value,
-            );
-        }
-    }
+    use crate::v2::ea::{Size::*, EA::*};
+    use crate::v2::register::{Addr::*, Data::*};
 
     #[test]
     fn smoke_test() {
         let mut vm = VM::new(256);
-        let init_sp = 124;
+        let init_sp = 120;
         let init_pc = 128;
         let init_memory = vec![0, 0, 0, init_sp, 0, 0, 0, init_pc];
         vm.load_memory(0, &init_memory);
@@ -362,30 +410,76 @@ mod test {
 
         let mut asm = Asm::new();
 
-        asm.add(Size::Word, EA::Data(Data::D0), EA::Data(Data::D1));
-        asm.add(Size::Word, EA::Data(Data::D0), EA::Addr(Addr::A0));
-        asm.add(Size::Word, EA::Data(Data::D0), EA::Offset(Addr::A7, 0));
-        asm.add(Size::Word, EA::Offset(Addr::A7, 0), EA::Data(Data::D2));
+        asm.mov(Word, Immediate(10), Data(D0));
+        asm.mov(Word, Immediate(20), Data(D1));
+        asm.add(Word, Data(D0), Data(D1));
+
+        asm.mov(Word, Immediate(30), Data(D0));
+        asm.mov(Word, Immediate(10), Addr(A0));
+        asm.add(Word, Data(D0), Addr(A0));
+
+        asm.mov(Word, Immediate(10), PreDec(A7));
+        asm.add(Word, Immediate(5), Offset(A7, 0));
+
+        asm.mov(Word, Immediate(10), Offset(A7, 0));
+        asm.mov(Word, Immediate(20), Data(D2));
+        asm.add(Word, PostInc(A7), Data(D2));
+
+        asm.mov(Word, Immediate(10), PreDec(A7));
+        asm.mov(Word, Immediate(0), PreDec(A7));
+        asm.add(Word, Immediate(20), Offset(A7, 4));
 
         vm.load_memory(init_pc as usize, &asm.out);
 
-        vm.data[0] = 10;
-        vm.data[1] = 20;
+        vm.run_1();
+        vm.run_1();
         vm.run_1();
         assert_eq!(vm.data[1], 30);
 
-        vm.addr[0] = 30;
+        vm.run_1();
+        vm.run_1();
         vm.run_1();
         assert_eq!(vm.addr[0], 40);
 
-        vm.data[0] = 10;
-        vm.set_memory_i32(vm.addr[7], 10);
         vm.run_1();
-        assert_eq!(vm.mem_i32(vm.addr[7]), 20);
+        vm.run_1();
+        assert_eq!(vm.mem_i32(vm.addr[7]), 15);
 
-        vm.set_memory_i32(vm.addr[7], 10);
-        vm.data[2] = 20;
+        vm.run_1();
+        vm.run_1();
         vm.run_1();
         assert_eq!(vm.data[2], 30);
+
+        vm.run_1();
+        vm.run_1();
+        vm.run_1();
+        assert_eq!(vm.mem_i32(vm.addr[7] + 4), 30);
+    }
+
+    #[test]
+    fn bytes() {
+        let mut vm = VM::new(256);
+        let init_sp = 120;
+        let init_pc = 128;
+        let init_memory = vec![0, 0, 0, init_sp, 0, 0, 0, init_pc];
+        vm.load_memory(0, &init_memory);
+        vm.reset();
+
+        let mut asm = Asm::new();
+
+        asm.mov(Byte, Immediate(0), Data(D0));
+        asm.add(Byte, PCOffset(10), Data(D0));
+        asm.add(Byte, PCOffset(7), Data(D0));
+        asm.add(Byte, PCOffset(4), Data(D0));
+
+        asm.data(&[10, 20, 30]);
+
+        vm.load_memory(init_pc as usize, &asm.out);
+        vm.run_1();
+        vm.run_1();
+        vm.run_1();
+        vm.run_1();
+
+        assert_eq!(vm.data[0], 60);
     }
 }

@@ -43,12 +43,12 @@ impl EA {
             (0, r) => EA::Data(Data::from(r)),
             (1, r) => EA::Addr(Addr::from(r)),
             (2, r) => EA::Offset(Addr::from(r), 0),
-            (3, r) => EA::PreDec(Addr::from(r)),
-            (4, r) => EA::PostInc(Addr::from(r)),
+            (3, r) => EA::PostInc(Addr::from(r)),
+            (4, r) => EA::PreDec(Addr::from(r)),
             (5, r) => {
-                let offset = i32::from_be_bytes([0, 0, memory[*pc], memory[*pc + 1]]);
+                let offset = i16::from_be_bytes([memory[*pc], memory[*pc + 1]]);
                 *pc += 2;
-                EA::Offset(Addr::from(r), offset)
+                EA::Offset(Addr::from(r), offset as i32)
             }
             (6, r) => {
                 let d = memory[*pc];
@@ -76,7 +76,7 @@ impl EA {
                 EA::Absolute(offset)
             }
             (7, 2) => {
-                let offset = i32::from_be_bytes([0, 0, memory[*pc], memory[*pc + 1]]);
+                let offset = i16::from_be_bytes([memory[*pc], memory[*pc + 1]]) as i32;
                 *pc += 2;
                 EA::PCOffset(offset)
             }
@@ -126,16 +126,16 @@ impl EA {
                     out.extend((o as i16).to_be_bytes())
                 }
             }
-            Self::PreDec(a) => out.push(prev_byte + (3 << 3) + a as u8),
-            Self::PostInc(a) => out.push(prev_byte + (4 << 3) + a as u8),
+            Self::PostInc(a) => out.push(prev_byte + (3 << 3) + a as u8),
+            Self::PreDec(a) => out.push(prev_byte + (4 << 3) + a as u8),
             Self::IdxData(a, d, o) => {
                 out.push(prev_byte + (6 << 3) + a as u8);
-                out.push(d as u8 + 8);
+                out.push(d as u8);
                 out.push(o);
             }
             Self::IdxAddr(a, a2, o) => {
                 out.push(prev_byte + (6 << 3) + a as u8);
-                out.push(a2 as u8);
+                out.push(a2 as u8 + 8);
                 out.push(o);
             }
             Self::Absolute(o) => {
@@ -153,21 +153,60 @@ impl EA {
             }
             Self::PCIdxData(d, o) => {
                 out.push(prev_byte + (7 << 3) + 3);
-                out.push(d as u8 + 8);
+                out.push(d as u8);
                 out.push(o);
             }
             Self::PCIdxAddr(a, o) => {
                 out.push(prev_byte + (7 << 3) + 3);
-                out.push(a as u8);
+                out.push(a as u8 + 8);
                 out.push(o);
             }
             Self::Immediate(x) => {
                 out.push(prev_byte + (7 << 3) + 4);
                 match size {
-                    Size::Byte => out.push(x as u8),
+                    Size::Byte => {
+                        out.push(0);
+                        out.push(x as u8);
+                    }
                     Size::Short => out.extend((x as u16).to_be_bytes()),
                     Size::Word => out.extend(x.to_be_bytes()),
                 };
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn roundtrip() {
+        let sizes = vec![Size::Byte, Size::Short, Size::Word];
+        let eas = vec![
+            EA::Data(Data::D1),
+            EA::Addr(Addr::A2),
+            EA::Offset(Addr::A6, 0),
+            EA::PostInc(Addr::A7),
+            EA::PreDec(Addr::A7),
+            EA::Offset(Addr::A5, -4),
+            EA::IdxData(Addr::A1, Data::D3, 8),
+            EA::IdxAddr(Addr::A3, Addr::A4, 24),
+            EA::Absolute(0xFF00),
+            EA::Absolute(0x00CC_0000),
+            EA::PCOffset(-512),
+            EA::PCIdxData(Data::D1, 16),
+            EA::PCIdxAddr(Addr::A1, 64),
+            EA::Immediate(69),
+        ];
+
+        for ea in eas.iter() {
+            for size in sizes.iter() {
+                let mut out = vec![0];
+                let mut i = 0;
+                ea.write(*size, &mut out);
+                let res = EA::read(&out, &mut i, *size);
+                assert_eq!(res, Some(*ea));
             }
         }
     }
