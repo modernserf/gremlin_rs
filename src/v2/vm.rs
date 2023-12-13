@@ -168,29 +168,25 @@ impl Op {
 }
 
 fn write_32_le(value: Word, out: &mut Vec<Byte>) {
-    out.push((value & 0xFF) as Byte);
-    out.push(((value >> 8) & 0xFF) as Byte);
-    out.push(((value >> 16) & 0xFF) as Byte);
-    out.push(((value >> 24) & 0xFF) as Byte);
+    let bytes = value.to_le_bytes();
+    out.extend(bytes);
 }
 
 fn read_32_le(i: &mut Word, data: &[Byte]) -> Word {
-    let out = data[*i as usize] as Word
-        + ((data[*i as usize + 1] as Word) << 8)
-        + ((data[*i as usize + 2] as Word) << 16)
-        + ((data[*i as usize + 3] as Word) << 24);
+    let idx = *i as usize;
+    let out = Word::from_le_bytes([data[idx], data[idx + 1], data[idx + 2], data[idx + 3]]);
     *i += 4;
     out
 }
 
 fn write_16_le(value_32: Word, out: &mut Vec<Byte>) {
     let value = value_32 as i16;
-    out.push((value & 0xFF) as Byte);
-    out.push(((value >> 8) & 0xFF) as Byte);
+    out.extend(value.to_le_bytes());
 }
 
 fn read_16_le(i: &mut Word, data: &[Byte]) -> Word {
-    let out = data[*i as usize] as i16 + ((data[*i as usize + 1] as i16) << 8);
+    let idx = *i as usize;
+    let out = i16::from_le_bytes([data[idx], data[idx + 1]]);
     *i += 2;
     out as Word
 }

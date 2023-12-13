@@ -16,6 +16,10 @@ Update coverage:
 cargo llvm-cov --lcov --output-path lcov.info
 ```
 
+68k resources:
+http://marc.retronik.fr/motorola/68K/68000.html
+http://goldencrystal.free.fr/M68kOpcodes-v2.3.pdf
+
 # Language overview
 
 ## Comments

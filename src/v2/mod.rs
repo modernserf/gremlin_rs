@@ -1,7 +1,10 @@
 #![allow(dead_code)]
+mod ea;
 mod memory4;
+mod register;
 mod ty;
 mod vm;
+mod vm_68k;
 
 use crate::v2::ty::*;
 
