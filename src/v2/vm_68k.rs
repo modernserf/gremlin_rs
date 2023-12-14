@@ -384,6 +384,16 @@ impl Asm {
             self.out.push(0);
         }
     }
+    pub fn here(&self) -> usize {
+        self.out.len()
+    }
+    pub fn fixup(&mut self, at: usize, f: impl Fn(&mut Asm)) {
+        let mut a = Asm::new();
+        f(&mut a);
+        for (i, byte) in a.out.into_iter().enumerate() {
+            self.out[at + i] = byte;
+        }
+    }
 
     // instruction formats
     fn tag4_reg3_mode3_ea(&mut self, tag: u16, register: u16, mode: u16) {
@@ -486,12 +496,21 @@ mod test {
         let mut asm = Asm::new();
 
         asm.mov(Byte, Immediate(0), Data(D0));
-        asm.add(Byte, PCOffset(12), Data(D0));
-        asm.add(Byte, PCOffset(9), Data(D0));
-        asm.add(Byte, PCOffset(6), Data(D0));
+
+        let instr = asm.here();
+        asm.add(Byte, PCOffset(0), Data(D0));
+        asm.add(Byte, PCOffset(0), Data(D0));
+        asm.add(Byte, PCOffset(0), Data(D0));
         asm.halt();
 
+        let data = asm.here();
         asm.data(&[10, 20, 30]);
+        asm.fixup(instr, |asm| {
+            let base_offset = (data - instr - 2) as i32;
+            asm.add(Byte, PCOffset(base_offset), Data(D0));
+            asm.add(Byte, PCOffset(base_offset - 4 + 1), Data(D0));
+            asm.add(Byte, PCOffset(base_offset - 8 + 2), Data(D0));
+        });
 
         vm.load_memory(init_pc as usize, &asm.out);
         vm.run();
