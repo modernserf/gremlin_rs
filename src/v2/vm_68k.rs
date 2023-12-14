@@ -142,6 +142,31 @@ impl VM {
                 };
                 self.ea_apply(dest, src, size, |l, r| l + r);
             }
+            // shifts
+            (0b1110, _, _) => {
+                let dest = EAView::Data(instr as usize & 0b111);
+                let src_type = instr & 0b100000;
+                let (to_left, size) = match mode {
+                    0b000 => (false, Size::Byte),
+                    0b001 => (false, Size::Short),
+                    0b010 => (false, Size::Long),
+                    0b100 => (true, Size::Byte),
+                    0b101 => (true, Size::Short),
+                    0b110 => (true, Size::Long),
+                    _ => unimplemented!(),
+                };
+                let src = match (src_type, reg) {
+                    (0, 0) => EAView::Immediate(8),
+                    (0, n) => EAView::Immediate(n as i32),
+                    (_, r) => EAView::Data(r),
+                };
+                self.pc += 2;
+                if to_left {
+                    self.ea_apply(dest, src, size, |l, r| l << r);
+                } else {
+                    self.ea_apply(dest, src, size, |l, r| l >> r);
+                }
+            }
             _ => unimplemented!(),
         }
     }
@@ -428,6 +453,60 @@ impl Asm {
             _ => unimplemented!(),
         }
     }
+    pub fn asl(&mut self, size: Size, src: EA, dest: EA) {
+        match (src, dest) {
+            (EA::Data(src), EA::Data(dest)) => {
+                let mode = match size {
+                    Size::Byte => 0b100,
+                    Size::Short => 0b101,
+                    Size::Long => 0b110,
+                };
+                self.tag4_reg3_mode3_ea(0b1110, src as u16, mode);
+                let byte = self.out.pop().unwrap();
+                self.out.push(byte + 0b100000 + dest as u8);
+            }
+            (EA::Immediate(x), EA::Data(d)) if x > 0 && x <= 8 => {
+                let mode = match size {
+                    Size::Byte => 0b100,
+                    Size::Short => 0b101,
+                    Size::Long => 0b110,
+                };
+                let count = x & 0b111;
+                self.tag4_reg3_mode3_ea(0b1110, count as u16, mode);
+                let byte = self.out.pop().unwrap();
+                self.out.push(byte + d as u8);
+            }
+            // ASL <ea> not implemented
+            _ => unimplemented!(),
+        }
+    }
+    pub fn asr(&mut self, size: Size, src: EA, dest: EA) {
+        match (src, dest) {
+            (EA::Data(src), EA::Data(dest)) => {
+                let mode = match size {
+                    Size::Byte => 0b000,
+                    Size::Short => 0b001,
+                    Size::Long => 0b010,
+                };
+                self.tag4_reg3_mode3_ea(0b1110, src as u16, mode);
+                let byte = self.out.pop().unwrap();
+                self.out.push(byte + 0b100000 + dest as u8);
+            }
+            (EA::Immediate(x), EA::Data(d)) if x > 0 && x <= 8 => {
+                let mode = match size {
+                    Size::Byte => 0b000,
+                    Size::Short => 0b001,
+                    Size::Long => 0b010,
+                };
+                let count = x & 0b111;
+                self.tag4_reg3_mode3_ea(0b1110, count as u16, mode);
+                let byte = self.out.pop().unwrap();
+                self.out.push(byte + d as u8);
+            }
+            // ASR <ea> not implemented
+            _ => unimplemented!(),
+        }
+    }
     pub fn halt(&mut self) {
         // TRAP #0
         self.push_u16(0b0100_1110_0100_0000);
@@ -599,5 +678,25 @@ mod test {
         assert_eq!(vm.data[1], 0b1000);
         // 0101 & 1001 -> 0001
         assert_eq!(vm.stack(4), 0b0001);
+    }
+
+    #[test]
+    fn shift() {
+        let mut asm = Asm::new();
+        asm.mov(Long, Immediate(3), Data(D0));
+        asm.mov(Long, Immediate(4), Data(D1));
+        asm.asl(Long, Data(D1), Data(D0));
+        asm.asl(Long, Immediate(1), Data(D0));
+        asm.halt();
+
+        asm.asr(Long, Data(D1), Data(D0));
+        asm.asr(Long, Immediate(1), Data(D0));
+        asm.halt();
+
+        let mut vm = init_vm(&asm);
+        vm.run();
+        assert_eq!(vm.data[0], 3 << 5);
+        vm.run();
+        assert_eq!(vm.data[0], 3);
     }
 }

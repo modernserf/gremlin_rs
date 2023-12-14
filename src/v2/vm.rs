@@ -1263,7 +1263,7 @@ mod test {
         };
 
         // sub free (ptr: A0)
-        let free = w.branch_dest();
+        let _free = w.branch_dest();
         {
             let ptr = Address(A0);
             w.mov(heap_tip, ptr);
