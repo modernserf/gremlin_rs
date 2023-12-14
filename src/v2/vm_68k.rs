@@ -79,6 +79,19 @@ impl VM {
                 // TODO: "in-universe" halt
                 self.run_state = RunState::Halt;
             }
+            // CHK
+            (0b0100, _, _) => {
+                let (size, src) = match mode {
+                    0b110 => (Size::Short, self.ea_read(Size::Short)),
+                    0b100 => (Size::Long, self.ea_read(Size::Long)),
+                    _ => unreachable!(),
+                };
+                let max = self.ea_src(src, size);
+                let value = self.ea_src(EAView::Data(reg), size);
+                if value < 0 || value > max {
+                    panic!("CHK exception")
+                }
+            }
             // ADDI
             (0b0000, 0b011, _) => {
                 let (size, dest) = match mode {
@@ -165,6 +178,25 @@ impl VM {
                     self.ea_apply(dest, src, size, |l, r| l << r);
                 } else {
                     self.ea_apply(dest, src, size, |l, r| l >> r);
+                }
+            }
+            // BRA, BSR, Bcc
+            (0b0110, _, _) => {
+                let cond = (instr & 0x0F00) >> 8;
+                let disp_8 = i8::from_be_bytes([instr.to_be_bytes()[1]]);
+                self.pc += 2;
+
+                let (if_true, if_false) = if disp_8 == 0 {
+                    (self.pc + (self.mem_i16(self.pc) as i32), self.pc + 2)
+                } else if disp_8 == -1 {
+                    (self.pc + self.mem_i32(self.pc), self.pc + 4)
+                } else {
+                    (self.pc + disp_8 as i32, self.pc)
+                };
+
+                self.pc = match cond {
+                    0b0000 => if_true,
+                    _ => unimplemented!(),
                 }
             }
             _ => unimplemented!(),
@@ -346,6 +378,30 @@ fn quick_zero(word: i32) -> Option<Quick> {
         _ => None,
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cond {
+    True = 0x0,
+    False,
+    High,
+    LowSame,
+
+    CarryClear,
+    CarrySet,
+    NotEqual,
+    Equal,
+
+    OverflowClear,
+    OverflowSet,
+    Plus,
+    Minus,
+
+    GreaterEqual,
+    Less,
+    Greater,
+    LessEqual = 0xF,
+}
+
 struct Asm {
     out: Vec<u8>,
 }
@@ -507,10 +563,51 @@ impl Asm {
             _ => unimplemented!(),
         }
     }
+    pub fn branch(&mut self, cond: Cond, offset: i32) {
+        assert_ne!(cond, Cond::False);
+        self.branch_internal(cond, offset)
+    }
+    pub fn branch_sub(&mut self, offset: i32) {
+        self.branch_internal(Cond::False, offset)
+    }
+    fn branch_internal(&mut self, cond: Cond, offset: i32) {
+        let disp_byte = match offset {
+            -128..=127 => offset as i8,
+            -32768..=32767 => 0,
+            _ => -1,
+        };
+        self.tag4_cond_4_disp8(0b0110, cond as u8, disp_byte);
+        if disp_byte == 0 {
+            let bytes = (offset as i16).to_be_bytes();
+            self.out.push(bytes[0]);
+            self.out.push(bytes[1]);
+        } else if disp_byte == -1 {
+            let bytes = offset.to_be_bytes();
+            self.out.push(bytes[0]);
+            self.out.push(bytes[1]);
+            self.out.push(bytes[2]);
+            self.out.push(bytes[3]);
+        }
+    }
+    pub fn chk(&mut self, size: Size, src: EA, target: EA) {
+        match target {
+            EA::Data(d) => {
+                let mode = match size {
+                    Size::Byte => unimplemented!(),
+                    Size::Short => 0b110,
+                    Size::Long => 0b100,
+                };
+                self.tag4_reg3_mode3_ea(0b0100, d as u16, mode);
+                self.push_ea(size, src);
+            }
+            _ => unimplemented!(),
+        }
+    }
     pub fn halt(&mut self) {
         // TRAP #0
         self.push_u16(0b0100_1110_0100_0000);
     }
+    // todo BSET, BCHG, BCLR, BTST
     pub fn data(&mut self, data: &[u8]) {
         for byte in data {
             self.out.push(*byte);
@@ -534,6 +631,11 @@ impl Asm {
     fn tag4_reg3_mode3_ea(&mut self, tag: u16, register: u16, mode: u16) {
         let base = (tag << 12) + (register << 9) + (mode << 6);
         self.push_u16(base);
+    }
+    fn tag4_cond_4_disp8(&mut self, tag: u8, cond: u8, disp: i8) {
+        let disp_bytes = disp.to_be_bytes();
+        let base = u16::from_be_bytes([(tag << 4) + cond, disp_bytes[0]]);
+        self.push_u16(base)
     }
     fn push_u16(&mut self, value: u16) {
         let bytes = value.to_be_bytes();
@@ -698,5 +800,58 @@ mod test {
         assert_eq!(vm.data[0], 3 << 5);
         vm.run();
         assert_eq!(vm.data[0], 3);
+    }
+
+    #[test]
+    fn branch_unconditional() {
+        let mut asm = Asm::new();
+        asm.mov(Long, Immediate(1), Data(D0));
+
+        let branch_before = asm.here();
+        asm.branch(Cond::True, 1);
+        asm.mov(Long, Immediate(2), Data(D0));
+        let branch_dest = asm.here();
+        asm.halt();
+        asm.fixup(branch_before, |asm| {
+            let disp = branch_dest - branch_before - 2;
+            asm.branch(Cond::True, disp as i32);
+        });
+
+        let mut vm = init_vm(&asm);
+        vm.run();
+        assert_eq!(vm.data[0], 1);
+    }
+
+    #[test]
+    fn chk() {
+        let mut asm = Asm::new();
+        asm.mov(Long, Immediate(10), Data(D0));
+        asm.chk(Long, Immediate(20), Data(D0));
+        asm.halt();
+        let mut vm = init_vm(&asm);
+        vm.run();
+        assert_eq!(vm.data[0], 10);
+    }
+
+    #[test]
+    #[should_panic]
+    fn chk_overflow() {
+        let mut asm = Asm::new();
+        asm.mov(Long, Immediate(100), Data(D0));
+        asm.chk(Long, Immediate(20), Data(D0));
+        asm.halt();
+        let mut vm = init_vm(&asm);
+        vm.run();
+    }
+
+    #[test]
+    #[should_panic]
+    fn chk_underflow() {
+        let mut asm = Asm::new();
+        asm.mov(Long, Immediate(-1), Data(D0));
+        asm.chk(Long, Immediate(20), Data(D0));
+        asm.halt();
+        let mut vm = init_vm(&asm);
+        vm.run();
     }
 }
