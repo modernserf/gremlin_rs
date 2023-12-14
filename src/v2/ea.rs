@@ -38,7 +38,7 @@ impl EA {
         let byte = memory[*pc];
         *pc += 1;
         let mode = (byte >> 3) & 0b111;
-        let reg = byte & 0b111;
+        let reg = (byte & 0b111) as usize;
         let ea = match (mode, reg) {
             (0, r) => EA::Data(Data::from(r)),
             (1, r) => EA::Addr(Addr::from(r)),
@@ -51,7 +51,7 @@ impl EA {
                 EA::Offset(Addr::from(r), offset as i32)
             }
             (6, r) => {
-                let d = memory[*pc];
+                let d = memory[*pc] as usize;
                 let offset = memory[*pc + 1];
                 *pc += 2;
                 if d > 8 {
@@ -81,7 +81,7 @@ impl EA {
                 EA::PCOffset(offset)
             }
             (7, 3) => {
-                let d = memory[*pc];
+                let d = memory[*pc] as usize;
                 let offset = memory[*pc + 1];
                 *pc += 2;
                 if d > 8 {
