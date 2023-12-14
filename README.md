@@ -20,6 +20,12 @@ cargo llvm-cov --lcov --output-path lcov.info
 http://marc.retronik.fr/motorola/68K/68000.html
 http://goldencrystal.free.fr/M68kOpcodes-v2.3.pdf
 
+Threads relevant to one-pass compilers:
+
+- https://twitter.com/pervognsen/status/1249997192196026369
+- https://twitter.com/pervognsen/status/1344484219074928640
+- https://twitter.com/jckarter/status/1405182468932526084
+
 # Language overview
 
 ## Comments

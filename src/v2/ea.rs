@@ -4,7 +4,7 @@ use super::register::*;
 pub enum Size {
     Byte,
     Short,
-    Word,
+    Long,
 }
 
 impl Size {
@@ -12,7 +12,7 @@ impl Size {
         match self {
             Self::Byte => 1,
             Self::Short => 2,
-            Self::Word => 4,
+            Self::Long => 4,
         }
     }
 }
@@ -21,13 +21,13 @@ impl Size {
 pub enum EA {
     Data(Data),
     Addr(Addr),
-    Offset(Addr, i32),
+    Offset(Addr, i16),
     PreDec(Addr),
     PostInc(Addr),
     IdxData(Addr, Data, u8),
     IdxAddr(Addr, Addr, u8),
     Absolute(i32),
-    PCOffset(i32),
+    PCOffset(i16),
     PCIdxData(Data, u8),
     PCIdxAddr(Addr, u8),
     Immediate(i32),
@@ -48,7 +48,7 @@ impl EA {
             (5, r) => {
                 let offset = i16::from_be_bytes([memory[*pc], memory[*pc + 1]]);
                 *pc += 2;
-                EA::Offset(Addr::from(r), offset as i32)
+                EA::Offset(Addr::from(r), offset)
             }
             (6, r) => {
                 let d = memory[*pc] as usize;
@@ -76,7 +76,7 @@ impl EA {
                 EA::Absolute(offset)
             }
             (7, 2) => {
-                let offset = i16::from_be_bytes([memory[*pc], memory[*pc + 1]]) as i32;
+                let offset = i16::from_be_bytes([memory[*pc], memory[*pc + 1]]);
                 *pc += 2;
                 EA::PCOffset(offset)
             }
@@ -94,7 +94,7 @@ impl EA {
                 let (bytes, value) = match size {
                     Size::Byte => (2, i32::from_be_bytes([0, 0, 0, memory[*pc + 1]])),
                     Size::Short => (2, i32::from_be_bytes([0, 0, memory[*pc], memory[*pc + 1]])),
-                    Size::Word => (
+                    Size::Long => (
                         4,
                         i32::from_be_bytes([
                             memory[*pc],
@@ -170,7 +170,7 @@ impl EA {
                         out.push(x as u8);
                     }
                     Size::Short => out.extend((x as u16).to_be_bytes()),
-                    Size::Word => out.extend(x.to_be_bytes()),
+                    Size::Long => out.extend(x.to_be_bytes()),
                 };
             }
         }
@@ -183,7 +183,7 @@ mod test {
 
     #[test]
     fn roundtrip() {
-        let sizes = vec![Size::Byte, Size::Short, Size::Word];
+        let sizes = vec![Size::Byte, Size::Short, Size::Long];
         let eas = vec![
             EA::Data(Data::D1),
             EA::Addr(Addr::A2),

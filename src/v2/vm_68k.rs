@@ -69,9 +69,9 @@ impl VM {
                 self.ea_apply(dest, src, Size::Short, |_, r| r);
             }
             (0b0010, _, _) => {
-                let src = self.ea_read(Size::Word);
-                let dest = self.ea_read_inner(Size::Word, mode, reg);
-                self.ea_apply(dest, src, Size::Word, |_, r| r);
+                let src = self.ea_read(Size::Long);
+                let dest = self.ea_read_inner(Size::Long, mode, reg);
+                self.ea_apply(dest, src, Size::Long, |_, r| r);
             }
             // TRAP
             (0b0100, 0b111, 0b001) => {
@@ -84,13 +84,23 @@ impl VM {
                 let (size, dest) = match mode {
                     0 => (Size::Byte, self.ea_read(Size::Byte)),
                     1 => (Size::Short, self.ea_read(Size::Short)),
-                    2 => (Size::Word, self.ea_read(Size::Word)),
+                    2 => (Size::Long, self.ea_read(Size::Long)),
                     _ => unreachable!(),
                 };
                 let src = self.immediate_read(size);
                 self.ea_apply(dest, src, size, |l, r| l + r);
             }
-
+            // ANDI
+            (0b0000, 0b001, _) => {
+                let (size, dest) = match mode {
+                    0 => (Size::Byte, self.ea_read(Size::Byte)),
+                    1 => (Size::Short, self.ea_read(Size::Short)),
+                    2 => (Size::Long, self.ea_read(Size::Long)),
+                    _ => unreachable!(),
+                };
+                let src = self.immediate_read(size);
+                self.ea_apply(dest, src, size, |l, r| l & r);
+            }
             // ADDQ
             (0b0101, _, _) => {
                 let quick = (instr >> 9) & 0b111;
@@ -99,22 +109,35 @@ impl VM {
                 let (size, dest) = match mode {
                     0 => (Size::Byte, self.ea_read(Size::Byte)),
                     1 => (Size::Short, self.ea_read(Size::Short)),
-                    2 => (Size::Word, self.ea_read(Size::Word)),
+                    2 => (Size::Long, self.ea_read(Size::Long)),
                     _ => unreachable!(),
                 };
                 self.ea_apply(dest, EAView::Immediate(quick), size, |l, r| l + r);
+            }
+            // AND
+            (0b1100, _, _) => {
+                let (size, src, dest) = match mode {
+                    0b000 => (Size::Byte, self.ea_read(Size::Byte), EAView::Data(reg)),
+                    0b001 => (Size::Short, self.ea_read(Size::Short), EAView::Data(reg)),
+                    0b010 => (Size::Long, self.ea_read(Size::Long), EAView::Data(reg)),
+                    0b100 => (Size::Byte, EAView::Data(reg), self.ea_read(Size::Byte)),
+                    0b101 => (Size::Short, EAView::Data(reg), self.ea_read(Size::Short)),
+                    0b110 => (Size::Long, EAView::Data(reg), self.ea_read(Size::Long)),
+                    _ => unreachable!(),
+                };
+                self.ea_apply(dest, src, size, |l, r| l & r);
             }
             // ADD / ADDA
             (0b1101, _, _) => {
                 let (size, src, dest) = match mode {
                     0 => (Size::Byte, self.ea_read(Size::Byte), EAView::Data(reg)),
                     1 => (Size::Short, self.ea_read(Size::Short), EAView::Data(reg)),
-                    2 => (Size::Word, self.ea_read(Size::Word), EAView::Data(reg)),
+                    2 => (Size::Long, self.ea_read(Size::Long), EAView::Data(reg)),
                     3 => (Size::Byte, EAView::Data(reg), self.ea_read(Size::Byte)),
                     4 => (Size::Short, EAView::Data(reg), self.ea_read(Size::Short)),
-                    5 => (Size::Word, EAView::Data(reg), self.ea_read(Size::Word)),
+                    5 => (Size::Long, EAView::Data(reg), self.ea_read(Size::Long)),
                     6 => (Size::Short, self.ea_read(Size::Short), EAView::Addr(reg)),
-                    7 => (Size::Word, self.ea_read(Size::Word), EAView::Addr(reg)),
+                    7 => (Size::Long, self.ea_read(Size::Long), EAView::Addr(reg)),
                     _ => unreachable!(),
                 };
                 self.ea_apply(dest, src, size, |l, r| l + r);
@@ -152,7 +175,7 @@ impl VM {
             EAView::Memory(i) => match size {
                 Size::Byte => self.mem_u8(i) as i32,
                 Size::Short => self.mem_i16(i) as i32,
-                Size::Word => self.mem_i32(i),
+                Size::Long => self.mem_i32(i),
             },
             EAView::Immediate(x) => x,
         }
@@ -174,7 +197,7 @@ impl VM {
                         self.memory[i] = bytes[2];
                         self.memory[i + 1] = bytes[3];
                     }
-                    Size::Word => {
+                    Size::Long => {
                         self.memory[i] = bytes[0];
                         self.memory[i + 1] = bytes[1];
                         self.memory[i + 2] = bytes[2];
@@ -255,7 +278,7 @@ impl VM {
                 let (bytes, value) = match size {
                     Size::Byte => (2, self.mem_u8(self.pc + 1) as i32),
                     Size::Short => (2, self.mem_i16(self.pc) as i32),
-                    Size::Word => (4, self.mem_i32(self.pc)),
+                    Size::Long => (4, self.mem_i32(self.pc)),
                 };
                 self.pc += bytes;
                 EAView::Immediate(value)
@@ -275,7 +298,7 @@ impl VM {
                 self.pc += 2;
                 EAView::Immediate(value)
             }
-            Size::Word => {
+            Size::Long => {
                 let value = self.mem_i32(self.pc) as i32;
                 self.pc += 4;
                 EAView::Immediate(value)
@@ -312,7 +335,7 @@ impl Asm {
                 let op_mode = match size {
                     Size::Byte => 0,
                     Size::Short => 1,
-                    Size::Word => 2,
+                    Size::Long => 2,
                 };
                 self.tag4_reg3_mode3_ea(0b1101, d as u16, op_mode);
                 self.push_ea(size, src);
@@ -321,7 +344,7 @@ impl Asm {
                 let op_mode = match size {
                     Size::Byte => unimplemented!(),
                     Size::Short => 6,
-                    Size::Word => 7,
+                    Size::Long => 7,
                 };
                 self.tag4_reg3_mode3_ea(0b1101, a as u16, op_mode);
                 self.push_ea(size, src);
@@ -330,7 +353,7 @@ impl Asm {
                 let op_mode = match size {
                     Size::Byte => 3,
                     Size::Short => 4,
-                    Size::Word => 5,
+                    Size::Long => 5,
                 };
                 self.tag4_reg3_mode3_ea(0b1101, d as u16, op_mode);
                 self.push_ea(size, dest);
@@ -340,7 +363,7 @@ impl Asm {
                     let mode = match size {
                         Size::Byte => 0,
                         Size::Short => 1,
-                        Size::Word => 2,
+                        Size::Long => 2,
                     };
                     self.tag4_reg3_mode3_ea(0b0101, q, mode);
                     self.push_ea(size, dest);
@@ -348,7 +371,7 @@ impl Asm {
                     let mode = match size {
                         Size::Byte => 0,
                         Size::Short => 1,
-                        Size::Word => 2,
+                        Size::Long => 2,
                     };
                     self.tag4_reg3_mode3_ea(0, 0b011, mode);
                     self.push_ea(size, dest);
@@ -362,7 +385,7 @@ impl Asm {
         let tag = match size {
             Size::Byte => 0b0001,
             Size::Short => 0b0011,
-            Size::Word => 0b0010,
+            Size::Long => 0b0010,
         };
         let mut dest_dummy = vec![0];
         dest.write(size, &mut dest_dummy);
@@ -371,6 +394,39 @@ impl Asm {
         self.tag4_reg3_mode3_ea(tag, reg as u16, mode as u16);
         self.push_ea(size, src);
         self.out.extend(dest_dummy[1..].iter());
+    }
+    pub fn and(&mut self, size: Size, src: EA, dest: EA) {
+        match (src, dest) {
+            (EA::Data(d), dest) => {
+                let mode = match size {
+                    Size::Byte => 0b100,
+                    Size::Short => 0b101,
+                    Size::Long => 0b110,
+                };
+                self.tag4_reg3_mode3_ea(0b1100, d as u16, mode);
+                self.push_ea(size, dest);
+            }
+            (EA::Immediate(x), dest) => {
+                let mode = match size {
+                    Size::Byte => 0b000,
+                    Size::Short => 0b001,
+                    Size::Long => 0b010,
+                };
+                self.tag4_reg3_mode3_ea(0, 1, mode);
+                self.push_ea(size, dest);
+                self.push_immediate(size, x);
+            }
+            (src, EA::Data(d)) => {
+                let mode = match size {
+                    Size::Byte => 0b000,
+                    Size::Short => 0b001,
+                    Size::Long => 0b010,
+                };
+                self.tag4_reg3_mode3_ea(0b1100, d as u16, mode);
+                self.push_ea(size, src);
+            }
+            _ => unimplemented!(),
+        }
     }
     pub fn halt(&mut self) {
         // TRAP #0
@@ -419,7 +475,7 @@ impl Asm {
                 self.out.push(bytes[2]);
                 self.out.push(bytes[3]);
             }
-            Size::Word => {
+            Size::Long => {
                 self.out.push(bytes[0]);
                 self.out.push(bytes[1]);
                 self.out.push(bytes[2]);
@@ -435,8 +491,13 @@ mod test {
     use crate::v2::ea::{Size::*, EA::*};
     use crate::v2::register::{Addr::*, Data::*};
 
-    #[test]
-    fn smoke_test() {
+    impl VM {
+        fn stack(&self, offset: i32) -> i32 {
+            self.mem_i32(self.addr[7] + offset)
+        }
+    }
+
+    fn init_vm(asm: &Asm) -> VM {
         let mut vm = VM::new(256);
         let init_sp = 120;
         let init_pc = 128;
@@ -444,34 +505,38 @@ mod test {
         vm.load_memory(0, &init_memory);
         vm.reset();
 
-        let mut asm = Asm::new();
-
-        asm.mov(Word, Immediate(10), Data(D0));
-        asm.mov(Word, Immediate(20), Data(D1));
-        asm.add(Word, Data(D0), Data(D1));
-        asm.halt();
-
-        asm.mov(Word, Immediate(30), Data(D0));
-        asm.mov(Word, Immediate(10), Addr(A0));
-        asm.add(Word, Data(D0), Addr(A0));
-        asm.halt();
-
-        asm.mov(Word, Immediate(10), PreDec(A7));
-        asm.add(Word, Immediate(5), Offset(A7, 0));
-        asm.halt();
-
-        asm.mov(Word, Immediate(10), Offset(A7, 0));
-        asm.mov(Word, Immediate(20), Data(D2));
-        asm.add(Word, PostInc(A7), Data(D2));
-        asm.halt();
-
-        asm.mov(Word, Immediate(10), PreDec(A7));
-        asm.mov(Word, Immediate(0), PreDec(A7));
-        asm.add(Word, Immediate(20), Offset(A7, 4));
-        asm.halt();
-
         vm.load_memory(init_pc as usize, &asm.out);
+        vm
+    }
 
+    #[test]
+    fn smoke_test() {
+        let mut asm = Asm::new();
+        asm.mov(Long, Immediate(10), Data(D0));
+        asm.mov(Long, Immediate(20), Data(D1));
+        asm.add(Long, Data(D0), Data(D1));
+        asm.halt();
+
+        asm.mov(Long, Immediate(30), Data(D0));
+        asm.mov(Long, Immediate(10), Addr(A0));
+        asm.add(Long, Data(D0), Addr(A0));
+        asm.halt();
+
+        asm.mov(Long, Immediate(10), PreDec(A7));
+        asm.add(Long, Immediate(5), Offset(A7, 0));
+        asm.halt();
+
+        asm.mov(Long, Immediate(10), Offset(A7, 0));
+        asm.mov(Long, Immediate(20), Data(D2));
+        asm.add(Long, PostInc(A7), Data(D2));
+        asm.halt();
+
+        asm.mov(Long, Immediate(10), PreDec(A7));
+        asm.mov(Long, Immediate(0), PreDec(A7));
+        asm.add(Long, Immediate(20), Offset(A7, 4));
+        asm.halt();
+
+        let mut vm = init_vm(&asm);
         vm.run();
         assert_eq!(vm.data[1], 30);
         vm.run();
@@ -486,15 +551,7 @@ mod test {
 
     #[test]
     fn bytes() {
-        let mut vm = VM::new(256);
-        let init_sp = 120;
-        let init_pc = 128;
-        let init_memory = vec![0, 0, 0, init_sp, 0, 0, 0, init_pc];
-        vm.load_memory(0, &init_memory);
-        vm.reset();
-
         let mut asm = Asm::new();
-
         asm.mov(Byte, Immediate(0), Data(D0));
 
         let instr = asm.here();
@@ -506,14 +563,41 @@ mod test {
         let data = asm.here();
         asm.data(&[10, 20, 30]);
         asm.fixup(instr, |asm| {
-            let base_offset = (data - instr - 2) as i32;
+            let base_offset = (data - instr - 2) as i16;
             asm.add(Byte, PCOffset(base_offset), Data(D0));
             asm.add(Byte, PCOffset(base_offset - 4 + 1), Data(D0));
             asm.add(Byte, PCOffset(base_offset - 8 + 2), Data(D0));
         });
 
-        vm.load_memory(init_pc as usize, &asm.out);
+        let mut vm = init_vm(&asm);
         vm.run();
         assert_eq!(vm.data[0], 60);
+    }
+
+    #[test]
+    fn and() {
+        let mut asm = Asm::new();
+        asm.mov(Long, Immediate(0b1100), Data(D0));
+        asm.mov(Long, Immediate(0b1010), Data(D1));
+        asm.mov(Long, Immediate(0b1001), PreDec(A7));
+        asm.mov(Long, Immediate(0b0110), PreDec(A7));
+
+        // data to memory
+        asm.and(Long, Data(D0), Offset(A7, 0));
+        // memory to data
+        asm.and(Long, Offset(A7, 4), Data(D1));
+        // immediate to memory
+        asm.and(Long, Immediate(0b0101), Offset(A7, 4));
+        asm.halt();
+
+        let mut vm = init_vm(&asm);
+        vm.run();
+
+        // 1100 & 0110 -> 0100
+        assert_eq!(vm.stack(0), 0b0100);
+        // 1001 & 1010 -> 1000
+        assert_eq!(vm.data[1], 0b1000);
+        // 0101 & 1001 -> 0001
+        assert_eq!(vm.stack(4), 0b0001);
     }
 }
