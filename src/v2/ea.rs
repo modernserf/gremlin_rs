@@ -128,6 +128,7 @@ impl EA {
             }
             Self::PostInc(a) => out.push(prev_byte + (3 << 3) + a as u8),
             Self::PreDec(a) => out.push(prev_byte + (4 << 3) + a as u8),
+            // FIXME: "brief extension word" format
             Self::IdxData(a, d, o) => {
                 out.push(prev_byte + (6 << 3) + a as u8);
                 out.push(d as u8);

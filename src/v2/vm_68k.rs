@@ -10,11 +10,18 @@ enum EAView {
     Immediate(i32),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunState {
+    Ready,
+    Halt,
+}
+
 struct VM {
     memory: Vec<u8>,
     data: [i32; 8],
     addr: [i32; 8],
     pc: i32,
+    run_state: RunState,
 }
 
 impl VM {
@@ -24,6 +31,7 @@ impl VM {
             data: [0; 8],
             addr: [0; 8],
             pc: 0,
+            run_state: RunState::Halt,
         }
     }
     fn load_memory(&mut self, offset: usize, memory: &[u8]) {
@@ -34,6 +42,13 @@ impl VM {
     fn reset(&mut self) {
         self.addr[7] = self.mem_i32(0);
         self.pc = self.mem_i32(4);
+        self.run_state = RunState::Halt;
+    }
+    fn run(&mut self) {
+        self.run_state = RunState::Ready;
+        while self.run_state == RunState::Ready {
+            self.run_1();
+        }
     }
     fn run_1(&mut self) {
         let instr = self.mem_u16(self.pc);
@@ -58,6 +73,12 @@ impl VM {
                 let dest = self.ea_read_inner(Size::Word, mode, reg);
                 self.ea_apply(dest, src, Size::Word, |_, r| r);
             }
+            // TRAP
+            (0b0100, 0b111, 0b001) => {
+                self.pc += 2;
+                // TODO: "in-universe" halt
+                self.run_state = RunState::Halt;
+            }
             // ADDI
             (0b0000, 0b011, _) => {
                 let (size, dest) = match mode {
@@ -69,6 +90,7 @@ impl VM {
                 let src = self.immediate_read(size);
                 self.ea_apply(dest, src, size, |l, r| l + r);
             }
+
             // ADDQ
             (0b0101, _, _) => {
                 let quick = (instr >> 9) & 0b111;
@@ -350,6 +372,10 @@ impl Asm {
         self.push_ea(size, src);
         self.out.extend(dest_dummy[1..].iter());
     }
+    pub fn halt(&mut self) {
+        // TRAP #0
+        self.push_u16(0b0100_1110_0100_0000);
+    }
     pub fn data(&mut self, data: &[u8]) {
         for byte in data {
             self.out.push(*byte);
@@ -413,46 +439,38 @@ mod test {
         asm.mov(Word, Immediate(10), Data(D0));
         asm.mov(Word, Immediate(20), Data(D1));
         asm.add(Word, Data(D0), Data(D1));
+        asm.halt();
 
         asm.mov(Word, Immediate(30), Data(D0));
         asm.mov(Word, Immediate(10), Addr(A0));
         asm.add(Word, Data(D0), Addr(A0));
+        asm.halt();
 
         asm.mov(Word, Immediate(10), PreDec(A7));
         asm.add(Word, Immediate(5), Offset(A7, 0));
+        asm.halt();
 
         asm.mov(Word, Immediate(10), Offset(A7, 0));
         asm.mov(Word, Immediate(20), Data(D2));
         asm.add(Word, PostInc(A7), Data(D2));
+        asm.halt();
 
         asm.mov(Word, Immediate(10), PreDec(A7));
         asm.mov(Word, Immediate(0), PreDec(A7));
         asm.add(Word, Immediate(20), Offset(A7, 4));
+        asm.halt();
 
         vm.load_memory(init_pc as usize, &asm.out);
 
-        vm.run_1();
-        vm.run_1();
-        vm.run_1();
+        vm.run();
         assert_eq!(vm.data[1], 30);
-
-        vm.run_1();
-        vm.run_1();
-        vm.run_1();
+        vm.run();
         assert_eq!(vm.addr[0], 40);
-
-        vm.run_1();
-        vm.run_1();
+        vm.run();
         assert_eq!(vm.mem_i32(vm.addr[7]), 15);
-
-        vm.run_1();
-        vm.run_1();
-        vm.run_1();
+        vm.run();
         assert_eq!(vm.data[2], 30);
-
-        vm.run_1();
-        vm.run_1();
-        vm.run_1();
+        vm.run();
         assert_eq!(vm.mem_i32(vm.addr[7] + 4), 30);
     }
 
@@ -468,18 +486,15 @@ mod test {
         let mut asm = Asm::new();
 
         asm.mov(Byte, Immediate(0), Data(D0));
-        asm.add(Byte, PCOffset(10), Data(D0));
-        asm.add(Byte, PCOffset(7), Data(D0));
-        asm.add(Byte, PCOffset(4), Data(D0));
+        asm.add(Byte, PCOffset(12), Data(D0));
+        asm.add(Byte, PCOffset(9), Data(D0));
+        asm.add(Byte, PCOffset(6), Data(D0));
+        asm.halt();
 
         asm.data(&[10, 20, 30]);
 
         vm.load_memory(init_pc as usize, &asm.out);
-        vm.run_1();
-        vm.run_1();
-        vm.run_1();
-        vm.run_1();
-
+        vm.run();
         assert_eq!(vm.data[0], 60);
     }
 }
