@@ -1,4 +1,4 @@
-use super::ea::*;
+use super::{ea::*, register::Addr};
 
 const ADDRESS_MASK: i32 = 0x7FFF_FFFF;
 
@@ -132,6 +132,29 @@ impl VM {
                 self.pc += 2;
                 // TODO: "in-universe" halt
                 self.run_state = RunState::Halt;
+            }
+            // LEA
+            (0b0100, _, 0b111) => {
+                let addr = match self.ea_read(Size::Long) {
+                    EAView::Memory(addr) => addr,
+                    _ => unimplemented!(),
+                };
+                let dest = EAView::Addr(reg);
+                self.ea_apply(dest, EAView::Immediate(addr), Size::Long, |_, x| x);
+            }
+            // PEA
+            (0b0100, 0b100, 0b001) => {
+                let addr = match self.ea_read(Size::Long) {
+                    EAView::Memory(addr) => addr,
+                    _ => unimplemented!(),
+                };
+                self.addr[7] += 4;
+                self.ea_apply(
+                    EAView::Memory(self.addr[7]),
+                    EAView::Immediate(addr),
+                    Size::Long,
+                    |_, x| x,
+                );
             }
             // CHK
             (0b0100, _, _) => {
@@ -633,27 +656,6 @@ impl Asm {
     pub fn new() -> Self {
         Self { out: Vec::new() }
     }
-    fn mode_012(&self, size: Size) -> u16 {
-        match size {
-            Size::Byte => 0b000,
-            Size::Short => 0b001,
-            Size::Long => 0b010,
-        }
-    }
-    fn mode_456(&self, size: Size) -> u16 {
-        match size {
-            Size::Byte => 0b100,
-            Size::Short => 0b101,
-            Size::Long => 0b110,
-        }
-    }
-    fn mode_37(&self, size: Size) -> u16 {
-        match size {
-            Size::Byte => unimplemented!(),
-            Size::Short => 0b011,
-            Size::Long => 0b111,
-        }
-    }
     pub fn add(&mut self, size: Size, src: EA, dest: EA) {
         match (src, dest) {
             (EA::Data(d), dest) => {
@@ -921,6 +923,19 @@ impl Asm {
         self.tag4_reg3_mode3_ea(0b0100, 0b011, mode);
         self.push_ea(size, dest);
     }
+    pub fn load_ea(&mut self, src: EA, dest: EA) {
+        match (src, dest) {
+            (src, EA::Addr(a)) if src.is_control_mode() => {
+                self.tag4_reg3_mode3_ea(0b0100, a as u16, 0b111);
+                self.push_ea(Size::Long, src)
+            }
+            (src, EA::PreDec(Addr::A7)) if src.is_control_mode() => {
+                self.tag4_reg3_mode3_ea(0b0100, 0b100, 0b001);
+                self.push_ea(Size::Long, src)
+            }
+            _ => unimplemented!(),
+        }
+    }
     pub fn halt(&mut self) {
         // TRAP #0
         self.push_u16(0b0100_1110_0100_0000);
@@ -954,6 +969,27 @@ impl Asm {
         let disp_bytes = disp.to_be_bytes();
         let base = u16::from_be_bytes([(tag << 4) + cond, disp_bytes[0]]);
         self.push_u16(base)
+    }
+    fn mode_012(&self, size: Size) -> u16 {
+        match size {
+            Size::Byte => 0b000,
+            Size::Short => 0b001,
+            Size::Long => 0b010,
+        }
+    }
+    fn mode_456(&self, size: Size) -> u16 {
+        match size {
+            Size::Byte => 0b100,
+            Size::Short => 0b101,
+            Size::Long => 0b110,
+        }
+    }
+    fn mode_37(&self, size: Size) -> u16 {
+        match size {
+            Size::Byte => unimplemented!(),
+            Size::Short => 0b011,
+            Size::Long => 0b111,
+        }
     }
     fn push_u16(&mut self, value: u16) {
         let bytes = value.to_be_bytes();
@@ -1317,5 +1353,18 @@ mod test {
         for (src, dest, expected) in cases {
             test_case(Asm::sub, Size::Long, src, dest, expected)
         }
+    }
+
+    #[test]
+    fn load_ea() {
+        let mut asm = Asm::new();
+        asm.load_ea(EA::Absolute(1234), EA::Addr(A0));
+        asm.load_ea(EA::Absolute(5678), EA::PreDec(A7));
+        asm.halt();
+
+        let mut vm = init_vm(&asm);
+        vm.run();
+        assert_eq!(vm.addr[0], 1234);
+        assert_eq!(vm.stack(0), 5678);
     }
 }

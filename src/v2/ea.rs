@@ -34,6 +34,18 @@ pub enum EA {
 }
 
 impl EA {
+    pub fn is_control_mode(&self) -> bool {
+        match self {
+            Self::Offset(_, _)
+            | Self::IdxData(_, _, _)
+            | Self::IdxAddr(_, _, _)
+            | Self::Absolute(_)
+            | Self::PCOffset(_)
+            | Self::PCIdxData(_, _)
+            | Self::PCIdxAddr(_, _) => true,
+            _ => false,
+        }
+    }
     pub fn read(memory: &[u8], pc: &mut usize, size: Size) -> Option<EA> {
         let byte = memory[*pc];
         *pc += 1;
