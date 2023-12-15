@@ -293,13 +293,38 @@ impl VM {
             }
             // AND / MUL
             (0b1100, _, _) => {
+                let exg_mode = instr >> 3 & 0b11111;
+                let exg_reg = (instr & 0b111) as usize;
+
                 let (size, src, dest) = match mode {
                     0b000 => (Size::Byte, self.ea_read(Size::Byte), EAView::Data(reg)),
                     0b001 => (Size::Short, self.ea_read(Size::Short), EAView::Data(reg)),
                     0b010 => (Size::Long, self.ea_read(Size::Long), EAView::Data(reg)),
+                    0b011 => todo!("MULU"),
                     0b100 => (Size::Byte, EAView::Data(reg), self.ea_read(Size::Byte)),
-                    0b101 => (Size::Short, EAView::Data(reg), self.ea_read(Size::Short)),
-                    0b110 => (Size::Long, EAView::Data(reg), self.ea_read(Size::Long)),
+                    0b101 => match exg_mode {
+                        0b01000 => {
+                            self.pc += 2;
+                            self.ea_exg(EAView::Data(reg), EAView::Data(exg_reg));
+                            return;
+                        }
+                        0b01001 => {
+                            self.pc += 2;
+                            self.ea_exg(EAView::Addr(reg), EAView::Addr(exg_reg));
+                            return;
+                        }
+                        _ => (Size::Short, EAView::Data(reg), self.ea_read(Size::Short)),
+                    },
+                    0b110 => match exg_mode {
+                        0b10001 => {
+                            self.pc += 2;
+                            self.ea_exg(EAView::Data(reg), EAView::Addr(exg_reg));
+                            return;
+                        }
+                        _ => (Size::Long, EAView::Data(reg), self.ea_read(Size::Long)),
+                    },
+                    0b111 => todo!("MULS"),
+
                     _ => unreachable!(),
                 };
                 self.ea_apply(dest, src, size, |l, r| l & r);
@@ -418,6 +443,11 @@ impl VM {
             7 => (Size::Long, self.ea_read(Size::Long), EAView::Addr(reg)),
             _ => unreachable!(),
         }
+    }
+    fn ea_exg(&mut self, left: EAView, right: EAView) {
+        let swap = self.ea_src(left, Size::Long);
+        self.ea_apply(left, right, Size::Long, |_, x| x);
+        self.ea_apply(right, EAView::Immediate(swap), Size::Long, |_, x| x);
     }
     fn ea_src(&self, src: EAView, size: Size) -> i32 {
         match src {
@@ -936,6 +966,17 @@ impl Asm {
             _ => unimplemented!(),
         }
     }
+    pub fn exg(&mut self, src: EA, dest: EA) {
+        let (mode, l, r) = match (src, dest) {
+            (EA::Data(l), EA::Data(r)) => (0b101000, l as u16, r as u16),
+            (EA::Addr(l), EA::Addr(r)) => (0b101001, l as u16, r as u16),
+            (EA::Data(d), EA::Addr(a)) => (0b110001, d as u16, a as u16),
+            (EA::Addr(a), EA::Data(d)) => (0b110001, d as u16, a as u16),
+            _ => unimplemented!(),
+        };
+        let code = (0b1100 << 12) + (l << 9) + (mode << 3) + r;
+        self.push_u16(code);
+    }
     pub fn halt(&mut self) {
         // TRAP #0
         self.push_u16(0b0100_1110_0100_0000);
@@ -1366,5 +1407,58 @@ mod test {
         vm.run();
         assert_eq!(vm.addr[0], 1234);
         assert_eq!(vm.stack(0), 5678);
+    }
+
+    #[test]
+    fn exg() {
+        let cases = vec![
+            (T::Data(1), T::Data(2)),
+            (T::Addr(0x00F0_FF00), T::Addr(0x00C0_CC00)),
+            (T::Data(1), T::Addr(0x00F0_FF00)),
+            (T::Addr(0x00F0_FF00), T::Data(1)),
+        ];
+
+        for (src, dest) in cases {
+            let mut asm = Asm::new();
+            let size = Size::Long;
+            let (left_ea, left_val) = match src {
+                T::Data(x) => {
+                    asm.mov(size, Immediate(x), Data(D0));
+                    (Data(D0), x)
+                }
+                T::Addr(x) => {
+                    asm.mov(size, Immediate(x), Addr(A0));
+                    (Addr(A0), x)
+                }
+                _ => unreachable!(),
+            };
+            let (right_ea, right_val) = match dest {
+                T::Data(x) => {
+                    asm.mov(size, Immediate(x), Data(D1));
+                    (Data(D1), x)
+                }
+                T::Addr(x) => {
+                    asm.mov(size, Immediate(x), Addr(A1));
+                    (Addr(A1), x)
+                }
+                _ => unreachable!(),
+            };
+            asm.exg(left_ea, right_ea);
+            asm.halt();
+            let mut vm = init_vm(&asm);
+            vm.run();
+            let left_result = match src {
+                T::Data(_) => vm.data[0],
+                T::Addr(_) => vm.addr[0],
+                _ => unreachable!(),
+            };
+            let right_result = match dest {
+                T::Data(_) => vm.data[1],
+                T::Addr(_) => vm.addr[1],
+                _ => unreachable!(),
+            };
+            assert_eq!(left_result, right_val);
+            assert_eq!(right_result, left_val);
+        }
     }
 }
