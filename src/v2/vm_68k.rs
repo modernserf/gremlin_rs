@@ -127,11 +127,46 @@ impl VM {
                 let (size, dest) = self.mode_read_0(mode);
                 self.ea_apply_1(dest, size, |x| !x);
             }
-            // TRAP
+            // RTS/RTD/TRAP
             (0b0100, 0b111, 0b001) => {
                 self.pc += 2;
-                // TODO: "in-universe" halt
-                self.run_state = RunState::Halt;
+                let lo6 = instr & 0b111111;
+                match lo6 {
+                    0 => {
+                        // TRAP #0
+                        // TODO: "in-universe" halt
+                        self.run_state = RunState::Halt;
+                    }
+                    0b110101 => {
+                        let ret = self.pop_stack();
+                        self.pc = ret;
+                    }
+                    0b110100 => {
+                        let disp = self.mem_u16(self.pc) as i32;
+                        self.pc += 2;
+                        let ret = self.pop_stack();
+                        self.addr[7] += disp;
+                        self.pc = ret;
+                    }
+                    _ => {}
+                }
+            }
+            // JSR
+            (0b0100, 0b111, 0b010) => {
+                let addr = match self.ea_read(Size::Long) {
+                    EAView::Memory(addr) => addr,
+                    _ => unimplemented!(),
+                };
+                self.push_stack(self.pc);
+                self.pc = addr;
+            }
+            // JMP
+            (0b0100, 0b111, 0b011) => {
+                let addr = match self.ea_read(Size::Long) {
+                    EAView::Memory(addr) => addr,
+                    _ => unimplemented!(),
+                };
+                self.pc = addr;
             }
             // LEA
             (0b0100, _, 0b111) => {
@@ -148,13 +183,7 @@ impl VM {
                     EAView::Memory(addr) => addr,
                     _ => unimplemented!(),
                 };
-                self.addr[7] += 4;
-                self.ea_apply(
-                    EAView::Memory(self.addr[7]),
-                    EAView::Immediate(addr),
-                    Size::Long,
-                    |_, x| x,
-                );
+                self.push_stack(addr);
             }
             // CHK
             (0b0100, _, _) => {
@@ -195,10 +224,6 @@ impl VM {
             // BRA, BSR, Bcc
             (0b0110, _, _) => {
                 let cond = (instr & 0x0F00) >> 8;
-                if cond == 1 {
-                    todo!("BSR")
-                }
-
                 let disp_8 = i8::from_be_bytes([instr.to_be_bytes()[1]]);
                 self.pc += 2;
 
@@ -209,6 +234,11 @@ impl VM {
                 } else {
                     (self.pc + disp_8 as i32, self.pc)
                 };
+                if cond == 1 {
+                    self.push_stack(self.pc);
+                    self.pc = if_true;
+                    return;
+                }
                 if self.check_cond(Cond::from(cond)) {
                     self.pc = if_true
                 } else {
@@ -443,6 +473,23 @@ impl VM {
             7 => (Size::Long, self.ea_read(Size::Long), EAView::Addr(reg)),
             _ => unreachable!(),
         }
+    }
+    fn stack(&self, offset: i32) -> i32 {
+        self.mem_i32(self.addr[7] + offset)
+    }
+    fn pop_stack(&mut self) -> i32 {
+        let val = self.stack(0);
+        self.addr[7] += 4;
+        val
+    }
+    fn push_stack(&mut self, value: i32) {
+        self.addr[7] -= 4;
+        self.ea_apply(
+            EAView::Memory(self.addr[7]),
+            EAView::Immediate(value),
+            Size::Long,
+            |_, x| x,
+        );
     }
     fn ea_exg(&mut self, left: EAView, right: EAView) {
         let swap = self.ea_src(left, Size::Long);
@@ -977,6 +1024,30 @@ impl Asm {
         let code = (0b1100 << 12) + (l << 9) + (mode << 3) + r;
         self.push_u16(code);
     }
+    pub fn jmp(&mut self, src: EA) {
+        self.tag4_reg3_mode3_ea(0b0100, 0b111, 0b011);
+        if src.is_control_mode() {
+            self.push_ea(Size::Long, src);
+        } else {
+            unimplemented!()
+        }
+    }
+    pub fn jsr(&mut self, src: EA) {
+        self.tag4_reg3_mode3_ea(0b0100, 0b111, 0b010);
+        if src.is_control_mode() {
+            self.push_ea(Size::Long, src);
+        } else {
+            unimplemented!()
+        }
+    }
+    pub fn ret(&mut self, to_drop: u16) {
+        if to_drop == 0 {
+            self.push_u16(0b0100_1110_0111_0101);
+        } else {
+            self.push_u16(0b0100_1110_0111_0100);
+            self.push_u16(to_drop);
+        }
+    }
     pub fn halt(&mut self) {
         // TRAP #0
         self.push_u16(0b0100_1110_0100_0000);
@@ -1066,12 +1137,6 @@ mod test {
     use super::*;
     use crate::v2::ea::{Size::*, EA::*};
     use crate::v2::register::{Addr::*, Data::*};
-
-    impl VM {
-        fn stack(&self, offset: i32) -> i32 {
-            self.mem_i32(self.addr[7] + offset)
-        }
-    }
 
     fn init_vm(asm: &Asm) -> VM {
         let mut vm = VM::new(256);
@@ -1460,5 +1525,47 @@ mod test {
             assert_eq!(left_result, right_val);
             assert_eq!(right_result, left_val);
         }
+    }
+
+    #[test]
+    fn subroutines() {
+        let mut asm = Asm::new();
+
+        let to_main = asm.here();
+        asm.jmp(EA::PCOffset(0));
+
+        // inc(D0) -> D0
+        let inc = asm.here();
+        asm.add(Long, Immediate(1), Data(D0));
+        asm.ret(0);
+
+        // add2(M, M) -> M
+        let add2 = asm.here();
+        asm.mov(Long, Offset(A7, 4), Data(D0));
+        asm.add(Long, Offset(A7, 8), Data(D0));
+        asm.mov(Long, Data(D0), Offset(A7, 12));
+        asm.ret(8);
+
+        // main()
+        let main = asm.here();
+        asm.fixup(to_main, |asm| {
+            asm.jmp(EA::PCOffset((main - to_main - 2) as i16))
+        });
+
+        asm.mov(Long, Immediate(10), Data(D0));
+        let to_inc = inc as i32 - asm.here() as i32 - 2;
+        asm.branch_sub(to_inc);
+
+        asm.sub(Long, Immediate(4), Addr(A7)); // ret slot
+        asm.mov(Long, Immediate(4), PreDec(A7)); // lhs
+        asm.mov(Long, Data(D0), PreDec(A7)); // rhs
+        let to_add2 = add2 as i16 - asm.here() as i16 - 2;
+        asm.jsr(PCOffset(to_add2));
+        asm.halt();
+
+        let mut vm = init_vm(&asm);
+        vm.run();
+
+        assert_eq!(vm.stack(0), 15);
     }
 }
