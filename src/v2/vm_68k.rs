@@ -2,6 +2,19 @@ use super::ea::*;
 
 const ADDRESS_MASK: i32 = 0x7FFF_FFFF;
 
+// bit operations
+
+fn bit_set(it: isize, idx: usize, value: bool) -> isize {
+    if value {
+        it | 1 << idx
+    } else {
+        it & !(1 << idx)
+    }
+}
+fn bit_test<T: Into<isize>>(it: T, idx: usize) -> bool {
+    it.into() & (1 << idx) != 0
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EAView {
     Data(usize),
@@ -16,11 +29,20 @@ enum RunState {
     Halt,
 }
 
+enum StatusFlag {
+    Carry = 0,
+    Overflow = 1,
+    Zero = 2,
+    Negative = 3,
+    Extend = 4,
+}
+
 struct VM {
     memory: Vec<u8>,
     data: [i32; 8],
     addr: [i32; 8],
     pc: i32,
+    status: u16,
     run_state: RunState,
 }
 
@@ -31,6 +53,7 @@ impl VM {
             data: [0; 8],
             addr: [0; 8],
             pc: 0,
+            status: 0,
             run_state: RunState::Halt,
         }
     }
@@ -155,6 +178,46 @@ impl VM {
                 };
                 self.ea_apply(dest, src, size, |l, r| l + r);
             }
+            // CMP / CMPA / CMPM
+            (0b1011, _, _) => {
+                let reg_ay = (instr & 0b111) as usize;
+
+                let (size, src, dest) = match mode {
+                    0b000 => (Size::Byte, self.ea_read(Size::Byte), EAView::Data(reg)),
+                    0b001 => (Size::Short, self.ea_read(Size::Short), EAView::Data(reg)),
+                    0b010 => (Size::Long, self.ea_read(Size::Long), EAView::Data(reg)),
+                    0b011 => (Size::Short, self.ea_read(Size::Short), EAView::Addr(reg)),
+                    0b111 => (Size::Long, self.ea_read(Size::Long), EAView::Addr(reg)),
+                    0b100 => {
+                        self.pc += 2;
+                        let src = EAView::Memory(self.addr[reg]);
+                        self.addr[reg] += 1;
+                        let dest = EAView::Memory(self.addr[reg_ay]);
+                        self.addr[reg] += 1;
+                        (Size::Byte, src, dest)
+                    }
+                    0b101 => {
+                        self.pc += 2;
+                        let src = EAView::Memory(self.addr[reg]);
+                        self.addr[reg] += 2;
+                        let dest = EAView::Memory(self.addr[reg_ay]);
+                        self.addr[reg] += 2;
+                        (Size::Short, src, dest)
+                    }
+                    0b110 => {
+                        self.pc += 2;
+                        let src = EAView::Memory(self.addr[reg]);
+                        self.addr[reg] += 4;
+                        let dest = EAView::Memory(self.addr[reg_ay]);
+                        self.addr[reg] += 4;
+                        (Size::Long, src, dest)
+                    }
+                    _ => unreachable!(),
+                };
+                let left = self.ea_src(dest, size);
+                let right = self.ea_src(src, size);
+                self.set_status_cond(left - right);
+            }
             // shifts
             (0b1110, _, _) => {
                 let dest = EAView::Data(instr as usize & 0b111);
@@ -183,6 +246,10 @@ impl VM {
             // BRA, BSR, Bcc
             (0b0110, _, _) => {
                 let cond = (instr & 0x0F00) >> 8;
+                if cond == 1 {
+                    todo!("BSR")
+                }
+
                 let disp_8 = i8::from_be_bytes([instr.to_be_bytes()[1]]);
                 self.pc += 2;
 
@@ -193,15 +260,44 @@ impl VM {
                 } else {
                     (self.pc + disp_8 as i32, self.pc)
                 };
-
-                self.pc = match cond {
-                    0b0000 => if_true,
-                    _ => unimplemented!(),
+                if self.check_cond(Cond::from(cond)) {
+                    self.pc = if_true
+                } else {
+                    self.pc = if_false
                 }
             }
             _ => unimplemented!(),
         }
     }
+    fn check_cond(&self, cond: Cond) -> bool {
+        use Cond::*;
+        let c = self.status & 1 != 0;
+        let v = self.status & 2 != 0;
+        let z = self.status & 4 != 0;
+        let n = self.status & 8 != 0;
+        match cond {
+            True => true,
+            False => false,
+            High => !c && !z,
+            LowSame => c || z,
+
+            CarryClear => !c,
+            CarrySet => c,
+            NotEqual => !z,
+            Equal => z,
+
+            OverflowClear => !v,
+            OverflowSet => v,
+            Plus => !n,
+            Minus => n,
+
+            GreaterEqual => (n && v) || (!n && !v),
+            Less => (n && !v) || (!n && v),
+            Greater => (n && v && !z) || (!n && !v && !z),
+            LessEqual => z || (n && !v) || (!n && v),
+        }
+    }
+
     // big endian
     fn mem_i32(&self, idx: i32) -> i32 {
         let i = (idx & ADDRESS_MASK) as usize;
@@ -224,6 +320,13 @@ impl VM {
     }
     fn mem_u8(&self, idx: i32) -> u8 {
         self.memory[(idx & ADDRESS_MASK) as usize]
+    }
+    fn set_status_cond(&mut self, value: i32) {
+        // zero
+        self.status = bit_set(self.status as isize, 2, value == 0) as u16;
+        // negative
+        self.status = bit_set(self.status as isize, 3, value == 0) as u16;
+        // TODO: carry, overflow flags
     }
     fn ea_src(&self, src: EAView, size: Size) -> i32 {
         match src {
@@ -400,6 +503,31 @@ enum Cond {
     Less,
     Greater,
     LessEqual = 0xF,
+}
+
+impl From<u16> for Cond {
+    fn from(value: u16) -> Self {
+        use Cond::*;
+        match value {
+            0 => True,
+            1 => False,
+            2 => High,
+            3 => LowSame,
+            4 => CarryClear,
+            5 => CarrySet,
+            6 => NotEqual,
+            7 => Equal,
+            8 => OverflowClear,
+            9 => OverflowSet,
+            10 => Plus,
+            11 => Minus,
+            12 => GreaterEqual,
+            13 => Less,
+            14 => Greater,
+            15 => LessEqual,
+            _ => unreachable!(),
+        }
+    }
 }
 
 struct Asm {
@@ -599,6 +727,49 @@ impl Asm {
                 };
                 self.tag4_reg3_mode3_ea(0b0100, d as u16, mode);
                 self.push_ea(size, src);
+            }
+            _ => unimplemented!(),
+        }
+    }
+    pub fn cmp(&mut self, size: Size, src: EA, dest: EA) {
+        match (src, dest) {
+            (src, EA::Data(d)) => {
+                let mode = match size {
+                    Size::Byte => 0b000,
+                    Size::Short => 0b001,
+                    Size::Long => 0b010,
+                };
+                self.tag4_reg3_mode3_ea(0b1011, d as u16, mode);
+                self.push_ea(size, src);
+            }
+            (src, EA::Addr(a)) => {
+                let mode = match size {
+                    Size::Byte => unimplemented!(),
+                    Size::Short => 0b011,
+                    Size::Long => 0b111,
+                };
+                self.tag4_reg3_mode3_ea(0b1011, a as u16, mode);
+                self.push_ea(size, src);
+            }
+            (EA::Immediate(value), dest) => {
+                let mode = match size {
+                    Size::Byte => 0b000,
+                    Size::Short => 0b001,
+                    Size::Long => 0b010,
+                };
+                self.tag4_reg3_mode3_ea(0, 0b110, mode);
+                self.push_ea(size, dest);
+                self.push_immediate(size, value);
+            }
+            (EA::PostInc(src), EA::PostInc(dest)) => {
+                let mode = match size {
+                    Size::Byte => 0b100,
+                    Size::Short => 0b101,
+                    Size::Long => 0b110,
+                };
+                self.tag4_reg3_mode3_ea(0b1011, dest as u16, mode);
+                let byte = self.out.pop().unwrap();
+                self.out.push(byte + 0b1000 + src as u8);
             }
             _ => unimplemented!(),
         }
@@ -820,6 +991,28 @@ mod test {
         let mut vm = init_vm(&asm);
         vm.run();
         assert_eq!(vm.data[0], 1);
+    }
+
+    #[test]
+    fn branch_conditional() {
+        let mut asm = Asm::new();
+
+        asm.mov(Long, Immediate(1), Data(D0));
+        asm.cmp(Long, Immediate(3), Data(D0));
+
+        let branch_before = asm.here();
+        asm.branch(Cond::Equal, 1);
+        asm.mov(Long, Immediate(2), Data(D0));
+        let branch_dest = asm.here();
+        asm.halt();
+        asm.fixup(branch_before, |asm| {
+            let disp = branch_dest - branch_before - 2;
+            asm.branch(Cond::Equal, disp as i32);
+        });
+
+        let mut vm = init_vm(&asm);
+        vm.run();
+        assert_eq!(vm.data[0], 2);
     }
 
     #[test]
