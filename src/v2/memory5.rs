@@ -1,6 +1,6 @@
 use crate::v2::ea::*;
 use crate::v2::register::*;
-use crate::v2::vm_68k::{Asm, Cond};
+use crate::v2::vm_68k::Asm;
 
 // This time we'll really use flags for everything
 
@@ -41,7 +41,7 @@ impl Ty {
         let mut offset = 0;
         let mut out = Vec::new();
         while offset < bytes {
-            let take = usize::max(bytes - offset, 4);
+            let take = usize::min(bytes - offset, 4);
             let size = match take {
                 4 => Size::Long,
                 _ => todo!(),
@@ -127,6 +127,12 @@ impl Item {
                 Self::Storage(storage.deref(memory, storage.ty().deref(), 0, true))
             }
             Self::LValue(lvalue) => Self::LValue(lvalue.deref()),
+        }
+    }
+    fn field(&self, memory: &mut Memory, field: Field) -> Item {
+        match self {
+            Self::Storage(storage) => Self::Storage(storage.field(field)),
+            Self::LValue(lvalue) => Self::LValue(lvalue.field(field)),
         }
     }
 }
@@ -330,6 +336,26 @@ impl LValue {
             memory.asm.mov(size, src, dest)
         }
     }
+    fn field(&self, field: Field) -> Self {
+        let mut next = self.clone();
+        next.ty = field.ty;
+        match (next.field, next.deref_offsets.len()) {
+            (None, 0) => {
+                next.field = Some(field);
+            }
+            (Some(prev), 0) => {
+                next.field = Some(Field {
+                    ty: field.ty,
+                    offset: prev.offset + field.offset,
+                })
+            }
+            _ => {
+                let last_deref = next.deref_offsets.pop().unwrap();
+                next.deref_offsets.push(last_deref + field.offset);
+            }
+        };
+        next
+    }
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,6 +392,17 @@ impl Memory {
         let original = self.locals[id];
         self.stack
             .push(Item::LValue(LValue::new(id, original.ty())));
+    }
+
+    pub fn push_struct(&mut self, ty: Ty) {
+        self.stack_offset += ty.size_bytes();
+        self.asm.sub(
+            Size::Long,
+            EA::Immediate(ty.size_bytes() as i32),
+            EA::Addr(Addr::A7),
+        );
+        self.stack
+            .push(Item::Storage(Storage::Stack(ty, self.stack_offset)));
     }
 
     pub fn local(&mut self) -> LocalId {
@@ -446,6 +483,12 @@ impl Memory {
         let src = rvalue.storage_original(self);
         lvalue.assign(self, src);
         src.free_transient(self);
+    }
+
+    pub fn field(&mut self, field: Field) {
+        let item = self.pop_item();
+        let res = item.field(self, field);
+        self.stack.push(res)
     }
 
     pub fn assert_eq(&mut self) {
@@ -574,11 +617,6 @@ mod test {
         m.push_i32(456);
         m.assert_eq();
 
-        m.push_ident(a_stack_ptr);
-        m.deref();
-        m.push_i32(456);
-        m.assert_eq();
-
         run_vm(m.end());
     }
 
@@ -592,5 +630,108 @@ mod test {
 
         m.push_ident(a);
         m.pointer();
+    }
+
+    #[test]
+    fn records() {
+        let point = Ty {
+            base_size: 8,
+            ref_level: 0,
+        };
+        let x_field = Field {
+            ty: Ty::i32(),
+            offset: 0,
+        };
+        let y_field = Field {
+            ty: Ty::i32(),
+            offset: 4,
+        };
+
+        let mut m = Memory::new();
+
+        m.push_struct(point);
+        let p = m.local();
+
+        m.push_ident(p);
+        m.field(x_field);
+        m.push_i32(123);
+        m.assign();
+
+        m.push_ident(p);
+        m.field(y_field);
+        m.push_i32(456);
+        m.assign();
+
+        m.push_ident(p);
+        m.field(x_field);
+        m.push_i32(123);
+        m.assert_eq();
+
+        m.push_ident(p);
+        m.field(y_field);
+        m.push_i32(456);
+        m.assert_eq();
+
+        m.push_struct(point);
+        let p2 = m.local();
+
+        m.push_ident(p2);
+        m.push_ident(p);
+        m.assign();
+
+        m.push_ident(p);
+        m.field(x_field);
+        m.push_i32(789);
+        m.assign();
+
+        m.push_ident(p2);
+        m.field(x_field);
+        m.push_i32(123);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    fn record_pointers() {
+        let point = Ty {
+            base_size: 8,
+            ref_level: 0,
+        };
+        let x_field = Field {
+            ty: Ty::i32(),
+            offset: 0,
+        };
+
+        let mut m = Memory::new();
+        m.push_struct(point);
+        let p = m.local();
+
+        m.push_ident(p);
+        m.pointer();
+        let ptr_p = m.local();
+
+        m.push_ident(p);
+        m.field(x_field);
+        m.pointer();
+        let ptr_p_x = m.local();
+
+        m.push_ident(p);
+        m.field(x_field);
+        m.push_i32(123);
+        m.assign();
+
+        m.push_ident(ptr_p);
+        m.deref();
+        m.field(x_field);
+        m.push_i32(123);
+        m.assert_eq();
+
+        m.push_ident(ptr_p_x);
+        m.deref();
+        m.push_i32(123);
+        m.assert_eq();
+
+        run_vm(m.end());
     }
 }
