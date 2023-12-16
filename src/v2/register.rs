@@ -1,8 +1,9 @@
 use std::marker::PhantomData;
 use std::ops::RangeInclusive;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Data {
+    #[default]
     D0 = 0,
     D1,
     D2,
@@ -36,8 +37,9 @@ impl From<Data> for usize {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Addr {
+    #[default]
     A0 = 0,
     A1,
     A2,
@@ -74,20 +76,22 @@ impl From<Addr> for usize {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum RegisterUse {
     Free,
+    #[default]
     NeverUsed,
     LastUsed(usize),
 }
 
-struct RegisterAllocator<R> {
+#[derive(Debug, Default)]
+pub struct RegisterAllocator<R> {
     rs: [RegisterUse; 8],
     counter: usize,
     phantom: PhantomData<R>,
 }
 
-struct Response<R> {
+pub struct Response<R> {
     pub register: R,
     pub spilled: bool,
 }

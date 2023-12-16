@@ -37,7 +37,7 @@ enum StatusFlag {
     Extend = 4,
 }
 
-struct VM {
+pub struct VM {
     memory: Vec<u8>,
     data: [i32; 8],
     addr: [i32; 8],
@@ -47,7 +47,7 @@ struct VM {
 }
 
 impl VM {
-    fn new(size: usize) -> Self {
+    pub fn new(size: usize) -> Self {
         Self {
             memory: vec![0; size],
             data: [0; 8],
@@ -57,17 +57,17 @@ impl VM {
             run_state: RunState::Halt,
         }
     }
-    fn load_memory(&mut self, offset: usize, memory: &[u8]) {
+    pub fn load_memory(&mut self, offset: usize, memory: &[u8]) {
         for (i, byte) in memory.iter().enumerate() {
             self.memory[offset + i] = *byte
         }
     }
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.addr[7] = self.mem_i32(0);
         self.pc = self.mem_i32(4);
         self.run_state = RunState::Halt;
     }
-    fn run(&mut self) {
+    pub fn run(&mut self) {
         self.run_state = RunState::Ready;
         while self.run_state == RunState::Ready {
             self.run_1();
@@ -132,10 +132,16 @@ impl VM {
                 self.pc += 2;
                 let lo6 = instr & 0b111111;
                 match lo6 {
+                    // TODO: "in-universe" traps
+                    // TRAP #0 : halt
                     0 => {
-                        // TRAP #0
-                        // TODO: "in-universe" halt
                         self.run_state = RunState::Halt;
+                    }
+                    // TRAP #1 : assert_eq
+                    1 => {
+                        let right = self.pop_stack();
+                        let left = self.pop_stack();
+                        assert_eq!(left, right);
                     }
                     0b110101 => {
                         let ret = self.pop_stack();
@@ -678,7 +684,7 @@ fn quick_zero(word: i32) -> Option<Quick> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Cond {
+pub enum Cond {
     True = 0x0,
     False,
     High,
@@ -725,13 +731,14 @@ impl From<u16> for Cond {
     }
 }
 
-struct Asm {
-    out: Vec<u8>,
+#[derive(Debug, Default)]
+pub struct Asm {
+    pub out: Vec<u8>,
 }
 
 impl Asm {
     pub fn new() -> Self {
-        Self { out: Vec::new() }
+        Self::default()
     }
     pub fn add(&mut self, size: Size, src: EA, dest: EA) {
         match (src, dest) {
@@ -1052,6 +1059,10 @@ impl Asm {
         // TRAP #0
         self.push_u16(0b0100_1110_0100_0000);
     }
+    pub fn assert_eq(&mut self) {
+        // TRAP #1
+        self.push_u16(0b0100_1110_0100_0001);
+    }
     // todo BSET, BCHG, BCLR, BTST
     pub fn data(&mut self, data: &[u8]) {
         for byte in data {
@@ -1211,46 +1222,6 @@ mod test {
             }
             _ => unimplemented!(),
         }
-    }
-
-    #[test]
-    fn smoke_test() {
-        let mut asm = Asm::new();
-        asm.mov(Long, Immediate(10), Data(D0));
-        asm.mov(Long, Immediate(20), Data(D1));
-        asm.add(Long, Data(D0), Data(D1));
-        asm.halt();
-
-        asm.mov(Long, Immediate(30), Data(D0));
-        asm.mov(Long, Immediate(10), Addr(A0));
-        asm.add(Long, Data(D0), Addr(A0));
-        asm.halt();
-
-        asm.mov(Long, Immediate(10), PreDec(A7));
-        asm.add(Long, Immediate(5), Offset(A7, 0));
-        asm.halt();
-
-        asm.mov(Long, Immediate(10), Offset(A7, 0));
-        asm.mov(Long, Immediate(20), Data(D2));
-        asm.add(Long, PostInc(A7), Data(D2));
-        asm.halt();
-
-        asm.mov(Long, Immediate(10), PreDec(A7));
-        asm.mov(Long, Immediate(0), PreDec(A7));
-        asm.add(Long, Immediate(20), Offset(A7, 4));
-        asm.halt();
-
-        let mut vm = init_vm(&asm);
-        vm.run();
-        assert_eq!(vm.data[1], 30);
-        vm.run();
-        assert_eq!(vm.addr[0], 40);
-        vm.run();
-        assert_eq!(vm.mem_i32(vm.addr[7]), 15);
-        vm.run();
-        assert_eq!(vm.data[2], 30);
-        vm.run();
-        assert_eq!(vm.mem_i32(vm.addr[7] + 4), 30);
     }
 
     #[test]
@@ -1446,12 +1417,28 @@ mod test {
     }
 
     #[test]
+    fn add() {
+        let cases = vec![
+            (T::Immediate(5), T::Data(10), 15),
+            (T::Immediate(20), T::Data(10), 30),
+            (T::Data(5), T::Data(10), 15),
+            (T::Memory(5), T::Addr(10), 15),
+            (T::Memory(10), T::Data(20), 30),
+            (T::Data(10), T::Memory(20), 30),
+        ];
+
+        for (src, dest, expected) in cases {
+            test_case(Asm::add, Size::Long, src, dest, expected)
+        }
+    }
+
+    #[test]
     fn sub() {
         let cases = vec![
             (T::Immediate(5), T::Data(10), 5),
             (T::Immediate(20), T::Data(10), -10),
             (T::Data(5), T::Data(10), 5),
-            (T::Data(5), T::Addr(10), 5),
+            (T::Memory(5), T::Addr(10), 5),
             (T::Memory(10), T::Data(20), 10),
             (T::Data(10), T::Memory(20), 10),
         ];
@@ -1561,11 +1548,13 @@ mod test {
         asm.mov(Long, Data(D0), PreDec(A7)); // rhs
         let to_add2 = add2 as i16 - asm.here() as i16 - 2;
         asm.jsr(PCOffset(to_add2));
+
+        asm.mov(Long, Offset(A7, 0), PreDec(A7));
+        asm.mov(Long, Immediate(15), PreDec(A7));
+        asm.assert_eq();
+
         asm.halt();
 
-        let mut vm = init_vm(&asm);
-        vm.run();
-
-        assert_eq!(vm.stack(0), 15);
+        init_vm(&asm).run();
     }
 }

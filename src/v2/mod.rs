@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 mod ea;
 mod memory4;
+mod memory5;
 mod register;
 mod ty;
 mod vm;
