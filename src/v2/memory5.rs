@@ -25,7 +25,7 @@ impl Ty {
         }
     }
     fn storage_type(&self) -> StorageType {
-        if self.ref_level > 1 {
+        if self.ref_level >= 1 {
             StorageType::Addr
         } else {
             match self.base_size {
@@ -50,6 +50,19 @@ impl Ty {
             offset += take;
         }
         out
+    }
+    fn pointer(&self) -> Ty {
+        Self {
+            base_size: self.base_size,
+            ref_level: self.ref_level + 1,
+        }
+    }
+    fn deref(&self) -> Ty {
+        assert!(self.ref_level > 0);
+        Self {
+            base_size: self.base_size,
+            ref_level: self.ref_level - 1,
+        }
     }
 }
 
@@ -100,6 +113,20 @@ impl Item {
         match self {
             Self::Storage(storage) => storage.free_transient(memory),
             Self::LValue(_) => {}
+        }
+    }
+    fn pointer(&self, memory: &mut Memory) -> Item {
+        match self {
+            Self::Storage(storage) => Self::Storage(storage.pointer(memory)),
+            Self::LValue(lvalue) => Self::Storage(lvalue.storage_src(memory).pointer(memory)),
+        }
+    }
+    fn deref(&self, memory: &mut Memory) -> Item {
+        match self {
+            Self::Storage(storage) => {
+                Self::Storage(storage.deref(memory, storage.ty().deref(), 0, true))
+            }
+            Self::LValue(lvalue) => Self::LValue(lvalue.deref()),
         }
     }
 }
@@ -182,6 +209,59 @@ impl Storage {
             _ => {}
         }
     }
+    fn pointer(&self, memory: &mut Memory) -> Self {
+        match self {
+            Self::StackArg(_, _) | Self::Stack(_, _) => {
+                let r = memory.get_addr_register();
+                let src = self.ea(memory, 0);
+                memory.asm.load_ea(src, EA::Addr(r));
+                Self::Addr(self.ty().pointer(), r)
+            }
+            _ => unimplemented!(),
+        }
+    }
+    fn deref(&self, memory: &mut Memory, deref_ty: Ty, offset: usize, consume_addr: bool) -> Self {
+        match *self {
+            Self::Addr(_, a) => match deref_ty.storage_type() {
+                StorageType::Data(size) => {
+                    let src = EA::Offset(a, 0);
+                    let r = memory.get_data_register();
+                    memory.asm.mov(size, src, EA::Data(r));
+                    if consume_addr {
+                        memory.addr.free(a);
+                    }
+                    Self::Data(deref_ty, r)
+                }
+                StorageType::Addr => {
+                    let src = EA::Offset(a, offset as i16);
+                    let r = if consume_addr {
+                        a
+                    } else {
+                        memory.get_addr_register()
+                    };
+                    memory.asm.mov(Size::Long, src, EA::Addr(r));
+                    Self::Addr(deref_ty, r)
+                }
+                StorageType::Stack(_) => {
+                    for (size, o) in deref_ty.iter_blocks().into_iter().rev() {
+                        let src = EA::Offset(a, (o + offset) as i16);
+                        memory.asm.mov(size, src, EA::PreDec(Addr::A7))
+                    }
+                    if consume_addr {
+                        memory.addr.free(a);
+                    }
+                    memory.stack_offset += deref_ty.size_bytes();
+                    Storage::Stack(deref_ty, memory.stack_offset)
+                }
+            },
+            _ => {
+                let src = self.ea(memory, 0);
+                let r = memory.get_addr_register();
+                memory.asm.mov(Size::Long, src, EA::Addr(r));
+                Storage::Addr(self.ty(), r).deref(memory, deref_ty, offset, consume_addr)
+            }
+        }
+    }
 }
 
 type LocalId = usize;
@@ -210,27 +290,52 @@ impl LValue {
         }
     }
     fn storage_src(&self, memory: &mut Memory) -> Storage {
-        let storage = memory.locals[self.base];
-        let storage = if let Some(field) = self.field {
-            storage.field(field)
-        } else {
-            storage
-        };
-        if self.deref_offsets.len() > 0 {
-            todo!("derefs")
+        let mut storage = memory.locals[self.base];
+        if let Some(field) = self.field {
+            storage = storage.field(field)
+        }
+        match (storage, self.deref_offsets.len()) {
+            (_, 0) => {}
+            (Storage::Addr(_, r), 1) => {
+                memory.addr.mark(r);
+                storage = storage.deref(memory, storage.ty().deref(), self.deref_offsets[0], false)
+            }
+            _ => {
+                let r = memory.get_addr_register();
+                let src = storage.ea(memory, 0);
+                memory.asm.mov(Size::Long, src, EA::Addr(r));
+                for offset in self.deref_offsets.iter() {
+                    storage = Storage::Addr(storage.ty(), r).deref(
+                        memory,
+                        storage.ty().deref(),
+                        *offset,
+                        true,
+                    );
+                }
+            }
         }
         storage
+    }
+    fn deref(&self) -> LValue {
+        let mut next = self.clone();
+        next.deref_offsets.push(0);
+        next.ty = next.ty.deref();
+        next
+    }
+    fn assign(&self, memory: &mut Memory, src_storage: Storage) {
+        let dest_storage = self.storage_src(memory);
+        for (size, offset) in self.ty.iter_blocks() {
+            let src = src_storage.ea(memory, offset);
+            let dest = dest_storage.ea(memory, offset);
+            memory.asm.mov(size, src, dest)
+        }
     }
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 struct Flags {}
 
-impl Flags {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
+impl Flags {}
 
 #[derive(Debug, Default)]
 struct Memory {
@@ -320,12 +425,36 @@ impl Memory {
         self.stack.push(Item::Storage(dest_storage));
     }
 
+    pub fn pointer(&mut self) {
+        let item = self.pop_item();
+        let next = item.pointer(self);
+        self.stack.push(next);
+    }
+
+    pub fn deref(&mut self) {
+        let item = self.pop_item();
+        let next = item.deref(self);
+        self.stack.push(next);
+    }
+
+    pub fn assign(&mut self) {
+        let rvalue = self.pop_item();
+        let lvalue = match self.pop_item() {
+            Item::LValue(l) => l,
+            _ => unimplemented!(),
+        };
+        let src = rvalue.storage_original(self);
+        lvalue.assign(self, src);
+        src.free_transient(self);
+    }
+
     pub fn assert_eq(&mut self) {
         let r = self.pop_item();
         let r = r.storage_stack(self);
         let l = self.pop_item();
         let l = l.storage_stack(self);
         self.asm.assert_eq();
+        self.stack_offset -= 8;
         r.free_transient(self);
         l.free_transient(self);
     }
@@ -387,5 +516,81 @@ mod test {
         m.assert_eq();
 
         run_vm(m.end());
+    }
+
+    #[test]
+    fn assign() {
+        let mut m = Memory::new();
+
+        m.push_i32(123);
+        let a = m.local();
+
+        m.push_ident(a);
+        m.push_i32(456);
+        m.assign();
+
+        m.push_ident(a);
+        m.push_i32(456);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    #[should_panic]
+    fn assign_rvalue() {
+        let mut m = Memory::new();
+        m.push_i32(10);
+        m.push_i32(20);
+        m.assign();
+    }
+
+    #[test]
+    fn pointers() {
+        let mut m = Memory::new();
+
+        m.push_i32(123);
+        let a = m.local_stack();
+
+        m.push_ident(a);
+        m.pointer();
+        let a_ptr = m.local();
+
+        m.push_ident(a);
+        m.pointer();
+        let a_stack_ptr = m.local_stack();
+
+        m.push_ident(a);
+        m.push_i32(456);
+        m.assign();
+
+        m.push_ident(a_ptr);
+        m.deref();
+        m.push_i32(456);
+        m.assert_eq();
+
+        m.push_ident(a_stack_ptr);
+        m.deref();
+        m.push_i32(456);
+        m.assert_eq();
+
+        m.push_ident(a_stack_ptr);
+        m.deref();
+        m.push_i32(456);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    #[should_panic]
+    fn pointer_register() {
+        let mut m = Memory::new();
+
+        m.push_i32(123);
+        let a = m.local();
+
+        m.push_ident(a);
+        m.pointer();
     }
 }

@@ -117,16 +117,6 @@ impl VM {
                 let dest = self.ea_read_inner(Size::Long, mode, reg);
                 self.ea_apply(dest, src, Size::Long, |_, r| r);
             }
-            // NEG
-            (0b0100, 0b010, _) => {
-                let (size, dest) = self.mode_read_0(mode);
-                self.ea_apply_1(dest, size, |x| -x);
-            }
-            // NOT
-            (0b0100, 0b011, _) => {
-                let (size, dest) = self.mode_read_0(mode);
-                self.ea_apply_1(dest, size, |x| !x);
-            }
             // RTS/RTD/TRAP
             (0b0100, 0b111, 0b001) => {
                 self.pc += 2;
@@ -139,8 +129,8 @@ impl VM {
                     }
                     // TRAP #1 : assert_eq
                     1 => {
-                        let right = self.pop_stack();
                         let left = self.pop_stack();
+                        let right = self.pop_stack();
                         assert_eq!(left, right);
                     }
                     0b110101 => {
@@ -174,6 +164,14 @@ impl VM {
                 };
                 self.pc = addr;
             }
+            // PEA
+            (0b0100, 0b100, 0b001) => {
+                let addr = match self.ea_read(Size::Long) {
+                    EAView::Memory(addr) => addr,
+                    _ => unimplemented!(),
+                };
+                self.push_stack(addr);
+            }
             // LEA
             (0b0100, _, 0b111) => {
                 let addr = match self.ea_read(Size::Long) {
@@ -183,13 +181,15 @@ impl VM {
                 let dest = EAView::Addr(reg);
                 self.ea_apply(dest, EAView::Immediate(addr), Size::Long, |_, x| x);
             }
-            // PEA
-            (0b0100, 0b100, 0b001) => {
-                let addr = match self.ea_read(Size::Long) {
-                    EAView::Memory(addr) => addr,
-                    _ => unimplemented!(),
-                };
-                self.push_stack(addr);
+            // NEG
+            (0b0100, 0b010, _) => {
+                let (size, dest) = self.mode_read_0(mode);
+                self.ea_apply_1(dest, size, |x| -x);
+            }
+            // NOT
+            (0b0100, 0b011, _) => {
+                let (size, dest) = self.mode_read_0(mode);
+                self.ea_apply_1(dest, size, |x| !x);
             }
             // CHK
             (0b0100, _, _) => {
