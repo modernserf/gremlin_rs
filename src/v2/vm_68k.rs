@@ -1113,14 +1113,31 @@ impl Asm {
         self.push_u16(0b0100_1110_0100_0001);
     }
     // todo BSET, BCHG, BCLR, BTST
-    pub fn data(&mut self, data: &[u8]) {
+    pub fn data(&mut self, data: &[u8]) -> usize {
+        let here = self.here();
         for byte in data {
             self.out.push(*byte);
         }
         if (self.here() & 1) == 1 {
             self.out.push(0);
         }
+        here
     }
+    pub fn data_16(&mut self, data: &[i16]) -> usize {
+        let here = self.here();
+        for d in data {
+            self.out.extend(d.to_be_bytes())
+        }
+        here
+    }
+    pub fn data_32(&mut self, data: &[i32]) -> usize {
+        let here = self.here();
+        for d in data {
+            self.out.extend(d.to_be_bytes());
+        }
+        here
+    }
+
     pub fn here(&self) -> usize {
         self.out.len() + self.base_offset
     }
@@ -1135,6 +1152,7 @@ impl Asm {
         let cond = Cond::from(self.out[at - self.base_offset] as u16 & 0x0F);
         let here = self.here();
         self.fixup(at, |asm| {
+            // TODO: check that placeholder displacement slot can fit this value
             asm.branch(cond, Branch::Line(here));
         });
     }

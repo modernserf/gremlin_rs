@@ -364,6 +364,87 @@ impl LValue {
 type IfIdx = usize;
 type LoopIdx = usize;
 
+#[derive(Debug)]
+struct MatchBuilder {
+    jmp_base_idx: usize,
+    checked_cases: Vec<bool>,
+    case_ends: Vec<usize>,
+}
+
+impl MatchBuilder {
+    pub fn init(memory: &mut Memory, d: Data, case_count: usize) -> Self {
+        // ensure index is in range (TODO: disable with flag)
+        memory
+            .asm
+            .chk(Size::Long, EA::Immediate(case_count as i32), EA::Data(d));
+        // get displacement from jump table
+        memory.asm.asl(Size::Long, EA::Immediate(1), EA::Data(d));
+        memory.asm.mov(
+            Size::Short,
+            EA::PCIdxData(d, PC::Displacement(6)),
+            EA::Data(d),
+        );
+        // jump to dest
+        memory.asm.jmp(EA::PCIdxData(d, PC::Displacement(0)));
+        memory.data.free(d);
+        // make space for jump table
+        let jmp_idx = memory.asm.data_16(&vec![0; case_count]);
+        Self {
+            jmp_base_idx: jmp_idx,
+            case_ends: Vec::new(),
+            checked_cases: vec![false; case_count],
+        }
+    }
+    pub fn case(&mut self, memory: &mut Memory, case: usize) {
+        let idx = self.take_case_idx(case);
+        let offset = self.current_offset(memory);
+        memory.asm.fixup(idx, |asm| {
+            asm.data_16(&[offset]);
+        });
+    }
+    pub fn default_case(&mut self, memory: &mut Memory) {
+        let mut cases_to_patch = Vec::new();
+        for i in 0..self.checked_cases.len() {
+            if !self.checked_cases[i] {
+                cases_to_patch.push(self.take_case_idx(i));
+            }
+        }
+        let offset = self.current_offset(memory);
+        for idx in cases_to_patch {
+            memory.asm.fixup(idx, |asm| {
+                asm.data_16(&[offset]);
+            });
+        }
+    }
+    pub fn case_end(&mut self, memory: &mut Memory) {
+        let end_idx = memory
+            .asm
+            .branch(Cond::True, Branch::Placeholder(Size::Short));
+        self.case_ends.push(end_idx);
+    }
+    pub fn end(self, memory: &mut Memory) {
+        for checked in self.checked_cases.iter() {
+            if !checked {
+                panic!("not all cases checked")
+            }
+        }
+        for case_end in self.case_ends {
+            memory.asm.fixup_branch_to_here(case_end);
+        }
+    }
+
+    fn take_case_idx(&mut self, case: usize) -> usize {
+        if self.checked_cases[case] {
+            panic!("duplicate case")
+        }
+        self.checked_cases[case] = true;
+        self.jmp_base_idx + case * 2
+    }
+    fn current_offset(&mut self, memory: &mut Memory) -> i16 {
+        (memory.asm.here() - self.jmp_base_idx + 2) as i16
+    }
+}
+
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 struct Flags {}
 
@@ -509,6 +590,37 @@ impl Memory {
     pub fn loop_end(&mut self, cond: Cond, loop_idx: LoopIdx) {
         self.cmp2();
         self.asm.branch(cond, Branch::Line(loop_idx + 4));
+    }
+
+    pub fn match_begin(&mut self, case_count: usize) -> MatchBuilder {
+        // TODO: matches with few cases should be if-else chain instead of jump table
+
+        let item = self.pop_item();
+        // load index into data register
+        let d = match item.storage_register(self) {
+            Storage::Data(_, d) => d,
+            _ => unimplemented!(),
+        };
+        MatchBuilder::init(self, d, case_count)
+    }
+    pub fn match_case(&mut self, builder: &mut MatchBuilder, case: usize) {
+        builder.case(self, case);
+        self.scope_begin();
+    }
+    pub fn match_default_case(&mut self, builder: &mut MatchBuilder) {
+        builder.default_case(self);
+        self.scope_begin();
+    }
+    pub fn match_case_end(&mut self, builder: &mut MatchBuilder) {
+        self.scope_end();
+        builder.case_end(self);
+    }
+    pub fn match_end(&mut self, builder: MatchBuilder) {
+        builder.end(self);
+    }
+    pub fn match_default_end(&mut self, mut builder: MatchBuilder) {
+        builder.default_case(self);
+        builder.end(self);
     }
 
     pub fn pointer(&mut self) {
@@ -854,7 +966,6 @@ mod test {
 
         let loop_idx = m.loop_begin();
 
-        // TODO: +=
         m.push_ident(sum);
         m.push_ident(i);
         m.add_assign();
@@ -871,6 +982,225 @@ mod test {
 
         m.push_ident(sum);
         m.push_i32(10);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    fn match_case() {
+        let mut m = Memory::new();
+
+        m.push_i32(2);
+        let case = m.local();
+        m.push_i32(0);
+        let result = m.local();
+
+        m.push_ident(case);
+        let mut b = m.match_begin(4);
+
+        m.match_case(&mut b, 0);
+        m.push_ident(result);
+        m.push_i32(10);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_case(&mut b, 2);
+        m.push_ident(result);
+        m.push_i32(20);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_default_case(&mut b);
+        m.push_ident(result);
+        m.push_i32(30);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_end(b);
+
+        m.push_ident(result);
+        m.push_i32(20);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    fn match_default_case() {
+        let mut m = Memory::new();
+
+        m.push_i32(1);
+        let case = m.local();
+        m.push_i32(0);
+        let result = m.local();
+
+        m.push_ident(case);
+        let mut b = m.match_begin(4);
+
+        m.match_case(&mut b, 0);
+        m.push_ident(result);
+        m.push_i32(10);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_case(&mut b, 2);
+        m.push_ident(result);
+        m.push_i32(20);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_default_case(&mut b);
+        m.push_ident(result);
+        m.push_i32(30);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_end(b);
+
+        m.push_ident(result);
+        m.push_i32(30);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    fn match_default_case_empty() {
+        let mut m = Memory::new();
+
+        m.push_i32(1);
+        let case = m.local();
+        m.push_i32(1);
+        let result = m.local();
+
+        m.push_ident(case);
+        let mut b = m.match_begin(4);
+
+        m.match_case(&mut b, 0);
+        m.push_ident(result);
+        m.push_i32(10);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_case(&mut b, 2);
+        m.push_ident(result);
+        m.push_i32(20);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_default_end(b);
+
+        m.push_ident(result);
+        m.push_i32(1);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    #[should_panic]
+    fn missing_case() {
+        let mut m = Memory::new();
+
+        m.push_i32(1);
+        let case = m.local();
+        m.push_i32(0);
+        let result = m.local();
+
+        m.push_ident(case);
+        let mut b = m.match_begin(4);
+
+        m.match_case(&mut b, 0);
+        m.push_ident(result);
+        m.push_i32(10);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_case(&mut b, 2);
+        m.push_ident(result);
+        m.push_i32(20);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_end(b);
+    }
+
+    #[test]
+    #[should_panic]
+    fn duplicate_case() {
+        let mut m = Memory::new();
+
+        m.push_i32(1);
+        let case = m.local();
+        m.push_i32(0);
+        let result = m.local();
+
+        m.push_ident(case);
+        let mut b = m.match_begin(4);
+
+        m.match_case(&mut b, 0);
+        m.push_ident(result);
+        m.push_i32(10);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_case(&mut b, 2);
+        m.push_ident(result);
+        m.push_i32(20);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_case(&mut b, 2);
+        m.push_ident(result);
+        m.push_i32(20);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_default_case(&mut b);
+        m.push_ident(result);
+        m.push_i32(30);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_end(b);
+    }
+
+    #[test]
+    #[should_panic]
+    fn case_index_out_of_range() {
+        let mut m = Memory::new();
+
+        m.push_i32(10);
+        let case = m.local();
+        m.push_i32(0);
+        let result = m.local();
+
+        m.push_ident(case);
+        let mut b = m.match_begin(4);
+
+        m.match_case(&mut b, 0);
+        m.push_ident(result);
+        m.push_i32(10);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_case(&mut b, 2);
+        m.push_ident(result);
+        m.push_i32(20);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_default_case(&mut b);
+        m.push_ident(result);
+        m.push_i32(30);
+        m.assign();
+        m.match_case_end(&mut b);
+
+        m.match_end(b);
+
+        m.push_ident(result);
+        m.push_i32(20);
         m.assert_eq();
 
         run_vm(m.end());
