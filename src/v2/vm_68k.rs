@@ -420,8 +420,8 @@ impl VM {
             Plus => !n,
             Minus => n,
 
-            GreaterEqual => (n && v) || (!n && !v),
-            Less => (n && !v) || (!n && v),
+            GreaterEqual => z || (n && v) || (!n && !v),
+            Less => (n && !v && !z) || (!n && v && !z),
             Greater => (n && v && !z) || (!n && !v && !z),
             LessEqual => z || (n && !v) || (!n && v),
         }
@@ -706,6 +706,30 @@ pub enum Cond {
     LessEqual = 0xF,
 }
 
+impl Cond {
+    pub fn inverse(&self) -> Self {
+        use Cond::*;
+        match self {
+            True => False,
+            False => True,
+            High => LowSame,
+            LowSame => High,
+            CarryClear => CarrySet,
+            CarrySet => CarryClear,
+            NotEqual => Equal,
+            Equal => NotEqual,
+            OverflowClear => OverflowSet,
+            OverflowSet => OverflowClear,
+            Plus => Minus,
+            Minus => Plus,
+            GreaterEqual => Less,
+            Less => GreaterEqual,
+            Greater => LessEqual,
+            LessEqual => Greater,
+        }
+    }
+}
+
 impl From<u16> for Cond {
     fn from(value: u16) -> Self {
         use Cond::*;
@@ -890,9 +914,11 @@ impl Asm {
             _ => unimplemented!(),
         }
     }
-    pub fn branch(&mut self, cond: Cond, branch: Branch) {
+    pub fn branch(&mut self, cond: Cond, branch: Branch) -> usize {
+        let here = self.here();
         assert_ne!(cond, Cond::False);
-        self.branch_internal(cond, branch)
+        self.branch_internal(cond, branch);
+        here
     }
     pub fn branch_sub(&mut self, branch: Branch) {
         self.branch_internal(Cond::False, branch)
@@ -1103,6 +1129,14 @@ impl Asm {
         for (i, byte) in a.out.into_iter().enumerate() {
             self.out[at + i] = byte;
         }
+    }
+    pub fn fixup_branch_to_here(&mut self, at: usize) {
+        let cond = Cond::from(self.out[at - self.base_offset] as u16 & 0x0F);
+        let here = self.here();
+        dbg!(cond);
+        self.fixup(at, |asm| {
+            asm.branch(cond, Branch::Line(here));
+        });
     }
 
     // instruction formats
@@ -1323,14 +1357,10 @@ mod test {
         let mut asm = Asm::new();
         asm.mov(Long, Immediate(1), Data(D0));
 
-        let branch_before = asm.here();
-        asm.branch(Cond::True, Branch::Placeholder(Size::Byte));
+        let branch = asm.branch(Cond::True, Branch::Placeholder(Size::Byte));
         asm.mov(Long, Immediate(2), Data(D0));
-        let branch_dest = asm.here();
+        asm.fixup_branch_to_here(branch);
         asm.halt();
-        asm.fixup(branch_before, |asm| {
-            asm.branch(Cond::True, Branch::Line(branch_dest));
-        });
 
         let mut vm = init_vm(&asm);
         vm.run();
@@ -1344,14 +1374,10 @@ mod test {
         asm.mov(Long, Immediate(1), Data(D0));
         asm.cmp(Long, Immediate(3), Data(D0));
 
-        let branch_before = asm.here();
-        asm.branch(Cond::Equal, Branch::Placeholder(Size::Byte));
+        let branch = asm.branch(Cond::Equal, Branch::Placeholder(Size::Byte));
         asm.mov(Long, Immediate(2), Data(D0));
-        let branch_dest = asm.here();
+        asm.fixup_branch_to_here(branch);
         asm.halt();
-        asm.fixup(branch_before, |asm| {
-            asm.branch(Cond::Equal, Branch::Line(branch_dest));
-        });
 
         let mut vm = init_vm(&asm);
         vm.run();

@@ -2,6 +2,9 @@ use crate::v2::ea::*;
 use crate::v2::register::*;
 use crate::v2::vm_68k::Asm;
 
+use super::vm_68k::Branch;
+use super::vm_68k::Cond;
+
 // This time we'll really use flags for everything
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,7 +132,7 @@ impl Item {
             Self::LValue(lvalue) => Self::LValue(lvalue.deref()),
         }
     }
-    fn field(&self, memory: &mut Memory, field: Field) -> Item {
+    fn field(&self, field: Field) -> Item {
         match self {
             Self::Storage(storage) => Self::Storage(storage.field(field)),
             Self::LValue(lvalue) => Self::LValue(lvalue.field(field)),
@@ -358,6 +361,8 @@ impl LValue {
     }
 }
 
+type IfIdx = usize;
+
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 struct Flags {}
 
@@ -456,10 +461,46 @@ impl Memory {
         let src = r.storage_original(self).ea(self, 0);
         let dest_storage = l.storage_register(self);
         let dest = dest_storage.ea(self, 0);
+        // TODO: type checking
         self.asm.add(Size::Long, src, dest);
         r.free_transient(self);
         l.free_transient(self);
         self.stack.push(Item::Storage(dest_storage));
+    }
+
+    pub fn if_begin(&mut self, cond: Cond) -> IfIdx {
+        // TODO: take / release condition code register
+        let r = self.pop_item();
+        let l = self.pop_item();
+
+        // TODO: Constant folding, EA optimization
+        let src = r.storage_original(self).ea(self, 0);
+        let dest = l.storage_register(self).ea(self, 0);
+        self.asm.cmp(Size::Long, src, dest);
+        r.free_transient(self);
+        l.free_transient(self);
+
+        let if_idx = self
+            .asm
+            .branch(cond.inverse(), Branch::Placeholder(Size::Short));
+        self.scope_begin();
+        if_idx
+    }
+
+    pub fn if_else(&mut self, if_idx: IfIdx) -> IfIdx {
+        self.scope_end();
+        let end_if_idx = self
+            .asm
+            .branch(Cond::True, Branch::Placeholder(Size::Short));
+
+        self.scope_begin();
+        self.asm.fixup_branch_to_here(if_idx);
+        end_if_idx
+    }
+
+    pub fn if_end(&mut self, if_idx: IfIdx) {
+        self.scope_end();
+        self.asm.fixup_branch_to_here(if_idx);
     }
 
     pub fn pointer(&mut self) {
@@ -487,7 +528,7 @@ impl Memory {
 
     pub fn field(&mut self, field: Field) {
         let item = self.pop_item();
-        let res = item.field(self, field);
+        let res = item.field(field);
         self.stack.push(res)
     }
 
@@ -500,6 +541,12 @@ impl Memory {
         self.stack_offset -= 8;
         r.free_transient(self);
         l.free_transient(self);
+    }
+
+    // scope
+    fn scope_begin(&mut self) {}
+    fn scope_end(&mut self) {
+        // TODO: handle spills, deallocate stack
     }
 
     // utils
@@ -730,6 +777,35 @@ mod test {
         m.push_ident(ptr_p_x);
         m.deref();
         m.push_i32(123);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    fn if_else() {
+        let mut m = Memory::new();
+
+        m.push_i32(2);
+        let cmp = m.local();
+
+        m.push_i32(0);
+        let res = m.local();
+
+        m.push_ident(cmp);
+        m.push_i32(2);
+        let if_ = m.if_begin(Cond::Equal);
+        m.push_ident(res);
+        m.push_i32(10);
+        m.assign();
+        let else_ = m.if_else(if_);
+        m.push_ident(res);
+        m.push_i32(20);
+        m.assign();
+        m.if_end(else_);
+
+        m.push_ident(res);
+        m.push_i32(10);
         m.assert_eq();
 
         run_vm(m.end());
