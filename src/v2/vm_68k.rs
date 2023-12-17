@@ -93,7 +93,7 @@ impl VM {
                     0b110 => {
                         let left = self.ea_src(dest, size);
                         let right = self.ea_src(src, size);
-                        self.set_status_cond(left - right);
+                        self.set_cond(left - right);
                         return;
                     }
                     _ => unimplemented!(),
@@ -325,7 +325,7 @@ impl VM {
                 };
                 let left = self.ea_src(dest, size);
                 let right = self.ea_src(src, size);
-                self.set_status_cond(left - right);
+                self.set_cond(left - right);
             }
             // AND / MUL
             (0b1100, _, _) => {
@@ -398,6 +398,13 @@ impl VM {
             _ => unimplemented!(),
         }
     }
+    fn set_cond(&mut self, value: i32) {
+        // zero
+        self.status = bit_set(self.status as isize, 2, value == 0) as u16;
+        // negative
+        self.status = bit_set(self.status as isize, 3, value < 0) as u16;
+        // TODO: carry, overflow flags
+    }
     fn check_cond(&self, cond: Cond) -> bool {
         use Cond::*;
         let c = self.status & 1 != 0;
@@ -450,13 +457,7 @@ impl VM {
     fn mem_u8(&self, idx: i32) -> u8 {
         self.memory[(idx & ADDRESS_MASK) as usize]
     }
-    fn set_status_cond(&mut self, value: i32) {
-        // zero
-        self.status = bit_set(self.status as isize, 2, value == 0) as u16;
-        // negative
-        self.status = bit_set(self.status as isize, 3, value == 0) as u16;
-        // TODO: carry, overflow flags
-    }
+
     fn mode_read_0(&mut self, mode: u16) -> (Size, EAView) {
         match mode {
             0 => (Size::Byte, self.ea_read(Size::Byte)),
@@ -1133,7 +1134,6 @@ impl Asm {
     pub fn fixup_branch_to_here(&mut self, at: usize) {
         let cond = Cond::from(self.out[at - self.base_offset] as u16 & 0x0F);
         let here = self.here();
-        dbg!(cond);
         self.fixup(at, |asm| {
             asm.branch(cond, Branch::Line(here));
         });

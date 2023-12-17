@@ -101,14 +101,14 @@ impl Item {
             Self::LValue(lvalue) => lvalue.storage_src(memory).register_copy(memory),
         }
     }
-    fn storage_stack(&self, memory: &mut Memory) -> Storage {
+    fn storage_stack(self, memory: &mut Memory) -> Storage {
         let ty = self.ty();
         let storage = self.storage_original(memory);
         for (size, offset) in ty.iter_blocks().into_iter().rev() {
             let src = storage.ea(memory, offset);
             memory.asm.mov(size, src, EA::PreDec(Addr::A7))
         }
-        storage.free_transient(memory);
+        self.free_transient(memory);
         memory.stack_offset += ty.size_bytes();
         Storage::Stack(ty, memory.stack_offset)
     }
@@ -362,6 +362,7 @@ impl LValue {
 }
 
 type IfIdx = usize;
+type LoopIdx = usize;
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 struct Flags {}
@@ -463,23 +464,11 @@ impl Memory {
         let dest = dest_storage.ea(self, 0);
         // TODO: type checking
         self.asm.add(Size::Long, src, dest);
-        r.free_transient(self);
-        l.free_transient(self);
         self.stack.push(Item::Storage(dest_storage));
     }
 
     pub fn if_begin(&mut self, cond: Cond) -> IfIdx {
-        // TODO: take / release condition code register
-        let r = self.pop_item();
-        let l = self.pop_item();
-
-        // TODO: Constant folding, EA optimization
-        let src = r.storage_original(self).ea(self, 0);
-        let dest = l.storage_register(self).ea(self, 0);
-        self.asm.cmp(Size::Long, src, dest);
-        r.free_transient(self);
-        l.free_transient(self);
-
+        self.cmp2();
         let if_idx = self
             .asm
             .branch(cond.inverse(), Branch::Placeholder(Size::Short));
@@ -503,6 +492,25 @@ impl Memory {
         self.asm.fixup_branch_to_here(if_idx);
     }
 
+    pub fn loop_begin(&mut self) -> LoopIdx {
+        let idx = self
+            .asm
+            .branch(Cond::True, Branch::Placeholder(Size::Short));
+        debug_assert!(idx + 4 == self.asm.here());
+        self.scope_begin();
+        idx
+    }
+
+    pub fn loop_check(&mut self, loop_idx: LoopIdx) {
+        self.scope_end();
+        self.asm.fixup_branch_to_here(loop_idx);
+    }
+
+    pub fn loop_end(&mut self, cond: Cond, loop_idx: LoopIdx) {
+        self.cmp2();
+        self.asm.branch(cond, Branch::Line(loop_idx + 4));
+    }
+
     pub fn pointer(&mut self) {
         let item = self.pop_item();
         let next = item.pointer(self);
@@ -523,7 +531,20 @@ impl Memory {
         };
         let src = rvalue.storage_original(self);
         lvalue.assign(self, src);
-        src.free_transient(self);
+        rvalue.free_transient(self);
+    }
+
+    pub fn add_assign(&mut self) {
+        // TODO: flags for constant shortcuts (folding, 0s, operand juggling)
+        let rvalue = self.pop_item();
+        let lvalue = match self.pop_item() {
+            Item::LValue(l) => l,
+            _ => unimplemented!(),
+        };
+        let src = rvalue.storage_original(self).ea(self, 0);
+        let dest = lvalue.storage_src(self).ea(self, 0);
+        self.asm.add(Size::Long, src, dest);
+        rvalue.free_transient(self);
     }
 
     pub fn field(&mut self, field: Field) {
@@ -534,13 +555,23 @@ impl Memory {
 
     pub fn assert_eq(&mut self) {
         let r = self.pop_item();
-        let r = r.storage_stack(self);
+        r.storage_stack(self);
         let l = self.pop_item();
-        let l = l.storage_stack(self);
+        l.storage_stack(self);
         self.asm.assert_eq();
         self.stack_offset -= 8;
-        r.free_transient(self);
-        l.free_transient(self);
+    }
+
+    // conditionals
+    fn cmp2(&mut self) {
+        // TODO: take / release condition code register
+        let r = self.pop_item();
+        let l = self.pop_item();
+
+        // TODO: Constant folding, EA optimization
+        let src = r.storage_original(self).ea(self, 0);
+        let dest = l.storage_register(self).ea(self, 0);
+        self.asm.cmp(Size::Long, src, dest);
     }
 
     // scope
@@ -805,6 +836,40 @@ mod test {
         m.if_end(else_);
 
         m.push_ident(res);
+        m.push_i32(10);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    fn loops() {
+        let mut m = Memory::new();
+
+        m.push_i32(0);
+        let i = m.local();
+
+        m.push_i32(0);
+        let sum = m.local();
+
+        let loop_idx = m.loop_begin();
+
+        // TODO: +=
+        m.push_ident(sum);
+        m.push_ident(i);
+        m.add_assign();
+
+        m.push_ident(i);
+        m.push_i32(1);
+        m.add_assign();
+
+        m.loop_check(loop_idx);
+
+        m.push_ident(i);
+        m.push_i32(5);
+        m.loop_end(Cond::Less, loop_idx);
+
+        m.push_ident(sum);
         m.push_i32(10);
         m.assert_eq();
 
