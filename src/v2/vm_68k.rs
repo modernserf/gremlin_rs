@@ -133,10 +133,20 @@ impl VM {
                         let right = self.pop_stack();
                         assert_eq!(left, right);
                     }
+                    // TRAP #2 : println
+                    2 => {
+                        let ptr = self.pop_stack();
+                        let len = self.pop_stack();
+                        let chars = Vec::from(&self.memory[(ptr as usize)..((ptr + len) as usize)]);
+                        let str = String::from_utf8(chars).unwrap();
+                        println!("{}", str);
+                    }
+                    // RTS
                     0b110101 => {
                         let ret = self.pop_stack();
                         self.pc = ret;
                     }
+                    // RTD
                     0b110100 => {
                         let disp = self.mem_u16(self.pc) as i32;
                         self.pc += 2;
@@ -1112,6 +1122,11 @@ impl Asm {
         // TRAP #1
         self.push_u16(0b0100_1110_0100_0001);
     }
+    pub fn println(&mut self) {
+        // TRAP #2
+        self.push_u16(0b0100_1110_0100_0010);
+    }
+
     // todo BSET, BCHG, BCLR, BTST
     pub fn data(&mut self, data: &[u8]) -> usize {
         let here = self.here();
@@ -1122,6 +1137,9 @@ impl Asm {
             self.out.push(0);
         }
         here
+    }
+    pub fn string(&mut self, str: &str) -> usize {
+        self.data(&str.as_bytes())
     }
     pub fn data_16(&mut self, data: &[i16]) -> usize {
         let here = self.here();
@@ -1614,6 +1632,28 @@ mod test {
         asm.mov(Long, Offset(A7, 0), PreDec(A7));
         asm.mov(Long, Immediate(15), PreDec(A7));
         asm.assert_eq();
+
+        asm.halt();
+
+        init_vm(&asm).run();
+    }
+
+    #[test]
+    fn hello_world() {
+        let mut asm = Asm::new();
+
+        let to_code = asm.branch(Cond::True, Branch::Placeholder(Size::Short));
+        let str = asm.string("Hello, world!");
+
+        asm.fixup_branch_to_here(to_code);
+
+        asm.mov(
+            Size::Long,
+            Immediate("Hello, world!".len() as i32),
+            PreDec(A7),
+        );
+        asm.load_ea(PCOffset(PC::Line(str)), PreDec(A7));
+        asm.println();
 
         asm.halt();
 

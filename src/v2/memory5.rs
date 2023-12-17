@@ -20,6 +20,13 @@ impl Ty {
             ref_level: 0,
         }
     }
+    // (len: i32, str: &[u8])
+    fn string() -> Self {
+        Self {
+            base_size: 8,
+            ref_level: 0,
+        }
+    }
     fn size_bytes(&self) -> usize {
         if self.ref_level > 0 {
             4
@@ -105,7 +112,15 @@ impl Item {
         let ty = self.ty();
         let storage = self.storage_original(memory);
         for (size, offset) in ty.iter_blocks().into_iter().rev() {
-            let src = storage.ea(memory, offset);
+            let src = match storage {
+                // when pushing from one part of the stack to another, the offset remains fixed
+                Storage::Stack(_, idx) => {
+                    let fixed_offset =
+                        (memory.stack_offset - idx) + ty.size_bytes() - size.bytes() as usize;
+                    EA::Offset(Addr::A7, fixed_offset as i16)
+                }
+                _ => storage.ea(memory, offset),
+            };
             memory.asm.mov(size, src, EA::PreDec(Addr::A7))
         }
         self.free_transient(memory);
@@ -459,6 +474,7 @@ struct Memory {
     addr: RegisterAllocator<Addr>,
     asm: Asm,
     stack_offset: usize,
+    strings: Vec<(usize, String)>,
 }
 
 impl Memory {
@@ -467,6 +483,7 @@ impl Memory {
     }
     pub fn end(mut self) -> Asm {
         self.asm.halt();
+        self.resolve_strings();
         self.asm
     }
 
@@ -490,6 +507,54 @@ impl Memory {
         );
         self.stack
             .push(Item::Storage(Storage::Stack(ty, self.stack_offset)));
+    }
+
+    pub fn push_string(&mut self, str: String) {
+        self.asm.mov(
+            Size::Long,
+            EA::Immediate(str.len() as i32),
+            EA::PreDec(Addr::A7),
+        );
+        let to_fixup = self.asm.here();
+        self.asm
+            .load_ea(EA::PCOffset(PC::Displacement(0)), EA::PreDec(Addr::A7));
+
+        self.strings.push((to_fixup, str));
+
+        self.stack_offset += 8;
+        self.stack.push(Item::Storage(Storage::Stack(
+            Ty::string(),
+            self.stack_offset,
+        )));
+    }
+    pub fn println(&mut self) {
+        let item = self.pop_item();
+        assert_eq!(item.ty(), Ty::string());
+        item.storage_stack(self);
+        self.asm.println();
+        self.stack_offset -= 8;
+    }
+    pub fn log(&mut self, str: &str) {
+        self.asm.mov(
+            Size::Long,
+            EA::Immediate(str.len() as i32),
+            EA::PreDec(Addr::A7),
+        );
+        let to_fixup = self.asm.here();
+        self.asm
+            .load_ea(EA::PCOffset(PC::Displacement(0)), EA::PreDec(Addr::A7));
+        self.asm.println();
+
+        self.strings.push((to_fixup, str.to_string()));
+    }
+    fn resolve_strings(&mut self) {
+        let strs = std::mem::take(&mut self.strings);
+        for (at, str) in strs {
+            let line = self.asm.string(&str);
+            self.asm.fixup(at, |asm| {
+                asm.load_ea(EA::PCOffset(PC::Line(line)), EA::PreDec(Addr::A7));
+            });
+        }
     }
 
     pub fn local(&mut self) -> LocalId {
@@ -1202,6 +1267,21 @@ mod test {
         m.push_ident(result);
         m.push_i32(20);
         m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    fn strings() {
+        let mut m = Memory::new();
+
+        m.push_string("Hello, world!".to_string());
+        let hello = m.local();
+
+        m.push_ident(hello);
+        m.println();
+
+        m.log("Another string!");
 
         run_vm(m.end());
     }
