@@ -731,14 +731,27 @@ impl From<u16> for Cond {
     }
 }
 
+pub enum Branch {
+    Displacement(Size, i32),
+    Line(usize),
+    Placeholder(Size),
+}
+
 #[derive(Debug, Default)]
 pub struct Asm {
     pub out: Vec<u8>,
+    pub base_offset: usize,
 }
 
 impl Asm {
     pub fn new() -> Self {
         Self::default()
+    }
+    pub fn org(base_offset: usize) -> Self {
+        Self {
+            out: Vec::new(),
+            base_offset,
+        }
     }
     pub fn add(&mut self, size: Size, src: EA, dest: EA) {
         match (src, dest) {
@@ -811,7 +824,7 @@ impl Asm {
             Size::Long => 0b0010,
         };
         let mut dest_dummy = vec![0];
-        dest.write(size, &mut dest_dummy);
+        dest.write(size, &mut dest_dummy, 0);
         let reg = dest_dummy[0] & 0b111;
         let mode = (dest_dummy[0] >> 3) & 0b111;
         self.tag4_reg3_mode3_ea(tag, reg as u16, mode as u16);
@@ -877,14 +890,23 @@ impl Asm {
             _ => unimplemented!(),
         }
     }
-    pub fn branch(&mut self, cond: Cond, offset: i32) {
+    pub fn branch(&mut self, cond: Cond, branch: Branch) {
         assert_ne!(cond, Cond::False);
-        self.branch_internal(cond, offset)
+        self.branch_internal(cond, branch)
     }
-    pub fn branch_sub(&mut self, offset: i32) {
-        self.branch_internal(Cond::False, offset)
+    pub fn branch_sub(&mut self, branch: Branch) {
+        self.branch_internal(Cond::False, branch)
     }
-    fn branch_internal(&mut self, cond: Cond, offset: i32) {
+    fn branch_internal(&mut self, cond: Cond, branch: Branch) {
+        let here = self.here() + 2;
+        let offset = match branch {
+            Branch::Displacement(_, x) => x,
+            Branch::Line(line) => line as i32 - here as i32,
+            Branch::Placeholder(Size::Byte) => 1,
+            Branch::Placeholder(Size::Short) => 128,
+            Branch::Placeholder(Size::Long) => 32768,
+        };
+
         let disp_byte = match offset {
             -128..=127 => offset as i8,
             -32768..=32767 => 0,
@@ -1068,15 +1090,15 @@ impl Asm {
         for byte in data {
             self.out.push(*byte);
         }
-        if (self.out.len() & 1) == 1 {
+        if (self.here() & 1) == 1 {
             self.out.push(0);
         }
     }
     pub fn here(&self) -> usize {
-        self.out.len()
+        self.out.len() + self.base_offset
     }
     pub fn fixup(&mut self, at: usize, f: impl Fn(&mut Asm)) {
-        let mut a = Asm::new();
+        let mut a = Asm::org(at);
         f(&mut a);
         for (i, byte) in a.out.into_iter().enumerate() {
             self.out[at + i] = byte;
@@ -1120,7 +1142,8 @@ impl Asm {
         self.out.push(bytes[1]);
     }
     fn push_ea(&mut self, size: Size, ea: EA) {
-        ea.write(size, &mut self.out);
+        let here = self.here();
+        ea.write(size, &mut self.out, here);
     }
     fn push_immediate(&mut self, size: Size, value: i32) {
         let bytes = value.to_be_bytes();
@@ -1230,18 +1253,17 @@ mod test {
         asm.mov(Byte, Immediate(0), Data(D0));
 
         let instr = asm.here();
-        asm.add(Byte, PCOffset(0), Data(D0));
-        asm.add(Byte, PCOffset(0), Data(D0));
-        asm.add(Byte, PCOffset(0), Data(D0));
+        asm.add(Byte, PCOffset(PC::Displacement(0)), Data(D0));
+        asm.add(Byte, PCOffset(PC::Displacement(0)), Data(D0));
+        asm.add(Byte, PCOffset(PC::Displacement(0)), Data(D0));
         asm.halt();
 
         let data = asm.here();
         asm.data(&[10, 20, 30]);
         asm.fixup(instr, |asm| {
-            let base_offset = (data - instr - 2) as i16;
-            asm.add(Byte, PCOffset(base_offset), Data(D0));
-            asm.add(Byte, PCOffset(base_offset - 4 + 1), Data(D0));
-            asm.add(Byte, PCOffset(base_offset - 8 + 2), Data(D0));
+            asm.add(Byte, PCOffset(PC::Line(data)), Data(D0));
+            asm.add(Byte, PCOffset(PC::Line(data + 1)), Data(D0));
+            asm.add(Byte, PCOffset(PC::Line(data + 2)), Data(D0));
         });
 
         let mut vm = init_vm(&asm);
@@ -1302,13 +1324,12 @@ mod test {
         asm.mov(Long, Immediate(1), Data(D0));
 
         let branch_before = asm.here();
-        asm.branch(Cond::True, 1);
+        asm.branch(Cond::True, Branch::Placeholder(Size::Byte));
         asm.mov(Long, Immediate(2), Data(D0));
         let branch_dest = asm.here();
         asm.halt();
         asm.fixup(branch_before, |asm| {
-            let disp = branch_dest - branch_before - 2;
-            asm.branch(Cond::True, disp as i32);
+            asm.branch(Cond::True, Branch::Line(branch_dest));
         });
 
         let mut vm = init_vm(&asm);
@@ -1324,13 +1345,12 @@ mod test {
         asm.cmp(Long, Immediate(3), Data(D0));
 
         let branch_before = asm.here();
-        asm.branch(Cond::Equal, 1);
+        asm.branch(Cond::Equal, Branch::Placeholder(Size::Byte));
         asm.mov(Long, Immediate(2), Data(D0));
         let branch_dest = asm.here();
         asm.halt();
         asm.fixup(branch_before, |asm| {
-            let disp = branch_dest - branch_before - 2;
-            asm.branch(Cond::Equal, disp as i32);
+            asm.branch(Cond::Equal, Branch::Line(branch_dest));
         });
 
         let mut vm = init_vm(&asm);
@@ -1519,7 +1539,7 @@ mod test {
         let mut asm = Asm::new();
 
         let to_main = asm.here();
-        asm.jmp(EA::PCOffset(0));
+        asm.jmp(EA::PCOffset(PC::Displacement(0)));
 
         // inc(D0) -> D0
         let inc = asm.here();
@@ -1536,18 +1556,16 @@ mod test {
         // main()
         let main = asm.here();
         asm.fixup(to_main, |asm| {
-            asm.jmp(EA::PCOffset((main - to_main - 2) as i16))
+            asm.jmp(EA::PCOffset(PC::Line(main)));
         });
 
         asm.mov(Long, Immediate(10), Data(D0));
-        let to_inc = inc as i32 - asm.here() as i32 - 2;
-        asm.branch_sub(to_inc);
+        asm.branch_sub(Branch::Line(inc));
 
         asm.sub(Long, Immediate(4), Addr(A7)); // ret slot
         asm.mov(Long, Immediate(4), PreDec(A7)); // lhs
         asm.mov(Long, Data(D0), PreDec(A7)); // rhs
-        let to_add2 = add2 as i16 - asm.here() as i16 - 2;
-        asm.jsr(PCOffset(to_add2));
+        asm.jsr(PCOffset(PC::Line(add2)));
 
         asm.mov(Long, Offset(A7, 0), PreDec(A7));
         asm.mov(Long, Immediate(15), PreDec(A7));

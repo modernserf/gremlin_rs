@@ -18,6 +18,27 @@ impl Size {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PC {
+    Displacement(i16),
+    Line(usize),
+}
+
+impl PC {
+    fn resolve_16(&self, here: usize) -> [u8; 2] {
+        match *self {
+            Self::Displacement(x) => x.to_be_bytes(),
+            Self::Line(line) => ((line as isize - here as isize) as i16).to_be_bytes(),
+        }
+    }
+    fn resolve_8(&self, here: usize) -> u8 {
+        match *self {
+            Self::Displacement(x) => (x as i8).to_be_bytes()[0],
+            Self::Line(line) => ((line as isize - here as isize) as i8).to_be_bytes()[0],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EA {
     Data(Data),
     Addr(Addr),
@@ -27,9 +48,9 @@ pub enum EA {
     IdxData(Addr, Data, u8),
     IdxAddr(Addr, Addr, u8),
     Absolute(i32),
-    PCOffset(i16),
-    PCIdxData(Data, u8),
-    PCIdxAddr(Addr, u8),
+    PCOffset(PC),
+    PCIdxData(Data, PC),
+    PCIdxAddr(Addr, PC),
     Immediate(i32),
 }
 
@@ -90,16 +111,16 @@ impl EA {
             (7, 2) => {
                 let offset = i16::from_be_bytes([memory[*pc], memory[*pc + 1]]);
                 *pc += 2;
-                EA::PCOffset(offset)
+                EA::PCOffset(PC::Displacement(offset))
             }
             (7, 3) => {
                 let d = memory[*pc] as usize;
-                let offset = memory[*pc + 1];
+                let offset = memory[*pc + 1] as i16;
                 *pc += 2;
                 if d > 8 {
-                    EA::PCIdxAddr(Addr::from(d - 8), offset)
+                    EA::PCIdxAddr(Addr::from(d - 8), PC::Displacement(offset))
                 } else {
-                    EA::PCIdxData(Data::from(d), offset)
+                    EA::PCIdxData(Data::from(d), PC::Displacement(offset))
                 }
             }
             (7, 4) => {
@@ -124,7 +145,7 @@ impl EA {
         Some(ea)
     }
 
-    pub fn write(&self, size: Size, out: &mut Vec<u8>) {
+    pub fn write(&self, size: Size, out: &mut Vec<u8>, here: usize) {
         // Overwrites the bottom 6 bits of the previously-written byte
         let prev_byte = out.pop().unwrap();
         match *self {
@@ -162,17 +183,17 @@ impl EA {
             }
             Self::PCOffset(o) => {
                 out.push(prev_byte + (7 << 3) + 2);
-                out.extend((o as i16).to_be_bytes());
+                out.extend(o.resolve_16(here));
             }
             Self::PCIdxData(d, o) => {
                 out.push(prev_byte + (7 << 3) + 3);
                 out.push(d as u8);
-                out.push(o);
+                out.push(o.resolve_8(here));
             }
             Self::PCIdxAddr(a, o) => {
                 out.push(prev_byte + (7 << 3) + 3);
                 out.push(a as u8 + 8);
-                out.push(o);
+                out.push(o.resolve_8(here));
             }
             Self::Immediate(x) => {
                 out.push(prev_byte + (7 << 3) + 4);
@@ -207,9 +228,9 @@ mod test {
             EA::IdxAddr(Addr::A3, Addr::A4, 24),
             EA::Absolute(0xFF00),
             EA::Absolute(0x00CC_0000),
-            EA::PCOffset(-512),
-            EA::PCIdxData(Data::D1, 16),
-            EA::PCIdxAddr(Addr::A1, 64),
+            EA::PCOffset(PC::Displacement(-512)),
+            EA::PCIdxData(Data::D1, PC::Displacement(16)),
+            EA::PCIdxAddr(Addr::A1, PC::Displacement(64)),
             EA::Immediate(69),
         ];
 
@@ -217,7 +238,7 @@ mod test {
             for size in sizes.iter() {
                 let mut out = vec![0];
                 let mut i = 0;
-                ea.write(*size, &mut out);
+                ea.write(*size, &mut out, 0);
                 let res = EA::read(&out, &mut i, *size);
                 assert_eq!(res, Some(*ea));
             }
