@@ -8,20 +8,26 @@ use super::vm_68k::Cond;
 // This time we'll really use flags for everything
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Ty {
+struct Ty {
     base_size: usize,
     ref_level: usize,
 }
 
 impl Ty {
-    pub fn i32() -> Self {
+    fn bool() -> Self {
+        Self {
+            base_size: 1,
+            ref_level: 0,
+        }
+    }
+    fn i32() -> Self {
         Self {
             base_size: 4,
             ref_level: 0,
         }
     }
     // (len: i32, str: &[u8])
-    pub fn string() -> Self {
+    fn string() -> Self {
         Self {
             base_size: 8,
             ref_level: 0,
@@ -32,6 +38,20 @@ impl Ty {
             4
         } else {
             self.base_size
+        }
+    }
+    fn stack_space(&self) -> usize {
+        let bytes = self.size_bytes();
+        if bytes & 1 == 0 {
+            bytes
+        } else {
+            bytes + 1
+        }
+    }
+    fn op_size(&self) -> Size {
+        match self.storage_type() {
+            StorageType::Data(size) => size,
+            _ => unimplemented!(),
         }
     }
     fn storage_type(&self) -> StorageType {
@@ -53,6 +73,7 @@ impl Ty {
         while offset < bytes {
             let take = usize::min(bytes - offset, 4);
             let size = match take {
+                2 => Size::Short,
                 4 => Size::Long,
                 _ => todo!(),
             };
@@ -61,13 +82,13 @@ impl Ty {
         }
         out
     }
-    pub fn pointer(&self) -> Ty {
+    fn pointer(&self) -> Ty {
         Self {
             base_size: self.base_size,
             ref_level: self.ref_level + 1,
         }
     }
-    pub fn deref(&self) -> Ty {
+    fn deref(&self) -> Ty {
         assert!(self.ref_level > 0);
         Self {
             base_size: self.base_size,
@@ -233,7 +254,7 @@ impl Storage {
                     } else {
                         memory.addr.mark(a);
                     }
-                    memory.stack_offset += deref_ty.size_bytes();
+                    memory.stack_offset += deref_ty.stack_space();
                     Storage::Stack(deref_ty, memory.stack_offset)
                 }
             },
@@ -340,7 +361,7 @@ pub struct MatchBuilder {
 }
 
 impl MatchBuilder {
-    pub fn init(memory: &mut Memory, d: Data, case_count: usize) -> Self {
+    fn init(memory: &mut Memory, d: Data, case_count: usize) -> Self {
         // ensure index is in range (TODO: disable with flag)
         memory
             .asm
@@ -363,14 +384,14 @@ impl MatchBuilder {
             checked_cases: vec![false; case_count],
         }
     }
-    pub fn case(&mut self, memory: &mut Memory, case: usize) {
+    fn case(&mut self, memory: &mut Memory, case: usize) {
         let idx = self.take_case_idx(case);
         let offset = self.current_offset(memory);
         memory.asm.fixup(idx, |asm| {
             asm.data_16(&[offset]);
         });
     }
-    pub fn default_case(&mut self, memory: &mut Memory) {
+    fn default_case(&mut self, memory: &mut Memory) {
         let mut cases_to_patch = Vec::new();
         for i in 0..self.checked_cases.len() {
             if !self.checked_cases[i] {
@@ -384,13 +405,11 @@ impl MatchBuilder {
             });
         }
     }
-    pub fn case_end(&mut self, memory: &mut Memory) {
-        let end_idx = memory
-            .asm
-            .branch(Cond::True, Branch::Placeholder(Size::Short));
+    fn case_end(&mut self, memory: &mut Memory) {
+        let end_idx = memory.asm.branch(Cond::True, Branch::Placeholder);
         self.case_ends.push(end_idx);
     }
-    pub fn end(self, memory: &mut Memory) {
+    fn end(self, memory: &mut Memory) {
         for checked in self.checked_cases.iter() {
             if !checked {
                 panic!("not all cases checked")
@@ -439,18 +458,21 @@ impl Memory {
         self.resolve_strings();
         self.asm
     }
-
+    // values
     pub fn push_i32(&mut self, value: i32) {
         self.stack
             .push(Item::Storage(Storage::Constant(Ty::i32(), value)))
     }
-
+    pub fn push_bool(&mut self, value: bool) {
+        let val = if value { 0xFF } else { 0 };
+        self.stack
+            .push(Item::Storage(Storage::Constant(Ty::bool(), val)))
+    }
     pub fn push_ident(&mut self, id: LocalId) {
         let original = self.locals[id];
         self.stack
             .push(Item::LValue(LValue::new(id, original.ty())));
     }
-
     pub fn push_struct(&mut self, size: usize) {
         let ty = Ty {
             base_size: size,
@@ -462,7 +484,6 @@ impl Memory {
         self.stack
             .push(Item::Storage(Storage::Stack(ty, self.stack_offset)));
     }
-
     pub fn push_string(&mut self, str: String) {
         self.asm.mov(
             Size::Long,
@@ -481,34 +502,48 @@ impl Memory {
             self.stack_offset,
         )));
     }
-    pub fn println(&mut self) {
-        let item = self.pop_item();
-        assert_eq!(item.ty(), Ty::string());
-        item.storage_stack(self);
-        self.asm.println();
-        self.stack_offset -= 8;
+    // operators
+    // TODO: use shortcuts if flags enabled (e.g. constant folding)
+    pub fn add(&mut self) {
+        self.op2(Asm::add);
     }
-    pub fn log(&mut self, str: &str) {
-        self.asm.mov(
-            Size::Long,
-            EA::Immediate(str.len() as i32),
-            EA::PreDec(Addr::A7),
-        );
-        let to_fixup = self.asm.here();
-        self.asm
-            .load_ea(EA::PCOffset(PC::Displacement(0)), EA::PreDec(Addr::A7));
-        self.asm.println();
+    pub fn sub(&mut self) {
+        self.op2(Asm::sub);
+    }
+    pub fn neg(&mut self) {
+        self.op1(Asm::neg);
+    }
+    pub fn and(&mut self) {
+        self.op2(Asm::and);
+    }
+    pub fn or(&mut self) {
+        self.op2(Asm::or);
+    }
+    pub fn xor(&mut self) {
+        self.op2(Asm::xor);
+    }
+    pub fn not(&mut self) {
+        self.op1(Asm::not);
+    }
 
-        self.strings.push((to_fixup, str.to_string()));
+    fn op1(&mut self, op: fn(&mut Asm, Size, EA)) {
+        let item = self.pop_item();
+        let dest_storage = item.storage_register(self);
+        let dest = dest_storage.ea(self);
+        let size = item.ty().op_size();
+        op(&mut self.asm, size, dest);
+        self.stack.push(Item::Storage(dest_storage));
     }
-    fn resolve_strings(&mut self) {
-        let strs = std::mem::take(&mut self.strings);
-        for (at, str) in strs {
-            let line = self.asm.string(&str);
-            self.asm.fixup(at, |asm| {
-                asm.load_ea(EA::PCOffset(PC::Line(line)), EA::PreDec(Addr::A7));
-            });
-        }
+    fn op2(&mut self, op: fn(&mut Asm, Size, EA, EA)) {
+        let r = self.pop_item();
+        let l = self.pop_item();
+        assert_eq!(l.ty(), r.ty());
+        let size = l.ty().op_size();
+        let src = r.src_ea(self);
+        let dest_storage = l.storage_register(self);
+        let dest = dest_storage.ea(self);
+        op(&mut self.asm, size, src, dest);
+        self.stack.push(Item::Storage(dest_storage));
     }
 
     pub fn local(&mut self) -> LocalId {
@@ -554,30 +589,15 @@ impl Memory {
         return id;
     }
 
-    pub fn add(&mut self) {
-        // TODO: flags for constant shortcuts (folding, 0s, operand juggling)
-        let r = self.pop_item();
-        let l = self.pop_item();
-        let src = r.src_ea(self);
-        let dest_storage = l.storage_register(self);
-        let dest = dest_storage.ea(self);
-        self.asm.add(Size::Long, src, dest);
-        self.stack.push(Item::Storage(dest_storage));
-    }
-
     pub fn if_begin(&mut self, cond: Cond) -> IfIdx {
-        let if_idx = self
-            .asm
-            .branch(cond.inverse(), Branch::Placeholder(Size::Short));
+        let if_idx = self.asm.branch(cond.inverse(), Branch::Placeholder);
         self.scope_begin();
         if_idx
     }
 
     pub fn if_else(&mut self, if_idx: IfIdx) -> IfIdx {
         self.scope_end();
-        let end_if_idx = self
-            .asm
-            .branch(Cond::True, Branch::Placeholder(Size::Short));
+        let end_if_idx = self.asm.branch(Cond::True, Branch::Placeholder);
 
         self.scope_begin();
         self.asm.fixup_branch_to_here(if_idx);
@@ -590,9 +610,7 @@ impl Memory {
     }
 
     pub fn loop_begin(&mut self) -> LoopIdx {
-        let idx = self
-            .asm
-            .branch(Cond::True, Branch::Placeholder(Size::Short));
+        let idx = self.asm.branch(Cond::True, Branch::Placeholder);
         debug_assert!(idx + 4 == self.asm.here());
         self.scope_begin();
         idx
@@ -716,16 +734,54 @@ impl Memory {
         self.stack_offset -= 8;
     }
 
+    pub fn println(&mut self) {
+        let item = self.pop_item();
+        assert_eq!(item.ty(), Ty::string());
+        item.storage_stack(self);
+        self.asm.println();
+        self.stack_offset -= 8;
+    }
+    pub fn log(&mut self, str: &str) {
+        self.asm.mov(
+            Size::Long,
+            EA::Immediate(str.len() as i32),
+            EA::PreDec(Addr::A7),
+        );
+        let to_fixup = self.asm.here();
+        self.asm
+            .load_ea(EA::PCOffset(PC::Displacement(0)), EA::PreDec(Addr::A7));
+        self.asm.println();
+
+        self.strings.push((to_fixup, str.to_string()));
+    }
+    fn resolve_strings(&mut self) {
+        let strs = std::mem::take(&mut self.strings);
+        for (at, str) in strs {
+            let line = self.asm.string(&str);
+            self.asm.fixup(at, |asm| {
+                asm.load_ea(EA::PCOffset(PC::Line(line)), EA::PreDec(Addr::A7));
+            });
+        }
+    }
+
     // conditionals
     pub fn cmp2(&mut self) {
         // TODO: take / release condition code register
         let r = self.pop_item();
         let l = self.pop_item();
+        assert_eq!(l.ty(), r.ty());
+        let size = l.ty().op_size();
 
         // TODO: Constant folding, EA optimization
         let src = r.src_ea(self);
         let dest = l.storage_register(self).ea(self);
-        self.asm.cmp(Size::Long, src, dest);
+        self.asm.cmp(size, src, dest);
+    }
+    pub fn set_cond(&mut self, cond: Cond) {
+        let data = self.get_data_register();
+        self.asm.scc(cond, EA::Data(data));
+        self.stack
+            .push(Item::Storage(Storage::Data(Ty::bool(), data)));
     }
 
     // scope
@@ -784,16 +840,14 @@ impl Memory {
             let src = match src {
                 // when pushing from one part of the stack to another, the offset remains fixed
                 EA::Offset(Addr::A7, base_offset) => {
-                    let fixed_offset = base_offset + ty.size_bytes() as i16 - size.bytes() as i16;
+                    let fixed_offset = base_offset + ty.stack_space() as i16 - size.bytes() as i16;
                     EA::Offset(Addr::A7, fixed_offset)
                 }
-                EA::Offset(a, base_offset) => EA::Offset(a, base_offset + offset as i16),
-                // TODO: PC offsets?
-                _ => src,
+                _ => src.offset(offset),
             };
             self.asm.mov(size, src, EA::PreDec(Addr::A7))
         }
-        self.stack_offset += ty.size_bytes();
+        self.stack_offset += ty.stack_space();
         Storage::Stack(ty, self.stack_offset)
     }
 }
@@ -939,7 +993,7 @@ mod test {
 
         let mut m = Memory::new();
 
-        m.push_struct(point.size_bytes());
+        m.push_struct(point.stack_space());
         // x
         m.push_i32(123);
         m.assign_field(0);
@@ -958,7 +1012,7 @@ mod test {
         m.push_i32(456);
         m.assert_eq();
 
-        m.push_struct(point.size_bytes());
+        m.push_struct(point.stack_space());
         let p2 = m.local();
 
         m.push_ident(p2);
@@ -1019,6 +1073,30 @@ mod test {
     }
 
     #[test]
+    fn if_() {
+        let mut m = Memory::new();
+        m.push_i32(2);
+        let cmp = m.local();
+        m.push_i32(0);
+        let res = m.local();
+
+        m.push_ident(cmp);
+        m.push_i32(2);
+        m.cmp2();
+        let if_ = m.if_begin(Cond::Equal);
+        m.push_ident(res);
+        m.push_i32(10);
+        m.assign();
+        m.if_end(if_);
+
+        m.push_ident(res);
+        m.push_i32(10);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
     fn if_else() {
         let mut m = Memory::new();
 
@@ -1029,7 +1107,7 @@ mod test {
         let res = m.local();
 
         m.push_ident(cmp);
-        m.push_i32(2);
+        m.push_i32(3);
         m.cmp2();
         let if_ = m.if_begin(Cond::Equal);
         m.push_ident(res);
@@ -1042,7 +1120,7 @@ mod test {
         m.if_end(else_);
 
         m.push_ident(res);
-        m.push_i32(10);
+        m.push_i32(20);
         m.assert_eq();
 
         run_vm(m.end());
@@ -1315,4 +1393,45 @@ mod test {
 
         run_vm(m.end());
     }
+
+    // #[test]
+    // fn bools() {
+    //     let mut m = Memory::new();
+
+    //     m.push_i32(1);
+    //     m.push_i32(2);
+    //     m.cmp2();
+    //     m.set_cond(Cond::Less);
+    //     let a = m.local();
+
+    //     m.push_i32(1);
+    //     m.push_i32(2);
+    //     m.cmp2();
+    //     m.set_cond(Cond::Equal);
+    //     let b = m.local();
+
+    //     m.push_i32(0);
+    //     let res = m.local();
+
+    //     // if a || b
+    //     // m.push_ident(a);
+    //     // m.push_ident(b);
+    //     // m.or();
+
+    //     m.push_bool(1);
+    //     m.push_i32(1);
+    //     m.cmp2();
+    //     let if_idx = m.if_begin(Cond::Equal);
+    //     m.push_ident(res);
+    //     m.push_i32(10);
+    //     m.assign();
+    //     let else_idx = m.if_else(if_idx);
+    //     m.if_end(else_idx);
+
+    //     m.push_ident(res);
+    //     m.push_i32(10);
+    //     m.assert_eq();
+
+    //     run_vm(m.end());
+    // }
 }

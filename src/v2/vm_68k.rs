@@ -239,7 +239,14 @@ impl VM {
                     0b100 => (Size::Byte, self.ea_read(Size::Byte), false),
                     0b101 => (Size::Short, self.ea_read(Size::Short), false),
                     0b110 => (Size::Long, self.ea_read(Size::Long), false),
-                    // Scc goes here
+                    // Scc
+                    0b011 | 0b111 => {
+                        let cond = Cond::from((instr >> 8) & 0xF);
+                        let dest = self.ea_read(Size::Byte);
+                        let value = if self.check_cond(cond) { 0xFF } else { 0 };
+                        self.ea_apply(dest, EAView::Immediate(value), Size::Byte, |_, x| x);
+                        return;
+                    }
                     _ => unreachable!(),
                 };
                 if is_add {
@@ -778,9 +785,8 @@ impl From<u16> for Cond {
 }
 
 pub enum Branch {
-    Displacement(Size, i32),
     Line(usize),
-    Placeholder(Size),
+    Placeholder,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -947,31 +953,17 @@ impl Asm {
     }
     fn branch_internal(&mut self, cond: Cond, branch: Branch) {
         let here = self.here() + 2;
-        let offset = match branch {
-            Branch::Displacement(_, x) => x,
-            Branch::Line(line) => line as i32 - here as i32,
-            Branch::Placeholder(Size::Byte) => 1,
-            Branch::Placeholder(Size::Short) => 128,
-            Branch::Placeholder(Size::Long) => 32768,
-        };
 
-        let disp_byte = match offset {
-            -128..=127 => offset as i8,
-            -32768..=32767 => 0,
-            _ => -1,
+        let offset = match branch {
+            Branch::Line(line) => line as i32 - here as i32,
+            Branch::Placeholder => 0,
         };
-        self.tag4_cond_4_disp8(0b0110, cond as u8, disp_byte);
-        if disp_byte == 0 {
-            let bytes = (offset as i16).to_be_bytes();
-            self.out.push(bytes[0]);
-            self.out.push(bytes[1]);
-        } else if disp_byte == -1 {
-            let bytes = offset.to_be_bytes();
-            self.out.push(bytes[0]);
-            self.out.push(bytes[1]);
-            self.out.push(bytes[2]);
-            self.out.push(bytes[3]);
-        }
+        // TODO: allow byte / long branches
+        self.tag4_cond_4_disp8(0b0110, cond as u8, 0);
+
+        let bytes = (offset as i16).to_be_bytes();
+        self.out.push(bytes[0]);
+        self.out.push(bytes[1]);
     }
     pub fn chk(&mut self, size: Size, src: EA, target: EA) {
         match target {
@@ -1125,6 +1117,11 @@ impl Asm {
             self.push_u16(to_drop);
         }
     }
+    pub fn scc(&mut self, cond: Cond, dest: EA) {
+        let instr = 0b0101_0000_1100_0000 + ((cond as u16) << 8);
+        self.push_u16(instr);
+        self.push_ea(Size::Byte, dest);
+    }
     pub fn halt(&mut self) {
         // TRAP #0
         self.push_u16(0b0100_1110_0100_0000);
@@ -1181,7 +1178,6 @@ impl Asm {
         let cond = Cond::from(self.out[at - self.base_offset] as u16 & 0x0F);
         let here = self.here();
         self.fixup(at, |asm| {
-            // TODO: check that placeholder displacement slot can fit this value
             asm.branch(cond, Branch::Line(here));
         });
     }
@@ -1404,7 +1400,7 @@ mod test {
         let mut asm = Asm::new();
         asm.mov(Long, Immediate(1), Data(D0));
 
-        let branch = asm.branch(Cond::True, Branch::Placeholder(Size::Byte));
+        let branch = asm.branch(Cond::True, Branch::Placeholder);
         asm.mov(Long, Immediate(2), Data(D0));
         asm.fixup_branch_to_here(branch);
         asm.halt();
@@ -1421,7 +1417,7 @@ mod test {
         asm.mov(Long, Immediate(1), Data(D0));
         asm.cmp(Long, Immediate(3), Data(D0));
 
-        let branch = asm.branch(Cond::Equal, Branch::Placeholder(Size::Byte));
+        let branch = asm.branch(Cond::Equal, Branch::Placeholder);
         asm.mov(Long, Immediate(2), Data(D0));
         asm.fixup_branch_to_here(branch);
         asm.halt();
@@ -1653,7 +1649,7 @@ mod test {
     fn hello_world() {
         let mut asm = Asm::new();
 
-        let to_code = asm.branch(Cond::True, Branch::Placeholder(Size::Short));
+        let to_code = asm.branch(Cond::True, Branch::Placeholder);
         let str = asm.string("Hello, world!");
 
         asm.fixup_branch_to_here(to_code);
@@ -1665,6 +1661,23 @@ mod test {
         );
         asm.load_ea(PCOffset(PC::Line(str)), PreDec(A7));
         asm.println();
+
+        asm.halt();
+
+        init_vm(&asm).run();
+    }
+
+    #[test]
+    fn scc() {
+        let mut asm = Asm::new();
+
+        asm.mov(Long, Immediate(1), Data(D0));
+        asm.cmp(Long, Immediate(1), Data(D0));
+        asm.scc(Cond::Equal, Data(D1));
+
+        asm.mov(Long, Data(D1), PreDec(A7));
+        asm.mov(Long, Immediate(0xFF), PreDec(A7));
+        asm.assert_eq();
 
         asm.halt();
 
