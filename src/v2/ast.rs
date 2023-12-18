@@ -1,6 +1,6 @@
 use std::{collections::HashMap, rc::Rc};
 
-use super::vm_68k::Asm;
+use super::vm_68k::{Asm, Cond};
 use crate::v2::memory5::Memory;
 
 type Compile<T> = Result<T, CompileError>;
@@ -148,6 +148,8 @@ pub enum Expr {
     String(String),
     Call(Box<CallExpr>),
     Add(Box<Expr>, Box<Expr>),
+    Equal(Box<Expr>, Box<Expr>),
+    Less(Box<Expr>, Box<Expr>),
     Pointer(Box<Expr>),
     Deref(Box<Expr>),
     Record(String, Vec<(String, Expr)>),
@@ -177,9 +179,12 @@ pub enum Stmt {
     Local(String, Expr),
     LocalRef(String, Expr),
     Assign(Expr, Expr),
+    AddAssign(Expr, Expr),
     Expr(Expr),
     Log(String),
     Record(String, Vec<RecordField>),
+    If(Expr, Vec<Stmt>, Vec<Stmt>),
+    While(Expr, Vec<Stmt>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,6 +298,12 @@ impl Compiler {
             }
         }
     }
+    fn block(&mut self, block: Vec<Stmt>) -> Compile<()> {
+        for stmt in block {
+            self.stmt(stmt)?;
+        }
+        Ok(())
+    }
     fn stmt(&mut self, stmt: Stmt) -> Compile<()> {
         match stmt {
             Stmt::Local(name, expr) => {
@@ -311,6 +322,12 @@ impl Compiler {
                 ty.expected(&expected.ty)?;
                 self.memory.assign();
             }
+            Stmt::AddAssign(target, expr) => {
+                let expected = self.lvalue(target)?;
+                let ty = self.expr(expr)?;
+                ty.expected(&expected.ty)?;
+                self.memory.add_assign();
+            }
             Stmt::Expr(expr) => {
                 self.expr(expr)?;
             }
@@ -325,6 +342,31 @@ impl Compiler {
                 }
                 let ty = Ty::record(RecordTy::new(rows));
                 self.scope.insert_ty(name, ty)
+            }
+            Stmt::If(expr, if_true, if_false) => {
+                let cond = self.cond(expr)?;
+                let if_idx = self.memory.if_begin(cond);
+                self.scope.begin();
+                self.block(if_true)?;
+                self.scope.end();
+                if if_false.len() > 0 {
+                    let else_idx = self.memory.if_else(if_idx);
+                    self.scope.begin();
+                    self.block(if_false)?;
+                    self.scope.end();
+                    self.memory.if_end(else_idx);
+                } else {
+                    self.memory.if_end(if_idx);
+                }
+            }
+            Stmt::While(expr, block) => {
+                let loop_idx = self.memory.loop_begin();
+                self.scope.begin();
+                self.block(block)?;
+                self.scope.end();
+                self.memory.loop_check(loop_idx);
+                let cond = self.cond(expr)?;
+                self.memory.loop_end(cond, loop_idx);
             }
         };
         Ok(())
@@ -384,6 +426,12 @@ impl Compiler {
                 self.memory.field(field.offset, &field.ty);
                 Ok(field.ty)
             }
+            Expr::Equal(_, _) => {
+                unimplemented!("bools")
+            }
+            Expr::Less(_, _) => {
+                unimplemented!("bools")
+            }
         }
     }
     fn call_expr(&mut self, call: CallExpr) -> Compile<Ty> {
@@ -427,6 +475,26 @@ impl Compiler {
             _ => Err(CompileError::InvalidLValue),
         }
     }
+    fn cond(&mut self, expr: Expr) -> Compile<Cond> {
+        match expr {
+            Expr::Equal(l, r) => {
+                let l = self.expr(*l)?;
+                let r = self.expr(*r)?;
+                r.expected(&l)?;
+                self.memory.cmp2();
+                Ok(Cond::Equal)
+            }
+            Expr::Less(l, r) => {
+                self.expr(*l)?.expected(&Ty::int())?;
+                self.expr(*r)?.expected(&Ty::int())?;
+                self.memory.cmp2();
+                Ok(Cond::Less)
+            }
+            _ => {
+                unimplemented!("bools")
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -461,7 +529,6 @@ mod test {
                 .collect(),
         )
     }
-
     fn ty_ident(name: &str) -> TyExpr {
         TyExpr::Ident(name.to_string())
     }
@@ -480,6 +547,12 @@ mod test {
     }
     fn add(left: Expr, right: Expr) -> Expr {
         Expr::Add(Box::new(left), Box::new(right))
+    }
+    fn equal(left: Expr, right: Expr) -> Expr {
+        Expr::Equal(Box::new(left), Box::new(right))
+    }
+    fn less(left: Expr, right: Expr) -> Expr {
+        Expr::Less(Box::new(left), Box::new(right))
     }
     fn record(name: &str, fields: Vec<(&str, Expr)>) -> Expr {
         Expr::Record(
@@ -615,6 +688,60 @@ mod test {
                 ),
                 local("p", record("Point", vec![("x", int(123)), ("y", int(456))])),
                 assert_eq(ident("p").field("x"), int(123)),
+            ])
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn if_() {
+        run_vm(
+            Compiler::program(vec![
+                local("cmp", int(2)),
+                local("res", int(0)),
+                Stmt::If(
+                    equal(ident("cmp"), int(2)),
+                    vec![assign(ident("res"), int(10))],
+                    vec![],
+                ),
+                assert_eq(ident("res"), int(10)),
+            ])
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn if_else() {
+        run_vm(
+            Compiler::program(vec![
+                local("cmp", int(3)),
+                local("res", int(0)),
+                Stmt::If(
+                    equal(ident("cmp"), int(2)),
+                    vec![assign(ident("res"), int(10))],
+                    vec![assign(ident("res"), int(20))],
+                ),
+                assert_eq(ident("res"), int(20)),
+            ])
+            .unwrap(),
+        );
+    }
+
+    #[test]
+
+    fn while_loop() {
+        run_vm(
+            Compiler::program(vec![
+                local("i", int(0)),
+                local("sum", int(0)),
+                Stmt::While(
+                    less(ident("i"), int(5)),
+                    vec![
+                        Stmt::AddAssign(ident("sum"), ident("i")),
+                        Stmt::AddAssign(ident("i"), int(1)),
+                    ],
+                ),
+                assert_eq(ident("sum"), int(10)),
             ])
             .unwrap(),
         );

@@ -566,7 +566,6 @@ impl Memory {
     }
 
     pub fn if_begin(&mut self, cond: Cond) -> IfIdx {
-        self.cmp2();
         let if_idx = self
             .asm
             .branch(cond.inverse(), Branch::Placeholder(Size::Short));
@@ -605,7 +604,6 @@ impl Memory {
     }
 
     pub fn loop_end(&mut self, cond: Cond, loop_idx: LoopIdx) {
-        self.cmp2();
         self.asm.branch(cond, Branch::Line(loop_idx + 4));
     }
 
@@ -719,7 +717,7 @@ impl Memory {
     }
 
     // conditionals
-    fn cmp2(&mut self) {
+    pub fn cmp2(&mut self) {
         // TODO: take / release condition code register
         let r = self.pop_item();
         let l = self.pop_item();
@@ -1032,6 +1030,7 @@ mod test {
 
         m.push_ident(cmp);
         m.push_i32(2);
+        m.cmp2();
         let if_ = m.if_begin(Cond::Equal);
         m.push_ident(res);
         m.push_i32(10);
@@ -1073,6 +1072,7 @@ mod test {
 
         m.push_ident(i);
         m.push_i32(5);
+        m.cmp2();
         m.loop_end(Cond::Less, loop_idx);
 
         m.push_ident(sum);
