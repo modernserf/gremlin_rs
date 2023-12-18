@@ -55,6 +55,14 @@ pub enum EA {
 }
 
 impl EA {
+    pub fn offset(self, offset: i32) -> Self {
+        match self {
+            EA::Offset(a, o) => EA::Offset(a, o + offset as i16),
+            EA::IdxData(a, d, o) => EA::IdxData(a, d, o + offset as u8),
+            EA::IdxAddr(a, a2, o) => EA::IdxAddr(a, a2, o + offset as u8),
+            _ => unimplemented!(),
+        }
+    }
     pub fn is_control_mode(&self) -> bool {
         match self {
             Self::Offset(_, _)

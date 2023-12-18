@@ -286,6 +286,12 @@ impl Storage {
             }
         }
     }
+    fn deref_dest(&self, memory: &mut Memory) -> EA {
+        let addr = memory.get_addr_register();
+        let src = self.ea(memory, 0);
+        memory.asm.mov(Size::Long, src, EA::Addr(addr));
+        EA::Offset(addr, 0)
+    }
 }
 
 type LocalId = usize;
@@ -322,7 +328,7 @@ impl LValue {
             (_, 0) => {}
             (Storage::Addr(_, r), 1) => {
                 memory.addr.mark(r);
-                storage = storage.deref(memory, storage.ty().deref(), self.deref_offsets[0], false)
+                storage = storage.deref(memory, storage.ty().deref(), self.deref_offsets[0], false);
             }
             _ => {
                 let r = memory.get_addr_register();
@@ -340,6 +346,18 @@ impl LValue {
         }
         storage
     }
+    fn storage_dest(&self, memory: &mut Memory) -> EA {
+        let mut storage = memory.locals[self.base];
+        if let Some(field) = self.field {
+            storage = storage.field(field)
+        }
+
+        match self.deref_offsets.len() {
+            0 => storage.ea(memory, 0),
+            1 => storage.deref_dest(memory),
+            _ => unimplemented!(),
+        }
+    }
     fn deref(&self) -> LValue {
         let mut next = self.clone();
         next.deref_offsets.push(0);
@@ -347,10 +365,10 @@ impl LValue {
         next
     }
     fn assign(&self, memory: &mut Memory, src_storage: Storage) {
-        let dest_storage = self.storage_src(memory);
+        let dest = self.storage_dest(memory);
         for (size, offset) in self.ty.iter_blocks() {
             let src = src_storage.ea(memory, offset);
-            let dest = dest_storage.ea(memory, offset);
+            let dest = dest.offset(offset as i32);
             memory.asm.mov(size, src, dest)
         }
     }
@@ -869,6 +887,29 @@ mod test {
 
         m.push_ident(a_stack_ptr);
         m.deref();
+        m.push_i32(456);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    fn mut_pointer() {
+        let mut m = Memory::new();
+
+        m.push_i32(123);
+        let a = m.local_stack();
+
+        m.push_ident(a);
+        m.pointer();
+        let a_ptr = m.local();
+
+        m.push_ident(a_ptr);
+        m.deref();
+        m.push_i32(456);
+        m.assign();
+
+        m.push_ident(a);
         m.push_i32(456);
         m.assert_eq();
 

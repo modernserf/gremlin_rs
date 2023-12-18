@@ -1,8 +1,19 @@
 use std::collections::HashMap;
 
+use super::vm_68k::Asm;
 use crate::v2::memory5::Memory;
 
-use super::vm_68k::Asm;
+type Compile<T> = Result<T, CompileError>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompileError {
+    ExpectedType { expected: Ty, received: Ty },
+    InvalidCallArgs,
+    UnknownIdent(String),
+    InvalidLValue,
+    InvalidRef,
+    InvalidDeref,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ty {
@@ -36,6 +47,17 @@ impl Ty {
             kind: TyKind::String,
         }
     }
+    fn pointer(mut self) -> Self {
+        self.ref_level += 1;
+        self
+    }
+    fn deref(mut self) -> Compile<Self> {
+        if self.ref_level == 0 {
+            return Err(CompileError::InvalidDeref);
+        }
+        self.ref_level -= 1;
+        Ok(self)
+    }
     fn expected(&self, expected: &Ty) -> Compile<()> {
         if self == expected {
             Ok(())
@@ -55,6 +77,17 @@ pub enum Expr {
     String(String),
     Call(Box<CallExpr>),
     Add(Box<Expr>, Box<Expr>),
+    Pointer(Box<Expr>),
+    Deref(Box<Expr>),
+}
+
+impl Expr {
+    fn pointer(self) -> Expr {
+        Expr::Pointer(Box::new(self))
+    }
+    fn deref(self) -> Expr {
+        Expr::Deref(Box::new(self))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,9 +120,9 @@ impl Scope {
     fn end(&mut self) {
         self.frames.pop().unwrap();
     }
-    fn insert(&mut self, name: String, id: usize, ty: Ty) {
+    fn insert(&mut self, name: String, id: usize, ty: Ty, can_ref: bool) {
         let top = self.top_mut();
-        top.scope.insert(name, ScopeRecord { id, ty });
+        top.scope.insert(name, ScopeRecord { id, ty, can_ref });
     }
     fn get(&mut self, name: &str) -> Compile<ScopeRecord> {
         for frame in self.frames.iter().rev() {
@@ -114,20 +147,11 @@ struct ScopeFrame {
 struct ScopeRecord {
     id: usize,
     ty: Ty,
+    can_ref: bool,
 }
 
 #[derive(Default, Debug)]
 struct TyScope {}
-
-type Compile<T> = Result<T, CompileError>;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CompileError {
-    ExpectedType { expected: Ty, received: Ty },
-    InvalidCallArgs,
-    UnknownIdent(String),
-    InvalidLValue,
-}
 
 #[derive(Default, Debug)]
 pub struct Compiler {
@@ -154,17 +178,17 @@ impl Compiler {
             Stmt::Local(name, expr) => {
                 let ty = self.expr(expr)?;
                 let id = self.memory.local();
-                self.scope.insert(name, id, ty);
+                self.scope.insert(name, id, ty, false);
             }
             Stmt::LocalRef(name, expr) => {
                 let ty = self.expr(expr)?;
                 let id = self.memory.local_stack();
-                self.scope.insert(name, id, ty);
+                self.scope.insert(name, id, ty, true);
             }
             Stmt::Assign(target, expr) => {
                 let expected = self.lvalue(target)?;
                 let ty = self.expr(expr)?;
-                ty.expected(&expected)?;
+                ty.expected(&expected.ty)?;
                 self.memory.assign();
             }
             Stmt::Expr(expr) => {
@@ -175,16 +199,6 @@ impl Compiler {
             }
         };
         Ok(())
-    }
-    pub fn lvalue(&mut self, expr: Expr) -> Compile<Ty> {
-        match expr {
-            Expr::Ident(name) => {
-                let rec = self.scope.get(&name)?;
-                self.memory.push_ident(rec.id);
-                Ok(rec.ty)
-            }
-            _ => Err(CompileError::InvalidLValue),
-        }
     }
     pub fn expr(&mut self, expr: Expr) -> Compile<Ty> {
         match expr {
@@ -207,6 +221,20 @@ impl Compiler {
                 self.expr(*right)?.expected(&Ty::int())?;
                 self.memory.add();
                 Ok(Ty::int())
+            }
+            Expr::Pointer(expr) => {
+                let lvalue = self.lvalue(*expr)?;
+                if !lvalue.can_ref {
+                    return Err(CompileError::InvalidRef);
+                }
+                self.memory.pointer();
+                let ty = lvalue.ty.pointer();
+                Ok(ty)
+            }
+            Expr::Deref(expr) => {
+                let ty = self.expr(*expr)?.deref()?;
+                self.memory.deref();
+                Ok(ty)
             }
         }
     }
@@ -234,6 +262,22 @@ impl Compiler {
             ty.expected(&expected[i])?;
         }
         Ok(())
+    }
+    fn lvalue(&mut self, expr: Expr) -> Compile<ScopeRecord> {
+        match expr {
+            Expr::Ident(name) => {
+                let rec = self.scope.get(&name)?;
+                self.memory.push_ident(rec.id);
+                Ok(rec)
+            }
+            Expr::Deref(expr) => {
+                let mut rec = self.lvalue(*expr)?;
+                rec.ty = rec.ty.deref()?;
+                self.memory.deref();
+                Ok(rec)
+            }
+            _ => Err(CompileError::InvalidLValue),
+        }
     }
 }
 
@@ -272,6 +316,10 @@ mod test {
     }
     fn add(left: Expr, right: Expr) -> Expr {
         Expr::Add(Box::new(left), Box::new(right))
+    }
+
+    fn assert_eq(left: Expr, right: Expr) -> Stmt {
+        expr(call(ident("assert_eq"), vec![left, right]))
     }
 
     fn run_vm(asm: Asm) -> VM {
@@ -362,6 +410,25 @@ mod test {
         assert_eq!(
             Compiler::program(vec![assign(int(10), int(20))]),
             Err(CompileError::InvalidLValue)
+        );
+    }
+
+    #[test]
+    fn pointer() {
+        run_vm(
+            Compiler::program(vec![
+                local_ref("a", int(123)),
+                local("a_ptr", ident("a").pointer()),
+                local_ref("a_stack_ptr", ident("a").pointer()),
+                //
+                assign(ident("a"), int(456)),
+                assert_eq(ident("a_ptr").deref(), int(456)),
+                assert_eq(ident("a_stack_ptr").deref(), int(456)),
+                //
+                assign(ident("a_ptr").deref(), int(789)),
+                assert_eq(ident("a"), int(789)),
+            ])
+            .unwrap(),
         );
     }
 }
