@@ -55,13 +55,13 @@ pub enum EA {
 }
 
 impl EA {
-    // FIXME
-    pub fn offset(self, offset: i32) -> Self {
-        match self {
-            EA::Offset(a, o) => EA::Offset(a, o + offset as i16),
-            EA::IdxData(a, d, o) => EA::IdxData(a, d, o + offset as u8),
-            EA::IdxAddr(a, a2, o) => EA::IdxAddr(a, a2, o + offset as u8),
-            ea => ea,
+    pub fn offset(&self, offset: usize) -> EA {
+        if offset == 0 {
+            return *self;
+        }
+        match *self {
+            Self::Offset(a, o) => Self::Offset(a, o + offset as i16),
+            _ => unimplemented!(),
         }
     }
     pub fn is_control_mode(&self) -> bool {

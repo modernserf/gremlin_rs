@@ -96,47 +96,31 @@ impl Item {
             Self::LValue(lvalue) => lvalue.ty,
         }
     }
-    fn storage_original(&self, memory: &mut Memory) -> Storage {
+    fn src_ea(&self, memory: &mut Memory) -> EA {
         match self {
-            Self::Storage(storage) => *storage,
-            Self::LValue(lvalue) => lvalue.storage_src(memory),
+            Self::Storage(storage) => storage.ea(memory),
+            Self::LValue(lvalue) => lvalue.src_ea(memory),
         }
     }
     fn storage_register(&self, memory: &mut Memory) -> Storage {
         match self {
             Self::Storage(storage) => storage.register(memory),
-            Self::LValue(lvalue) => lvalue.storage_src(memory).register_copy(memory),
+            Self::LValue(lvalue) => {
+                let src = lvalue.src_ea(memory);
+                memory.storage_register(lvalue.ty, src)
+            }
         }
     }
     fn storage_stack(self, memory: &mut Memory) -> Storage {
-        let ty = self.ty();
-        let storage = self.storage_original(memory);
-        for (size, offset) in ty.iter_blocks().into_iter().rev() {
-            let src = match storage {
-                // when pushing from one part of the stack to another, the offset remains fixed
-                Storage::Stack(_, idx) => {
-                    let fixed_offset =
-                        (memory.stack_offset - idx) + ty.size_bytes() - size.bytes() as usize;
-                    EA::Offset(Addr::A7, fixed_offset as i16)
-                }
-                _ => storage.ea(memory, offset),
-            };
-            memory.asm.mov(size, src, EA::PreDec(Addr::A7))
-        }
+        let src = self.src_ea(memory);
+        let next = memory.storage_stack(self.ty(), src);
         self.free_transient(memory);
-        memory.stack_offset += ty.size_bytes();
-        Storage::Stack(ty, memory.stack_offset)
+        next
     }
     fn free_transient(self, memory: &mut Memory) {
         match self {
             Self::Storage(storage) => storage.free_transient(memory),
             Self::LValue(_) => {}
-        }
-    }
-    fn pointer(&self, memory: &mut Memory) -> Item {
-        match self {
-            Self::Storage(storage) => Self::Storage(storage.pointer(memory)),
-            Self::LValue(lvalue) => Self::Storage(lvalue.storage_src(memory).pointer(memory)),
         }
     }
     fn deref(&self, memory: &mut Memory) -> Item {
@@ -178,14 +162,12 @@ impl Storage {
     }
     fn field(&self, field: Field) -> Storage {
         match *self {
-            Self::Constant(_, _) => unimplemented!(),
-            Self::Data(_, _) => unimplemented!(),
-            Self::Addr(_, _) => unimplemented!(),
             Self::StackArg(_, base) => Self::StackArg(field.ty, base + field.offset),
             Self::Stack(_, base) => Self::Stack(field.ty, base - field.offset),
+            _ => unimplemented!(),
         }
     }
-    fn ea(&self, memory: &mut Memory, offset: usize) -> EA {
+    fn ea(&self, memory: &mut Memory) -> EA {
         match *self {
             Self::Constant(_, x) => EA::Immediate(x),
             Self::Data(_, d) => {
@@ -196,34 +178,18 @@ impl Storage {
                 memory.addr.mark(a);
                 EA::Addr(a)
             }
-            Self::StackArg(_, idx) => EA::Offset(Addr::A6, (8 + idx + offset) as i16),
-            Self::Stack(_, idx) => {
-                EA::Offset(Addr::A7, (memory.stack_offset - idx + offset) as i16)
-            }
+            Self::StackArg(_, idx) => EA::Offset(Addr::A6, (8 + idx) as i16),
+            Self::Stack(_, idx) => EA::Offset(Addr::A7, (memory.stack_offset - idx) as i16),
         }
     }
     fn register(&self, memory: &mut Memory) -> Storage {
         match *self {
             Self::Data(_, _) => *self,
             Self::Addr(_, _) => *self,
-            _ => self.register_copy(memory),
-        }
-    }
-    fn register_copy(&self, memory: &mut Memory) -> Storage {
-        match self.ty().storage_type() {
-            StorageType::Data(size) => {
-                let r = memory.get_data_register();
-                let src = self.ea(memory, 0);
-                memory.asm.mov(size, src, EA::Data(r));
-                Self::Data(self.ty(), r)
+            _ => {
+                let src = self.ea(memory);
+                memory.storage_register(self.ty(), src)
             }
-            StorageType::Addr => {
-                let r = memory.get_addr_register();
-                let src = self.ea(memory, 0);
-                memory.asm.mov(Size::Long, src, EA::Addr(r));
-                Self::Addr(self.ty(), r)
-            }
-            _ => unimplemented!(),
         }
     }
     fn free_transient(self, memory: &mut Memory) {
@@ -231,17 +197,6 @@ impl Storage {
             Self::Data(_, d) => memory.data.free(d),
             Self::Addr(_, a) => memory.addr.free(a),
             _ => {}
-        }
-    }
-    fn pointer(&self, memory: &mut Memory) -> Self {
-        match self {
-            Self::StackArg(_, _) | Self::Stack(_, _) => {
-                let r = memory.get_addr_register();
-                let src = self.ea(memory, 0);
-                memory.asm.load_ea(src, EA::Addr(r));
-                Self::Addr(self.ty().pointer(), r)
-            }
-            _ => unimplemented!(),
         }
     }
     fn deref(&self, memory: &mut Memory, deref_ty: Ty, offset: usize, consume_addr: bool) -> Self {
@@ -253,6 +208,8 @@ impl Storage {
                     memory.asm.mov(size, src, EA::Data(r));
                     if consume_addr {
                         memory.addr.free(a);
+                    } else {
+                        memory.addr.mark(a);
                     }
                     Self::Data(deref_ty, r)
                 }
@@ -273,24 +230,20 @@ impl Storage {
                     }
                     if consume_addr {
                         memory.addr.free(a);
+                    } else {
+                        memory.addr.mark(a);
                     }
                     memory.stack_offset += deref_ty.size_bytes();
                     Storage::Stack(deref_ty, memory.stack_offset)
                 }
             },
             _ => {
-                let src = self.ea(memory, 0);
+                let src = self.ea(memory);
                 let r = memory.get_addr_register();
                 memory.asm.mov(Size::Long, src, EA::Addr(r));
                 Storage::Addr(self.ty(), r).deref(memory, deref_ty, offset, consume_addr)
             }
         }
-    }
-    fn deref_dest(&self, memory: &mut Memory) -> EA {
-        let addr = memory.get_addr_register();
-        let src = self.ea(memory, 0);
-        memory.asm.mov(Size::Long, src, EA::Addr(addr));
-        EA::Offset(addr, 0)
     }
 }
 
@@ -319,58 +272,40 @@ impl LValue {
             deref_offsets: Vec::new(),
         }
     }
-    fn storage_src(&self, memory: &mut Memory) -> Storage {
+    fn src_ea(&self, memory: &mut Memory) -> EA {
         let mut storage = memory.locals[self.base];
         if let Some(field) = self.field {
             storage = storage.field(field)
         }
-        match (storage, self.deref_offsets.len()) {
-            (_, 0) => {}
-            (Storage::Addr(_, r), 1) => {
-                memory.addr.mark(r);
-                storage = storage.deref(memory, storage.ty().deref(), self.deref_offsets[0], false);
-            }
-            _ => {
-                let r = memory.get_addr_register();
-                let src = storage.ea(memory, 0);
-                memory.asm.mov(Size::Long, src, EA::Addr(r));
-                for offset in self.deref_offsets.iter() {
-                    storage = Storage::Addr(storage.ty(), r).deref(
-                        memory,
-                        storage.ty().deref(),
-                        *offset,
-                        true,
-                    );
-                }
-            }
+        for offset in self.deref_offsets.iter() {
+            storage = storage.deref(memory, storage.ty().deref(), *offset, false)
         }
-        storage
+        storage.ea(memory)
     }
-    fn storage_dest(&self, memory: &mut Memory) -> EA {
+    fn dest_ea(&self, memory: &mut Memory) -> EA {
         let mut storage = memory.locals[self.base];
         if let Some(field) = self.field {
             storage = storage.field(field)
         }
 
-        match self.deref_offsets.len() {
-            0 => storage.ea(memory, 0),
-            1 => storage.deref_dest(memory),
-            _ => unimplemented!(),
+        let mut dest = storage.ea(memory);
+
+        if self.deref_offsets.len() > 0 {
+            let addr = memory.get_addr_register();
+            for offset in self.deref_offsets.iter() {
+                let src = dest.offset(*offset);
+                memory.asm.mov(Size::Long, src, EA::Addr(addr));
+                dest = EA::Offset(addr, 0)
+            }
         }
+
+        dest
     }
     fn deref(&self) -> LValue {
         let mut next = self.clone();
         next.deref_offsets.push(0);
         next.ty = next.ty.deref();
         next
-    }
-    fn assign(&self, memory: &mut Memory, src_storage: Storage) {
-        let dest = self.storage_dest(memory);
-        for (size, offset) in self.ty.iter_blocks() {
-            let src = src_storage.ea(memory, offset);
-            let dest = dest.offset(offset as i32);
-            memory.asm.mov(size, src, dest)
-        }
     }
     fn field(&self, field: Field) -> Self {
         let mut next = self.clone();
@@ -592,13 +527,13 @@ impl Memory {
             (Item::Storage(storage @ Storage::Stack(_, _)), StorageType::Stack(_)) => storage,
             (item, StorageType::Data(ea_size)) => {
                 let d = self.get_data_register();
-                let src = item.storage_original(self).ea(self, 0);
+                let src = item.src_ea(self);
                 self.asm.mov(ea_size, src, EA::Data(d));
                 Storage::Data(ty, d)
             }
             (item, StorageType::Addr) => {
                 let d = self.get_addr_register();
-                let src = item.storage_original(self).ea(self, 0);
+                let src = item.src_ea(self);
                 self.asm.mov(Size::Long, src, EA::Addr(d));
                 Storage::Addr(ty, d)
             }
@@ -623,11 +558,9 @@ impl Memory {
         // TODO: flags for constant shortcuts (folding, 0s, operand juggling)
         let r = self.pop_item();
         let l = self.pop_item();
-        // Need clearer names for these
-        let src = r.storage_original(self).ea(self, 0);
+        let src = r.src_ea(self);
         let dest_storage = l.storage_register(self);
-        let dest = dest_storage.ea(self, 0);
-        // TODO: type checking
+        let dest = dest_storage.ea(self);
         self.asm.add(Size::Long, src, dest);
         self.stack.push(Item::Storage(dest_storage));
     }
@@ -709,8 +642,10 @@ impl Memory {
 
     pub fn pointer(&mut self) {
         let item = self.pop_item();
-        let next = item.pointer(self);
-        self.stack.push(next);
+        let src = item.src_ea(self);
+        let ptr = self.storage_pointer(item.ty(), src);
+        item.free_transient(self);
+        self.stack.push(Item::Storage(ptr));
     }
 
     pub fn deref(&mut self) {
@@ -725,30 +660,30 @@ impl Memory {
             Item::LValue(l) => l,
             _ => unimplemented!(),
         };
-        let src = rvalue.storage_original(self);
-        lvalue.assign(self, src);
+        let dest = lvalue.dest_ea(self);
+        for (size, offset) in lvalue.ty.iter_blocks() {
+            let src = rvalue.src_ea(self).offset(offset);
+            let dest = dest.offset(offset);
+            self.asm.mov(size, src, dest)
+        }
         rvalue.free_transient(self);
     }
 
-    pub fn assign_field(&mut self, offset: usize, ty: &super::ast::Ty) {
+    pub fn assign_field(&mut self, field_offset: usize) {
         let value = self.pop_item();
-        let target = self.pop_item();
-        let ty = Ty {
-            base_size: ty.base_size(),
-            ref_level: ty.ref_level,
+        let target = match self.pop_item() {
+            Item::Storage(storage) => storage,
+            _ => unimplemented!(),
         };
-        // FIXME: storage can assign to itself
-        let base_id = self.locals.len();
-        let storage = target.storage_original(self);
-        self.locals.push(storage);
 
-        let lvalue_field = LValue::new(base_id, target.ty()).field(Field { ty, offset });
-        let src = value.storage_original(self);
-        lvalue_field.assign(self, src);
+        for (size, offset) in value.ty().iter_blocks() {
+            let src = value.src_ea(self).offset(offset);
+            let dest = target.ea(self).offset(offset + field_offset);
+            self.asm.mov(size, src, dest)
+        }
 
-        self.locals.pop().unwrap();
         value.free_transient(self);
-        self.stack.push(target);
+        self.stack.push(Item::Storage(target));
     }
 
     pub fn add_assign(&mut self) {
@@ -758,8 +693,8 @@ impl Memory {
             Item::LValue(l) => l,
             _ => unimplemented!(),
         };
-        let src = rvalue.storage_original(self).ea(self, 0);
-        let dest = lvalue.storage_src(self).ea(self, 0);
+        let src = rvalue.src_ea(self);
+        let dest = lvalue.dest_ea(self);
         self.asm.add(Size::Long, src, dest);
         rvalue.free_transient(self);
     }
@@ -790,8 +725,8 @@ impl Memory {
         let l = self.pop_item();
 
         // TODO: Constant folding, EA optimization
-        let src = r.storage_original(self).ea(self, 0);
-        let dest = l.storage_register(self).ea(self, 0);
+        let src = r.src_ea(self);
+        let dest = l.storage_register(self).ea(self);
         self.asm.cmp(Size::Long, src, dest);
     }
 
@@ -820,6 +755,48 @@ impl Memory {
             todo!("spill register")
         }
         res.register
+    }
+    fn storage_register(&mut self, ty: Ty, src: EA) -> Storage {
+        match ty.storage_type() {
+            StorageType::Data(size) => {
+                let r = self.get_data_register();
+                self.asm.mov(size, src, EA::Data(r));
+                Storage::Data(ty, r)
+            }
+            StorageType::Addr => {
+                let r = self.get_addr_register();
+                self.asm.mov(Size::Long, src, EA::Addr(r));
+                Storage::Addr(ty, r)
+            }
+            _ => unimplemented!(),
+        }
+    }
+    fn storage_pointer(&mut self, ty: Ty, src: EA) -> Storage {
+        match src {
+            EA::Offset(_, _) => {
+                let r = self.get_addr_register();
+                self.asm.load_ea(src, EA::Addr(r));
+                Storage::Addr(ty.pointer(), r)
+            }
+            _ => unimplemented!(),
+        }
+    }
+    fn storage_stack(&mut self, ty: Ty, src: EA) -> Storage {
+        for (size, offset) in ty.iter_blocks().into_iter().rev() {
+            let src = match src {
+                // when pushing from one part of the stack to another, the offset remains fixed
+                EA::Offset(Addr::A7, base_offset) => {
+                    let fixed_offset = base_offset + ty.size_bytes() as i16 - size.bytes() as i16;
+                    EA::Offset(Addr::A7, fixed_offset)
+                }
+                EA::Offset(a, base_offset) => EA::Offset(a, base_offset + offset as i16),
+                // TODO: PC offsets?
+                _ => src,
+            };
+            self.asm.mov(size, src, EA::PreDec(Addr::A7))
+        }
+        self.stack_offset += ty.size_bytes();
+        Storage::Stack(ty, self.stack_offset)
     }
 }
 
@@ -967,10 +944,10 @@ mod test {
         m.push_struct(point.size_bytes());
         // x
         m.push_i32(123);
-        m.assign_field(0, &int);
+        m.assign_field(0);
         // y
         m.push_i32(456);
-        m.assign_field(4, &int);
+        m.assign_field(4);
         let p = m.local();
 
         m.push_ident(p);

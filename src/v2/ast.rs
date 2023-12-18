@@ -373,7 +373,7 @@ impl Compiler {
                     let field = rec.get_field(&field_name)?;
                     let ty = self.expr(expr)?;
                     ty.expected(&field.ty)?;
-                    self.memory.assign_field(field.offset, &field.ty);
+                    self.memory.assign_field(field.offset);
                 }
                 Ok(t.ty)
             }

@@ -91,6 +91,7 @@ pub struct RegisterAllocator<R> {
     phantom: PhantomData<R>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Response<R> {
     pub register: R,
     pub spilled: bool,
