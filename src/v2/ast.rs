@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
 use super::vm_68k::Asm;
 use crate::v2::memory5::Memory;
@@ -10,14 +10,17 @@ pub enum CompileError {
     ExpectedType { expected: Ty, received: Ty },
     InvalidCallArgs,
     UnknownIdent(String),
+    UnknownTypeIdent(String),
     InvalidLValue,
     InvalidRef,
     InvalidDeref,
+    InvalidRecord,
+    UnknownField(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ty {
-    ref_level: usize,
+    pub ref_level: usize,
     kind: TyKind,
 }
 
@@ -26,25 +29,59 @@ enum TyKind {
     Void,
     Int,
     String,
+    Record(Rc<RecordTy>),
+}
+
+impl TyKind {
+    fn size(&self) -> usize {
+        match self {
+            Self::Void => 0,
+            Self::Int => 4,
+            Self::String => 8,
+            Self::Record(rec) => rec.size,
+        }
+    }
 }
 
 impl Ty {
-    fn void() -> Self {
+    pub fn void() -> Self {
         Self {
             ref_level: 0,
             kind: TyKind::Void,
         }
     }
-    fn int() -> Self {
+    pub fn int() -> Self {
         Self {
             ref_level: 0,
             kind: TyKind::Int,
         }
     }
-    fn string() -> Self {
+    pub fn string() -> Self {
         Self {
             ref_level: 0,
             kind: TyKind::String,
+        }
+    }
+    fn record(record: RecordTy) -> Self {
+        Self {
+            ref_level: 0,
+            kind: TyKind::Record(Rc::new(record)),
+        }
+    }
+    fn get_record(&self) -> Compile<Rc<RecordTy>> {
+        match &self.kind {
+            TyKind::Record(rec) => Ok(rec.clone()),
+            _ => Err(CompileError::InvalidRecord),
+        }
+    }
+    pub fn base_size(&self) -> usize {
+        self.kind.size()
+    }
+    fn size(&self) -> usize {
+        if self.ref_level > 0 {
+            4
+        } else {
+            self.kind.size()
         }
     }
     fn pointer(mut self) -> Self {
@@ -71,6 +108,40 @@ impl Ty {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordTy {
+    size: usize,
+    fields: HashMap<String, RecordTyField>,
+}
+
+impl RecordTy {
+    fn new(rows: Vec<(String, Ty)>) -> Self {
+        let mut fields = HashMap::new();
+        let mut offset = 0;
+        for (name, ty) in rows {
+            let size = ty.size();
+            fields.insert(name, RecordTyField { offset, ty });
+            offset += size
+        }
+        Self {
+            fields,
+            size: offset,
+        }
+    }
+    fn get_field(&self, field_name: &str) -> Compile<RecordTyField> {
+        self.fields
+            .get(field_name)
+            .cloned()
+            .ok_or_else(|| CompileError::UnknownField(field_name.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordTyField {
+    offset: usize,
+    ty: Ty,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Ident(String),
     Int(i32),
@@ -79,6 +150,8 @@ pub enum Expr {
     Add(Box<Expr>, Box<Expr>),
     Pointer(Box<Expr>),
     Deref(Box<Expr>),
+    Record(String, Vec<(String, Expr)>),
+    Field(Box<Expr>, String),
 }
 
 impl Expr {
@@ -87,6 +160,9 @@ impl Expr {
     }
     fn deref(self) -> Expr {
         Expr::Deref(Box::new(self))
+    }
+    fn field(self, field: &str) -> Expr {
+        Expr::Field(Box::new(self), field.to_string())
     }
 }
 
@@ -103,10 +179,19 @@ pub enum Stmt {
     Assign(Expr, Expr),
     Expr(Expr),
     Log(String),
+    Record(String, Vec<RecordField>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TyExpr {}
+pub struct RecordField {
+    name: String,
+    ty: TyExpr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TyExpr {
+    Ident(String),
+}
 
 #[derive(Default, Debug)]
 struct Scope {
@@ -115,7 +200,7 @@ struct Scope {
 
 impl Scope {
     fn begin(&mut self) {
-        self.frames.push(ScopeFrame::default())
+        self.frames.push(ScopeFrame::root())
     }
     fn end(&mut self) {
         self.frames.pop().unwrap();
@@ -124,6 +209,10 @@ impl Scope {
         let top = self.top_mut();
         top.scope.insert(name, ScopeRecord { id, ty, can_ref });
     }
+    fn insert_ty(&mut self, name: String, ty: Ty) {
+        let top = self.top_mut();
+        top.ty_scope.insert(name, TyRecord { ty });
+    }
     fn get(&mut self, name: &str) -> Compile<ScopeRecord> {
         for frame in self.frames.iter().rev() {
             if let Some(rec) = frame.scope.get(name) {
@@ -131,6 +220,14 @@ impl Scope {
             }
         }
         Err(CompileError::UnknownIdent(name.to_string()))
+    }
+    fn get_ty(&mut self, name: &str) -> Compile<TyRecord> {
+        for frame in self.frames.iter().rev() {
+            if let Some(rec) = frame.ty_scope.get(name) {
+                return Ok(rec.clone());
+            }
+        }
+        Err(CompileError::UnknownTypeIdent(name.to_string()))
     }
     fn top_mut(&mut self) -> &mut ScopeFrame {
         let idx = self.frames.len() - 1;
@@ -141,6 +238,20 @@ impl Scope {
 #[derive(Default, Debug)]
 struct ScopeFrame {
     scope: HashMap<String, ScopeRecord>,
+    ty_scope: HashMap<String, TyRecord>,
+}
+
+impl ScopeFrame {
+    fn root() -> Self {
+        let mut ty_scope = HashMap::new();
+        ty_scope.insert("Void".to_string(), TyRecord { ty: Ty::void() });
+        ty_scope.insert("Int".to_string(), TyRecord { ty: Ty::int() });
+        ty_scope.insert("String".to_string(), TyRecord { ty: Ty::string() });
+        Self {
+            scope: HashMap::new(),
+            ty_scope,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,13 +261,14 @@ struct ScopeRecord {
     can_ref: bool,
 }
 
-#[derive(Default, Debug)]
-struct TyScope {}
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TyRecord {
+    ty: Ty,
+}
 
 #[derive(Default, Debug)]
 pub struct Compiler {
     scope: Scope,
-    ty_scope: TyScope,
     memory: Memory,
 }
 
@@ -173,7 +285,15 @@ impl Compiler {
         c.scope.end();
         Ok(c.memory.end())
     }
-    pub fn stmt(&mut self, stmt: Stmt) -> Compile<()> {
+    fn ty_expr(&mut self, tyexpr: TyExpr) -> Compile<Ty> {
+        match tyexpr {
+            TyExpr::Ident(name) => {
+                let rec = self.scope.get_ty(&name)?;
+                Ok(rec.ty)
+            }
+        }
+    }
+    fn stmt(&mut self, stmt: Stmt) -> Compile<()> {
         match stmt {
             Stmt::Local(name, expr) => {
                 let ty = self.expr(expr)?;
@@ -197,10 +317,19 @@ impl Compiler {
             Stmt::Log(str) => {
                 self.memory.log(&str);
             }
+            Stmt::Record(name, fields) => {
+                let mut rows = Vec::new();
+                for field in fields {
+                    let ty = self.ty_expr(field.ty)?;
+                    rows.push((field.name, ty))
+                }
+                let ty = Ty::record(RecordTy::new(rows));
+                self.scope.insert_ty(name, ty)
+            }
         };
         Ok(())
     }
-    pub fn expr(&mut self, expr: Expr) -> Compile<Ty> {
+    fn expr(&mut self, expr: Expr) -> Compile<Ty> {
         match expr {
             Expr::Int(value) => {
                 self.memory.push_i32(value);
@@ -235,6 +364,25 @@ impl Compiler {
                 let ty = self.expr(*expr)?.deref()?;
                 self.memory.deref();
                 Ok(ty)
+            }
+            Expr::Record(name, fields) => {
+                let t = self.scope.get_ty(&name)?;
+                let rec = t.ty.get_record()?;
+                self.memory.push_struct(rec.size);
+                for (field_name, expr) in fields {
+                    let field = rec.get_field(&field_name)?;
+                    let ty = self.expr(expr)?;
+                    ty.expected(&field.ty)?;
+                    self.memory.assign_field(field.offset, &field.ty);
+                }
+                Ok(t.ty)
+            }
+            Expr::Field(expr, field_name) => {
+                let expr_ty = self.expr(*expr)?;
+                let rec = expr_ty.get_record()?;
+                let field = rec.get_field(&field_name)?;
+                self.memory.field(field.offset, &field.ty);
+                Ok(field.ty)
             }
         }
     }
@@ -301,6 +449,22 @@ mod test {
     fn assign(lvalue: Expr, rvalue: Expr) -> Stmt {
         Stmt::Assign(lvalue, rvalue)
     }
+    fn record_ty(name: &str, fields: Vec<(&str, TyExpr)>) -> Stmt {
+        Stmt::Record(
+            name.to_string(),
+            fields
+                .into_iter()
+                .map(|(name, t)| RecordField {
+                    name: name.to_string(),
+                    ty: t,
+                })
+                .collect(),
+        )
+    }
+
+    fn ty_ident(name: &str) -> TyExpr {
+        TyExpr::Ident(name.to_string())
+    }
 
     fn int(value: i32) -> Expr {
         Expr::Int(value)
@@ -316,6 +480,15 @@ mod test {
     }
     fn add(left: Expr, right: Expr) -> Expr {
         Expr::Add(Box::new(left), Box::new(right))
+    }
+    fn record(name: &str, fields: Vec<(&str, Expr)>) -> Expr {
+        Expr::Record(
+            name.to_string(),
+            fields
+                .into_iter()
+                .map(|(f, e)| (f.to_string(), e))
+                .collect(),
+        )
     }
 
     fn assert_eq(left: Expr, right: Expr) -> Stmt {
@@ -427,6 +600,21 @@ mod test {
                 //
                 assign(ident("a_ptr").deref(), int(789)),
                 assert_eq(ident("a"), int(789)),
+            ])
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn record_fields() {
+        run_vm(
+            Compiler::program(vec![
+                record_ty(
+                    "Point",
+                    vec![("x", ty_ident("Int")), ("y", ty_ident("Int"))],
+                ),
+                local("p", record("Point", vec![("x", int(123)), ("y", int(456))])),
+                assert_eq(ident("p").field("x"), int(123)),
             ])
             .unwrap(),
         );

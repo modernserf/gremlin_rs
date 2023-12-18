@@ -516,13 +516,14 @@ impl Memory {
             .push(Item::LValue(LValue::new(id, original.ty())));
     }
 
-    pub fn push_struct(&mut self, ty: Ty) {
-        self.stack_offset += ty.size_bytes();
-        self.asm.sub(
-            Size::Long,
-            EA::Immediate(ty.size_bytes() as i32),
-            EA::Addr(Addr::A7),
-        );
+    pub fn push_struct(&mut self, size: usize) {
+        let ty = Ty {
+            base_size: size,
+            ref_level: 0,
+        };
+        self.stack_offset += size;
+        self.asm
+            .sub(Size::Long, EA::Immediate(size as i32), EA::Addr(Addr::A7));
         self.stack
             .push(Item::Storage(Storage::Stack(ty, self.stack_offset)));
     }
@@ -729,6 +730,27 @@ impl Memory {
         rvalue.free_transient(self);
     }
 
+    pub fn assign_field(&mut self, offset: usize, ty: &super::ast::Ty) {
+        let value = self.pop_item();
+        let target = self.pop_item();
+        let ty = Ty {
+            base_size: ty.base_size(),
+            ref_level: ty.ref_level,
+        };
+        // FIXME: storage can assign to itself
+        let base_id = self.locals.len();
+        let storage = target.storage_original(self);
+        self.locals.push(storage);
+
+        let lvalue_field = LValue::new(base_id, target.ty()).field(Field { ty, offset });
+        let src = value.storage_original(self);
+        lvalue_field.assign(self, src);
+
+        self.locals.pop().unwrap();
+        value.free_transient(self);
+        self.stack.push(target);
+    }
+
     pub fn add_assign(&mut self) {
         // TODO: flags for constant shortcuts (folding, 0s, operand juggling)
         let rvalue = self.pop_item();
@@ -742,9 +764,13 @@ impl Memory {
         rvalue.free_transient(self);
     }
 
-    pub fn field(&mut self, field: Field) {
+    pub fn field(&mut self, offset: usize, ty: &super::ast::Ty) {
         let item = self.pop_item();
-        let res = item.field(field);
+        let ty = Ty {
+            base_size: ty.base_size(),
+            ref_level: ty.ref_level,
+        };
+        let res = item.field(Field { ty, offset });
         self.stack.push(res)
     }
 
@@ -934,41 +960,30 @@ mod test {
             base_size: 8,
             ref_level: 0,
         };
-        let x_field = Field {
-            ty: Ty::i32(),
-            offset: 0,
-        };
-        let y_field = Field {
-            ty: Ty::i32(),
-            offset: 4,
-        };
+        let int = super::super::ast::Ty::int();
 
         let mut m = Memory::new();
 
-        m.push_struct(point);
+        m.push_struct(point.size_bytes());
+        // x
+        m.push_i32(123);
+        m.assign_field(0, &int);
+        // y
+        m.push_i32(456);
+        m.assign_field(4, &int);
         let p = m.local();
 
         m.push_ident(p);
-        m.field(x_field);
-        m.push_i32(123);
-        m.assign();
-
-        m.push_ident(p);
-        m.field(y_field);
-        m.push_i32(456);
-        m.assign();
-
-        m.push_ident(p);
-        m.field(x_field);
+        m.field(0, &int);
         m.push_i32(123);
         m.assert_eq();
 
         m.push_ident(p);
-        m.field(y_field);
+        m.field(4, &int);
         m.push_i32(456);
         m.assert_eq();
 
-        m.push_struct(point);
+        m.push_struct(point.size_bytes());
         let p2 = m.local();
 
         m.push_ident(p2);
@@ -976,12 +991,12 @@ mod test {
         m.assign();
 
         m.push_ident(p);
-        m.field(x_field);
+        m.field(0, &int);
         m.push_i32(789);
         m.assign();
 
         m.push_ident(p2);
-        m.field(x_field);
+        m.field(0, &int);
         m.push_i32(123);
         m.assert_eq();
 
@@ -994,13 +1009,10 @@ mod test {
             base_size: 8,
             ref_level: 0,
         };
-        let x_field = Field {
-            ty: Ty::i32(),
-            offset: 0,
-        };
+        let int = super::super::ast::Ty::int();
 
         let mut m = Memory::new();
-        m.push_struct(point);
+        m.push_struct(point.size_bytes());
         let p = m.local();
 
         m.push_ident(p);
@@ -1008,18 +1020,18 @@ mod test {
         let ptr_p = m.local();
 
         m.push_ident(p);
-        m.field(x_field);
+        m.field(0, &int);
         m.pointer();
         let ptr_p_x = m.local();
 
         m.push_ident(p);
-        m.field(x_field);
+        m.field(0, &int);
         m.push_i32(123);
         m.assign();
 
         m.push_ident(ptr_p);
         m.deref();
-        m.field(x_field);
+        m.field(0, &int);
         m.push_i32(123);
         m.assert_eq();
 
