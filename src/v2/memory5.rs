@@ -466,7 +466,7 @@ struct Flags {}
 impl Flags {}
 
 #[derive(Debug, Default)]
-struct Memory {
+pub struct Memory {
     flags: Flags,
     locals: Vec<Storage>,
     stack: Vec<Item>,
