@@ -772,7 +772,7 @@ pub enum Branch {
     Placeholder(Size),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Asm {
     pub out: Vec<u8>,
     pub base_offset: usize,

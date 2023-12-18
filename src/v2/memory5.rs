@@ -291,7 +291,7 @@ impl Storage {
 type LocalId = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Field {
+pub struct Field {
     ty: Ty,
     offset: usize,
 }

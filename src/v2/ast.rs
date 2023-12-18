@@ -66,6 +66,8 @@ pub struct CallExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     Local(String, Expr),
+    LocalRef(String, Expr),
+    Assign(Expr, Expr),
     Expr(Expr),
     Log(String),
 }
@@ -124,6 +126,7 @@ pub enum CompileError {
     ExpectedType { expected: Ty, received: Ty },
     InvalidCallArgs,
     UnknownIdent(String),
+    InvalidLValue,
 }
 
 #[derive(Default, Debug)]
@@ -153,6 +156,17 @@ impl Compiler {
                 let id = self.memory.local();
                 self.scope.insert(name, id, ty);
             }
+            Stmt::LocalRef(name, expr) => {
+                let ty = self.expr(expr)?;
+                let id = self.memory.local_stack();
+                self.scope.insert(name, id, ty);
+            }
+            Stmt::Assign(target, expr) => {
+                let expected = self.lvalue(target)?;
+                let ty = self.expr(expr)?;
+                ty.expected(&expected)?;
+                self.memory.assign();
+            }
             Stmt::Expr(expr) => {
                 self.expr(expr)?;
             }
@@ -161,6 +175,16 @@ impl Compiler {
             }
         };
         Ok(())
+    }
+    pub fn lvalue(&mut self, expr: Expr) -> Compile<Ty> {
+        match expr {
+            Expr::Ident(name) => {
+                let rec = self.scope.get(&name)?;
+                self.memory.push_ident(rec.id);
+                Ok(rec.ty)
+            }
+            _ => Err(CompileError::InvalidLValue),
+        }
     }
     pub fn expr(&mut self, expr: Expr) -> Compile<Ty> {
         match expr {
@@ -221,11 +245,17 @@ mod test {
     fn local(name: &str, expr: Expr) -> Stmt {
         Stmt::Local(name.to_string(), expr)
     }
+    fn local_ref(name: &str, expr: Expr) -> Stmt {
+        Stmt::LocalRef(name.to_string(), expr)
+    }
     fn log(name: &str) -> Stmt {
         Stmt::Log(name.to_string())
     }
     fn expr(expr: Expr) -> Stmt {
         Stmt::Expr(expr)
+    }
+    fn assign(lvalue: Expr, rvalue: Expr) -> Stmt {
+        Stmt::Assign(lvalue, rvalue)
     }
 
     fn int(value: i32) -> Expr {
@@ -284,6 +314,54 @@ mod test {
                 expr(call(ident("assert_eq"), vec![ident("c"), int(60)])),
             ])
             .unwrap(),
+        );
+    }
+
+    #[test]
+    fn add_type_err() {
+        assert_eq!(
+            Compiler::program(vec![expr(add(int(30), string("hello")))]),
+            Err(CompileError::ExpectedType {
+                expected: Ty::int(),
+                received: Ty::string()
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_call_args() {
+        assert_eq!(
+            Compiler::program(vec![expr(call(ident("assert_eq"), vec![])),]),
+            Err(CompileError::InvalidCallArgs)
+        );
+    }
+
+    #[test]
+    fn unknown_ident() {
+        assert_eq!(
+            Compiler::program(vec![expr(ident("foo"))]),
+            Err(CompileError::UnknownIdent("foo".to_string()))
+        )
+    }
+
+    #[test]
+    fn assign_() {
+        run_vm(
+            Compiler::program(vec![
+                local("a", int(10)),
+                assign(ident("a"), int(20)),
+                //
+                expr(call(ident("assert_eq"), vec![ident("a"), int(20)])),
+            ])
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn invalid_lvalue() {
+        assert_eq!(
+            Compiler::program(vec![assign(int(10), int(20))]),
+            Err(CompileError::InvalidLValue)
         );
     }
 }
