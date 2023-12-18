@@ -8,20 +8,20 @@ use super::vm_68k::Cond;
 // This time we'll really use flags for everything
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Ty {
+pub struct Ty {
     base_size: usize,
     ref_level: usize,
 }
 
 impl Ty {
-    fn i32() -> Self {
+    pub fn i32() -> Self {
         Self {
             base_size: 4,
             ref_level: 0,
         }
     }
     // (len: i32, str: &[u8])
-    fn string() -> Self {
+    pub fn string() -> Self {
         Self {
             base_size: 8,
             ref_level: 0,
@@ -61,13 +61,13 @@ impl Ty {
         }
         out
     }
-    fn pointer(&self) -> Ty {
+    pub fn pointer(&self) -> Ty {
         Self {
             base_size: self.base_size,
             ref_level: self.ref_level + 1,
         }
     }
-    fn deref(&self) -> Ty {
+    pub fn deref(&self) -> Ty {
         assert!(self.ref_level > 0);
         Self {
             base_size: self.base_size,
@@ -380,7 +380,7 @@ type IfIdx = usize;
 type LoopIdx = usize;
 
 #[derive(Debug)]
-struct MatchBuilder {
+pub struct MatchBuilder {
     jmp_base_idx: usize,
     checked_cases: Vec<bool>,
     case_ends: Vec<usize>,

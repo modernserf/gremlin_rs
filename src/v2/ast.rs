@@ -5,17 +5,36 @@ use crate::v2::memory5::Memory;
 use super::vm_68k::Asm;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Ty {}
+pub struct Ty {
+    ref_level: usize,
+    kind: TyKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TyKind {
+    Void,
+    Int,
+    String,
+}
 
 impl Ty {
-    fn int() -> Self {
-        Self {}
-    }
     fn void() -> Self {
-        Self {}
+        Self {
+            ref_level: 0,
+            kind: TyKind::Void,
+        }
+    }
+    fn int() -> Self {
+        Self {
+            ref_level: 0,
+            kind: TyKind::Int,
+        }
     }
     fn string() -> Self {
-        Self {}
+        Self {
+            ref_level: 0,
+            kind: TyKind::String,
+        }
     }
     fn expected(&self, expected: &Ty) -> Compile<()> {
         if self == expected {
@@ -33,7 +52,9 @@ impl Ty {
 pub enum Expr {
     Ident(String),
     Int(i32),
+    String(String),
     Call(Box<CallExpr>),
+    Add(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,9 +65,9 @@ pub struct CallExpr {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
-    Let(String, Expr),
+    Local(String, Expr),
     Expr(Expr),
-    Log(&'static str),
+    Log(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,7 +148,7 @@ impl Compiler {
     }
     pub fn stmt(&mut self, stmt: Stmt) -> Compile<()> {
         match stmt {
-            Stmt::Let(name, expr) => {
+            Stmt::Local(name, expr) => {
                 let ty = self.expr(expr)?;
                 let id = self.memory.local();
                 self.scope.insert(name, id, ty);
@@ -147,32 +168,48 @@ impl Compiler {
                 self.memory.push_i32(value);
                 Ok(Ty::int())
             }
+            Expr::String(name) => {
+                self.memory.push_string(name);
+                Ok(Ty::string())
+            }
             Expr::Ident(name) => {
                 let rec = self.scope.get(&name)?;
                 self.memory.push_ident(rec.id);
                 Ok(rec.ty)
             }
             Expr::Call(call) => self.call_expr(*call),
+            Expr::Add(left, right) => {
+                self.expr(*left)?.expected(&Ty::int())?;
+                self.expr(*right)?.expected(&Ty::int())?;
+                self.memory.add();
+                Ok(Ty::int())
+            }
         }
     }
     fn call_expr(&mut self, call: CallExpr) -> Compile<Ty> {
         match &call.target {
             Expr::Ident(str) if str == "assert_eq" => {
-                let mut arg_tys = Vec::new();
-                for arg in call.args {
-                    let ty = self.expr(arg)?;
-                    ty.expected(&Ty::int())?;
-                    arg_tys.push(ty);
-                }
-                if arg_tys.len() != 2 {
-                    return Err(CompileError::InvalidCallArgs);
-                }
-
+                self.call_args(call.args, &vec![Ty::int(), Ty::int()])?;
                 self.memory.assert_eq();
+                Ok(Ty::void())
+            }
+            Expr::Ident(str) if str == "println" => {
+                self.call_args(call.args, &vec![Ty::string()])?;
+                self.memory.println();
                 Ok(Ty::void())
             }
             _ => unimplemented!(),
         }
+    }
+    fn call_args(&mut self, args: Vec<Expr>, expected: &[Ty]) -> Compile<()> {
+        if args.len() != expected.len() {
+            return Err(CompileError::InvalidCallArgs);
+        }
+        for (i, arg) in args.into_iter().enumerate() {
+            let ty = self.expr(arg)?;
+            ty.expected(&expected[i])?;
+        }
+        Ok(())
     }
 }
 
@@ -180,6 +217,32 @@ impl Compiler {
 mod test {
     use super::*;
     use crate::v2::vm_68k::VM;
+
+    fn local(name: &str, expr: Expr) -> Stmt {
+        Stmt::Local(name.to_string(), expr)
+    }
+    fn log(name: &str) -> Stmt {
+        Stmt::Log(name.to_string())
+    }
+    fn expr(expr: Expr) -> Stmt {
+        Stmt::Expr(expr)
+    }
+
+    fn int(value: i32) -> Expr {
+        Expr::Int(value)
+    }
+    fn string(value: &str) -> Expr {
+        Expr::String(value.to_string())
+    }
+    fn ident(name: &str) -> Expr {
+        Expr::Ident(name.to_string())
+    }
+    fn call(target: Expr, args: Vec<Expr>) -> Expr {
+        Expr::Call(Box::new(CallExpr { target, args }))
+    }
+    fn add(left: Expr, right: Expr) -> Expr {
+        Expr::Add(Box::new(left), Box::new(right))
+    }
 
     fn run_vm(asm: Asm) -> VM {
         let mut vm = VM::new(256);
@@ -198,12 +261,27 @@ mod test {
     fn smoke_test() {
         run_vm(
             Compiler::program(vec![
-                Stmt::Let("foo".to_string(), Expr::Int(123)),
-                Stmt::Expr(Expr::Call(Box::new(CallExpr {
-                    target: Expr::Ident("assert_eq".to_string()),
-                    args: vec![Expr::Ident("foo".to_string()), Expr::Int(123)],
-                }))),
-                Stmt::Log("Hello, world!"),
+                log("log"),
+                //
+                local("foo", int(123)),
+                expr(call(ident("assert_eq"), vec![ident("foo"), int(123)])),
+                //
+                local("bar", string("Hello, world!")),
+                expr(call(ident("println"), vec![ident("bar")])),
+            ])
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn add_expr() {
+        run_vm(
+            Compiler::program(vec![
+                local("a", int(10)),
+                local("b", int(20)),
+                local("c", add(ident("a"), add(int(30), ident("b")))),
+                //
+                expr(call(ident("assert_eq"), vec![ident("c"), int(60)])),
             ])
             .unwrap(),
         );
