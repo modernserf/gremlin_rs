@@ -8,9 +8,9 @@ pub enum Size {
 }
 
 impl Size {
-    pub fn bytes(&self) -> i32 {
+    pub fn align_bytes(&self) -> i32 {
         match self {
-            Self::Byte => 1,
+            Self::Byte => 2,
             Self::Short => 2,
             Self::Long => 4,
         }

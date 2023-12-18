@@ -154,6 +154,7 @@ impl VM {
                     }
                     // RTS
                     0b110101 => {
+                        self.print_stack();
                         let ret = self.pop_stack();
                         self.pc = ret;
                     }
@@ -269,7 +270,7 @@ impl VM {
                     (self.pc + disp_8 as i32, self.pc)
                 };
                 if cond == 1 {
-                    self.push_stack(self.pc);
+                    self.push_stack(if_false);
                     self.pc = if_true;
                     return;
                 }
@@ -613,11 +614,11 @@ impl VM {
             (2, a) => EAView::Memory(self.addr[a]),
             (3, a) => {
                 let view = EAView::Memory(self.addr[a]);
-                self.addr[a] += size.bytes();
+                self.addr[a] += size.align_bytes();
                 view
             }
             (4, a) => {
-                self.addr[a] -= size.bytes();
+                self.addr[a] -= size.align_bytes();
                 EAView::Memory(self.addr[a])
             }
             (5, a) => {
@@ -694,6 +695,12 @@ impl VM {
                 EAView::Immediate(value)
             }
         }
+    }
+    pub fn print_stack(&self) {
+        println!(
+            "{:?}",
+            &self.memory[(self.addr[7] as usize)..(self.mem_i32(0) as usize)]
+        );
     }
 }
 

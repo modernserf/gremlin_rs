@@ -28,6 +28,7 @@ pub struct Ty {
 enum TyKind {
     Void,
     Int,
+    Bool,
     String,
     Record(Rc<RecordTy>),
 }
@@ -36,6 +37,7 @@ impl TyKind {
     fn size(&self) -> usize {
         match self {
             Self::Void => 0,
+            Self::Bool => 1,
             Self::Int => 4,
             Self::String => 8,
             Self::Record(rec) => rec.size,
@@ -54,6 +56,12 @@ impl Ty {
         Self {
             ref_level: 0,
             kind: TyKind::Int,
+        }
+    }
+    pub fn bool() -> Self {
+        Self {
+            ref_level: 0,
+            kind: TyKind::Bool,
         }
     }
     pub fn string() -> Self {
@@ -119,6 +127,9 @@ impl RecordTy {
         let mut offset = 0;
         for (name, ty) in rows {
             let size = ty.size();
+            if size == 1 {
+                todo!("alignment of byte fields")
+            }
             fields.insert(name, RecordTyField { offset, ty });
             offset += size
         }
@@ -145,6 +156,7 @@ struct RecordTyField {
 pub enum Expr {
     Ident(String),
     Int(i32),
+    Bool(bool),
     String(String),
     Call(Box<CallExpr>),
     Add(Box<Expr>, Box<Expr>),
@@ -251,6 +263,7 @@ impl ScopeFrame {
         let mut ty_scope = HashMap::new();
         ty_scope.insert("Void".to_string(), TyRecord { ty: Ty::void() });
         ty_scope.insert("Int".to_string(), TyRecord { ty: Ty::int() });
+        ty_scope.insert("Bool".to_string(), TyRecord { ty: Ty::bool() });
         ty_scope.insert("String".to_string(), TyRecord { ty: Ty::string() });
         Self {
             scope: HashMap::new(),
@@ -377,6 +390,10 @@ impl Compiler {
                 self.memory.push_i32(value);
                 Ok(Ty::int())
             }
+            Expr::Bool(value) => {
+                self.memory.push_bool(value);
+                Ok(Ty::bool())
+            }
             Expr::String(name) => {
                 self.memory.push_string(name);
                 Ok(Ty::string())
@@ -426,11 +443,10 @@ impl Compiler {
                 self.memory.field(field.offset, &field.ty);
                 Ok(field.ty)
             }
-            Expr::Equal(_, _) => {
-                unimplemented!("bools")
-            }
-            Expr::Less(_, _) => {
-                unimplemented!("bools")
+            Expr::Equal(_, _) | Expr::Less(_, _) => {
+                let cond = self.cond(expr)?;
+                self.memory.set_cond(cond);
+                Ok(Ty::bool())
             }
         }
     }
@@ -490,8 +506,10 @@ impl Compiler {
                 self.memory.cmp2();
                 Ok(Cond::Less)
             }
-            _ => {
-                unimplemented!("bools")
+            expr => {
+                self.expr(expr)?.expected(&Ty::bool())?;
+                self.memory.test_bool();
+                Ok(Cond::Equal)
             }
         }
     }

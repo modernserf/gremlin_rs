@@ -464,7 +464,7 @@ impl Memory {
             .push(Item::Storage(Storage::Constant(Ty::i32(), value)))
     }
     pub fn push_bool(&mut self, value: bool) {
-        let val = if value { 0xFF } else { 0 };
+        let val = if value { -1 } else { 0 };
         self.stack
             .push(Item::Storage(Storage::Constant(Ty::bool(), val)))
     }
@@ -734,6 +734,38 @@ impl Memory {
         self.stack_offset -= 8;
     }
 
+    pub fn assert_eq_u8(&mut self) {
+        // must zero stack before pushing, because mov.b just fills the first byte
+        self.asm
+            .mov(Size::Long, EA::Immediate(0), EA::PreDec(Addr::A7));
+        let src = self.pop_item().src_ea(self);
+        // Note offset to low byte
+        self.asm.mov(Size::Byte, src, EA::Offset(Addr::A7, 3));
+        self.stack_offset += 4;
+
+        self.asm
+            .mov(Size::Long, EA::Immediate(0), EA::PreDec(Addr::A7));
+        let src = self.pop_item().src_ea(self);
+        self.asm.mov(Size::Byte, src, EA::Offset(Addr::A7, 3));
+        self.stack_offset += 4;
+
+        self.asm.assert_eq();
+        self.stack_offset -= 8;
+    }
+
+    pub fn assert_eq_u16(&mut self) {
+        self.pop_item().storage_stack(self);
+        self.asm
+            .mov(Size::Short, EA::Immediate(0), EA::PreDec(Addr::A7));
+        self.stack_offset += 2;
+        self.pop_item().storage_stack(self);
+        self.asm
+            .mov(Size::Short, EA::Immediate(0), EA::PreDec(Addr::A7));
+        self.stack_offset += 2;
+        self.asm.assert_eq();
+        self.stack_offset -= 8;
+    }
+
     pub fn println(&mut self) {
         let item = self.pop_item();
         assert_eq!(item.ty(), Ty::string());
@@ -782,6 +814,11 @@ impl Memory {
         self.asm.scc(cond, EA::Data(data));
         self.stack
             .push(Item::Storage(Storage::Data(Ty::bool(), data)));
+    }
+    pub fn test_bool(&mut self) {
+        // TODO: use bit test instead of cmp
+        self.push_bool(true);
+        self.cmp2();
     }
 
     // scope
@@ -840,7 +877,8 @@ impl Memory {
             let src = match src {
                 // when pushing from one part of the stack to another, the offset remains fixed
                 EA::Offset(Addr::A7, base_offset) => {
-                    let fixed_offset = base_offset + ty.stack_space() as i16 - size.bytes() as i16;
+                    let fixed_offset =
+                        base_offset + ty.stack_space() as i16 - size.align_bytes() as i16;
                     EA::Offset(Addr::A7, fixed_offset)
                 }
                 _ => src.offset(offset),
@@ -1394,44 +1432,54 @@ mod test {
         run_vm(m.end());
     }
 
-    // #[test]
-    // fn bools() {
-    //     let mut m = Memory::new();
+    #[test]
+    fn bools() {
+        let mut m = Memory::new();
 
-    //     m.push_i32(1);
-    //     m.push_i32(2);
-    //     m.cmp2();
-    //     m.set_cond(Cond::Less);
-    //     let a = m.local();
+        m.push_i32(1);
+        m.push_i32(2);
+        m.cmp2();
+        m.set_cond(Cond::Less);
+        let a = m.local();
 
-    //     m.push_i32(1);
-    //     m.push_i32(2);
-    //     m.cmp2();
-    //     m.set_cond(Cond::Equal);
-    //     let b = m.local();
+        m.push_i32(1);
+        m.push_i32(2);
+        m.cmp2();
+        m.set_cond(Cond::Equal);
+        let b = m.local();
 
-    //     m.push_i32(0);
-    //     let res = m.local();
+        m.push_i32(0);
+        let res = m.local();
 
-    //     // if a || b
-    //     // m.push_ident(a);
-    //     // m.push_ident(b);
-    //     // m.or();
+        // if a || b
+        m.push_ident(a);
+        m.push_ident(b);
+        m.or();
+        m.test_bool();
+        let if_idx = m.if_begin(Cond::Equal);
+        m.push_ident(res);
+        m.push_i32(10);
+        m.assign();
+        m.if_end(if_idx);
 
-    //     m.push_bool(1);
-    //     m.push_i32(1);
-    //     m.cmp2();
-    //     let if_idx = m.if_begin(Cond::Equal);
-    //     m.push_ident(res);
-    //     m.push_i32(10);
-    //     m.assign();
-    //     let else_idx = m.if_else(if_idx);
-    //     m.if_end(else_idx);
+        m.push_ident(res);
+        m.push_i32(10);
+        m.assert_eq();
 
-    //     m.push_ident(res);
-    //     m.push_i32(10);
-    //     m.assert_eq();
+        run_vm(m.end());
+    }
 
-    //     run_vm(m.end());
-    // }
+    #[test]
+    fn logic() {
+        let mut m = Memory::new();
+
+        // m.xor();
+        m.push_bool(true);
+        m.not();
+        m.push_bool(false);
+        m.assert_eq_u8();
+
+        let vm = run_vm(m.end());
+        vm.print_stack();
+    }
 }
