@@ -3,16 +3,27 @@ use super::{ea::*, register::Addr};
 const ADDRESS_MASK: i32 = 0x7FFF_FFFF;
 
 // bit operations
+trait Bits: Sized {
+    fn bit_set(&self, idx: usize, value: bool) -> Self;
+    fn bit_test(&self, idx: usize) -> bool;
 
-fn bit_set(it: isize, idx: usize, value: bool) -> isize {
-    if value {
-        it | 1 << idx
-    } else {
-        it & !(1 << idx)
+    fn bit_set_mut(&mut self, idx: usize, value: bool) {
+        let next = self.bit_set(idx, value);
+        *self = next
     }
 }
-fn bit_test<T: Into<isize>>(it: T, idx: usize) -> bool {
-    it.into() & (1 << idx) != 0
+
+impl Bits for u16 {
+    fn bit_set(&self, idx: usize, value: bool) -> Self {
+        if value {
+            self | 1 << idx as u16
+        } else {
+            self & !(1 << idx) as u16
+        }
+    }
+    fn bit_test(&self, idx: usize) -> bool {
+        self & (1 << idx) as u16 != 0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -410,17 +421,17 @@ impl VM {
     }
     fn set_cond(&mut self, value: i32) {
         // zero
-        self.status = bit_set(self.status as isize, 2, value == 0) as u16;
+        self.status.bit_set_mut(2, value == 0);
         // negative
-        self.status = bit_set(self.status as isize, 3, value < 0) as u16;
+        self.status.bit_set_mut(3, value < 0);
         // TODO: carry, overflow flags
     }
     fn check_cond(&self, cond: Cond) -> bool {
         use Cond::*;
-        let c = self.status & 1 != 0;
-        let v = self.status & 2 != 0;
-        let z = self.status & 4 != 0;
-        let n = self.status & 8 != 0;
+        let c = self.status.bit_test(0);
+        let v = self.status.bit_test(1);
+        let z = self.status.bit_test(2);
+        let n = self.status.bit_test(3);
         match cond {
             True => true,
             False => false,
