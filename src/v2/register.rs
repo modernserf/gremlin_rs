@@ -97,7 +97,7 @@ pub struct Response<R> {
     pub spilled: bool,
 }
 
-impl<R: From<usize> + Into<usize> + Copy> RegisterAllocator<R> {
+impl<R: From<usize> + Into<usize> + Copy + std::fmt::Debug> RegisterAllocator<R> {
     pub fn new() -> Self {
         Self {
             rs: [RegisterUse::NeverUsed; 8],
@@ -106,6 +106,7 @@ impl<R: From<usize> + Into<usize> + Copy> RegisterAllocator<R> {
         }
     }
     pub fn mark(&mut self, r: R) {
+        println!("mark {:?}", r);
         match self.rs[r.into()] {
             RegisterUse::NeverUsed | RegisterUse::Free => panic!("marked unused register"),
             RegisterUse::LastUsed(_) => {}
@@ -123,9 +124,11 @@ impl<R: From<usize> + Into<usize> + Copy> RegisterAllocator<R> {
         }
     }
     pub fn free(&mut self, r: R) {
+        println!("free {:?}", r);
         self.rs[r.into()] = RegisterUse::Free
     }
     pub fn take(&mut self, r: R) -> bool {
+        println!("take {:?}", r);
         match self.rs[r.into()] {
             RegisterUse::LastUsed(_) => {
                 self.set_used(r.into());
@@ -139,16 +142,10 @@ impl<R: From<usize> + Into<usize> + Copy> RegisterAllocator<R> {
     }
     // order Free < NeverUsed < LastUsed(n) < LastUsed(n + m)
     pub fn take_in_range(&mut self, range: RangeInclusive<usize>) -> Response<R> {
-        assert!(!range.is_empty());
-        let mut min = (*range.start(), self.rs[*range.start()]);
-
-        for i in range {
-            let r = self.rs[i];
-            if r < min.1 {
-                min = (i, r)
-            }
-        }
+        let min = self.find_min(range);
         self.set_used(min.0);
+
+        println!("take in range {:?}", R::from(min.0));
         Response {
             register: R::from(min.0),
             spilled: match min.1 {
@@ -156,6 +153,28 @@ impl<R: From<usize> + Into<usize> + Copy> RegisterAllocator<R> {
                 _ => false,
             },
         }
+    }
+    pub fn take_free_in_range(&mut self, range: RangeInclusive<usize>) -> Option<R> {
+        let min = self.find_min(range);
+        match min.1 {
+            RegisterUse::LastUsed(_) => None,
+            RegisterUse::NeverUsed | RegisterUse::Free => {
+                self.set_used(min.0);
+                println!("take free in range {:?}", R::from(min.0));
+                Some(R::from(min.0))
+            }
+        }
+    }
+    fn find_min(&mut self, range: RangeInclusive<usize>) -> (usize, RegisterUse) {
+        assert!(!range.is_empty());
+        let mut min = (*range.start(), self.rs[*range.start()]);
+        for i in range {
+            let r = self.rs[i];
+            if r < min.1 {
+                min = (i, r)
+            }
+        }
+        min
     }
     pub fn ever_used(&mut self) -> Vec<R> {
         let mut out = Vec::new();

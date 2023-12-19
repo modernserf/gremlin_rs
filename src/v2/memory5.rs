@@ -560,11 +560,15 @@ impl Memory {
         let ty = item.ty();
         let id = self.locals.len();
         let storage = match (item, ty.storage_type()) {
-            (Item::Storage(storage @ Storage::Data(_, r)), StorageType::Data(_)) => {
+            (Item::Storage(storage @ Storage::Data(_, r)), StorageType::Data(_))
+                if (r as usize) >= 2 =>
+            {
                 self.data.mark(r);
                 storage
             }
-            (Item::Storage(storage @ Storage::Addr(_, r)), StorageType::Addr) => {
+            (Item::Storage(storage @ Storage::Addr(_, r)), StorageType::Addr)
+                if (r as usize) >= 2 =>
+            {
                 self.addr.mark(r);
                 storage
             }
@@ -573,12 +577,14 @@ impl Memory {
                 let d = self.get_data_register();
                 let src = item.src_ea(self);
                 self.asm.mov(ea_size, src, EA::Data(d));
+                item.free_transient(self);
                 Storage::Data(ty, d)
             }
             (item, StorageType::Addr) => {
                 let d = self.get_addr_register();
                 let src = item.src_ea(self);
                 self.asm.mov(Size::Long, src, EA::Addr(d));
+                item.free_transient(self);
                 Storage::Addr(ty, d)
             }
             (item, StorageType::Stack(_)) => item.storage_stack(self),
@@ -966,6 +972,35 @@ impl Memory {
         }
         unreachable!("I guess we need to spill from the stack too")
     }
+    fn spill_volatile(&mut self, spill: EA) {
+        // volatile registers never make it to locals
+        let mut stack = std::mem::take(&mut self.stack);
+        for item in stack.iter_mut() {
+            *item = match (&item, spill) {
+                (Item::Storage(Storage::Data(ty, x)), EA::Data(y)) if *x == y => {
+                    if let Some(r) = self.data.take_free_in_range(2..=7) {
+                        self.asm.mov(Size::Long, spill, EA::Data(r));
+                        Item::Storage(Storage::Data(*ty, r))
+                    } else {
+                        Item::Storage(self.storage_stack(*ty, spill))
+                    }
+                }
+                (Item::Storage(Storage::Addr(ty, x)), EA::Addr(y)) if *x == y => {
+                    if let Some(r) = self.addr.take_free_in_range(2..=4) {
+                        self.asm.mov(Size::Long, spill, EA::Addr(r));
+                        Item::Storage(Storage::Addr(*ty, r))
+                    } else {
+                        Item::Storage(self.storage_stack(*ty, spill))
+                    }
+                }
+                _ => {
+                    continue;
+                }
+            };
+            self.stack = stack;
+            return;
+        }
+    }
 
     fn module_begin(&mut self) {
         self.asm.branch(Cond::True, Branch::Placeholder);
@@ -1004,16 +1039,20 @@ impl Memory {
         self.data = RegisterAllocator::new();
         self.addr = RegisterAllocator::new();
     }
-    fn call_stack(&mut self, sub: usize, return_ty: Ty) {
-        let args = std::mem::take(&mut self.stack);
+    // TODO: you should be able to look up sub type (incl calling convention) from sub id
+    fn call_stack(&mut self, sub: usize, arity: usize, return_ty: Ty) {
+        let len = self.stack.len() - arity;
+        let args = self.stack.drain(len..).collect::<Vec<_>>();
 
         let ret_storage = match return_ty.storage_type() {
             StorageType::Data(_) => {
-                self.data.take(Data::D0);
+                // self.data.take(Data::D0);
+                self.spill_volatile(EA::Data(Data::D0));
                 Storage::Data(return_ty, Data::D0)
             }
             StorageType::Addr => {
-                self.addr.take(Addr::A0);
+                // self.addr.take(Addr::A0);
+                self.spill_volatile(EA::Addr(Addr::A0));
                 Storage::Addr(return_ty, Addr::A0)
             }
             StorageType::Stack(size) => {
@@ -1030,32 +1069,38 @@ impl Memory {
         self.asm.branch_sub(Branch::Line(sub));
         self.stack_offset = prev_stack;
         self.stack.push(Item::Storage(ret_storage));
+        match ret_storage {
+            Storage::Data(_, r) => {
+                self.data.take(r);
+            }
+            Storage::Addr(_, r) => {
+                self.addr.take(r);
+            }
+            _ => {}
+        };
     }
     fn ret_value(&mut self) {
         let item = self.pop_item();
-        if let Some(storage) = self.ret_storage {
-            let spilled = match storage {
-                Storage::Data(_, d) => self.data.take(d),
-                Storage::Addr(_, a) => self.addr.take(a),
-                _ => false,
-            };
-            assert!(!spilled);
-            let dest = storage.ea(self);
-            for (size, offset) in storage.ty().iter_blocks() {
-                let src = item.src_ea(self).offset(offset);
-                let dest = dest.offset(offset);
-                self.asm.mov(size, src, dest);
-            }
-            item.free_transient(self);
-            match storage {
-                Storage::Data(_, d) => self.data.free(d),
-                Storage::Addr(_, a) => self.addr.free(a),
-                _ => {}
-            };
-            self.sub_epilogue();
-        } else {
-            unimplemented!()
+        let storage = self.ret_storage.unwrap();
+        let spilled = match storage {
+            Storage::Data(_, d) => self.data.take(d),
+            Storage::Addr(_, a) => self.addr.take(a),
+            _ => false,
+        };
+        assert!(!spilled);
+        let dest = storage.ea(self);
+        for (size, offset) in storage.ty().iter_blocks() {
+            let src = item.src_ea(self).offset(offset);
+            let dest = dest.offset(offset);
+            self.asm.mov(size, src, dest);
         }
+        item.free_transient(self);
+        match storage {
+            Storage::Data(_, d) => self.data.free(d),
+            Storage::Addr(_, a) => self.addr.free(a),
+            _ => {}
+        };
+        self.sub_epilogue();
     }
     fn sub_prologue(&mut self) {
         use Addr::*;
@@ -1775,14 +1820,47 @@ mod test {
         m.sub_end();
 
         m.module_main();
-        m.asm.mov(Size::Long, EA::Immediate(69), EA::Data(Data::D2));
-        m.data.take(Data::D2);
 
         m.push_i32(1);
         m.push_i32(2);
-        m.call_stack(add2, Ty::i32());
+        m.call_stack(add2, 2, Ty::i32());
 
         m.push_i32(3);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    fn volatile_registers() {
+        let mut m = Memory::new();
+        m.module_begin();
+
+        let inc = m.sub_stack(vec![Ty::i32()], Ty::i32());
+        {
+            m.push_ident(0);
+            m.push_i32(1);
+            m.add();
+            m.ret_value();
+        }
+        m.sub_end();
+
+        m.module_main();
+
+        m.push_i32(1);
+        m.call_stack(inc, 1, Ty::i32());
+        let a = m.local();
+
+        m.push_i32(2);
+        m.call_stack(inc, 1, Ty::i32());
+        let b = m.local();
+
+        m.push_ident(a);
+        m.call_stack(inc, 1, Ty::i32());
+        m.call_stack(inc, 1, Ty::i32());
+
+        m.push_ident(b);
+        m.call_stack(inc, 1, Ty::i32());
         m.assert_eq();
 
         run_vm(m.end());
