@@ -73,6 +73,7 @@ impl Ty {
         while offset < bytes {
             let take = usize::min(bytes - offset, 4);
             let size = match take {
+                1 => Size::Byte,
                 2 => Size::Short,
                 4 => Size::Long,
                 _ => todo!(),
