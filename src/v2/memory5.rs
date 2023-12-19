@@ -199,8 +199,8 @@ impl Storage {
                 memory.addr.mark(a);
                 EA::Addr(a)
             }
-            Self::StackArg(_, idx) => EA::Offset(Addr::A6, (8 + idx) as i16),
-            Self::Stack(_, idx) => EA::Offset(Addr::A7, (memory.stack_offset - idx) as i16),
+            Self::StackArg(_, idx) => EA::Offset(FP, (8 + idx) as i16),
+            Self::Stack(_, idx) => EA::Offset(SP, (memory.stack_offset - idx) as i16),
         }
     }
     fn register(&self, memory: &mut Memory) -> Storage {
@@ -247,7 +247,7 @@ impl Storage {
                 StorageType::Stack(_) => {
                     for (size, o) in deref_ty.iter_blocks().into_iter().rev() {
                         let src = EA::Offset(a, (o + offset) as i16);
-                        memory.asm.mov(size, src, EA::PreDec(Addr::A7))
+                        memory.asm.mov(size, src, EA::PreDec(SP))
                     }
                     if consume_addr {
                         memory.addr.free(a);
@@ -432,6 +432,13 @@ impl MatchBuilder {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlockScope {
+    init_stack_offset: usize,
+    init_locals_len: usize,
+    spilled_outer_scope: Vec<(usize, EA)>,
+}
+
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 struct Flags {}
 
@@ -447,6 +454,7 @@ pub struct Memory {
     asm: Asm,
     stack_offset: usize,
     strings: Vec<(usize, String)>,
+    block_scopes: Vec<BlockScope>,
 }
 
 impl Memory {
@@ -480,19 +488,16 @@ impl Memory {
         };
         self.stack_offset += size;
         self.asm
-            .sub(Size::Long, EA::Immediate(size as i32), EA::Addr(Addr::A7));
+            .sub(Size::Long, EA::Immediate(size as i32), EA::Addr(SP));
         self.stack
             .push(Item::Storage(Storage::Stack(ty, self.stack_offset)));
     }
     pub fn push_string(&mut self, str: String) {
-        self.asm.mov(
-            Size::Long,
-            EA::Immediate(str.len() as i32),
-            EA::PreDec(Addr::A7),
-        );
+        self.asm
+            .mov(Size::Long, EA::Immediate(str.len() as i32), EA::PreDec(SP));
         let to_fixup = self.asm.here();
         self.asm
-            .load_ea(EA::PCOffset(PC::Displacement(0)), EA::PreDec(Addr::A7));
+            .load_ea(EA::PCOffset(PC::Displacement(0)), EA::PreDec(SP));
 
         self.strings.push((to_fixup, str));
 
@@ -736,17 +741,15 @@ impl Memory {
 
     pub fn assert_eq_u8(&mut self) {
         // must zero stack before pushing, because mov.b just fills the first byte
-        self.asm
-            .mov(Size::Long, EA::Immediate(0), EA::PreDec(Addr::A7));
+        self.asm.mov(Size::Long, EA::Immediate(0), EA::PreDec(SP));
         let src = self.pop_item().src_ea(self);
         // Note offset to low byte
-        self.asm.mov(Size::Byte, src, EA::Offset(Addr::A7, 3));
+        self.asm.mov(Size::Byte, src, EA::Offset(SP, 3));
         self.stack_offset += 4;
 
-        self.asm
-            .mov(Size::Long, EA::Immediate(0), EA::PreDec(Addr::A7));
+        self.asm.mov(Size::Long, EA::Immediate(0), EA::PreDec(SP));
         let src = self.pop_item().src_ea(self);
-        self.asm.mov(Size::Byte, src, EA::Offset(Addr::A7, 3));
+        self.asm.mov(Size::Byte, src, EA::Offset(SP, 3));
         self.stack_offset += 4;
 
         self.asm.assert_eq();
@@ -755,12 +758,10 @@ impl Memory {
 
     pub fn assert_eq_u16(&mut self) {
         self.pop_item().storage_stack(self);
-        self.asm
-            .mov(Size::Short, EA::Immediate(0), EA::PreDec(Addr::A7));
+        self.asm.mov(Size::Short, EA::Immediate(0), EA::PreDec(SP));
         self.stack_offset += 2;
         self.pop_item().storage_stack(self);
-        self.asm
-            .mov(Size::Short, EA::Immediate(0), EA::PreDec(Addr::A7));
+        self.asm.mov(Size::Short, EA::Immediate(0), EA::PreDec(SP));
         self.stack_offset += 2;
         self.asm.assert_eq();
         self.stack_offset -= 8;
@@ -774,14 +775,11 @@ impl Memory {
         self.stack_offset -= 8;
     }
     pub fn log(&mut self, str: &str) {
-        self.asm.mov(
-            Size::Long,
-            EA::Immediate(str.len() as i32),
-            EA::PreDec(Addr::A7),
-        );
+        self.asm
+            .mov(Size::Long, EA::Immediate(str.len() as i32), EA::PreDec(SP));
         let to_fixup = self.asm.here();
         self.asm
-            .load_ea(EA::PCOffset(PC::Displacement(0)), EA::PreDec(Addr::A7));
+            .load_ea(EA::PCOffset(PC::Displacement(0)), EA::PreDec(SP));
         self.asm.println();
 
         self.strings.push((to_fixup, str.to_string()));
@@ -791,7 +789,7 @@ impl Memory {
         for (at, str) in strs {
             let line = self.asm.string(&str);
             self.asm.fixup(at, |asm| {
-                asm.load_ea(EA::PCOffset(PC::Line(line)), EA::PreDec(Addr::A7));
+                asm.load_ea(EA::PCOffset(PC::Line(line)), EA::PreDec(SP));
             });
         }
     }
@@ -822,9 +820,63 @@ impl Memory {
     }
 
     // scope
-    fn scope_begin(&mut self) {}
+    fn scope_begin(&mut self) {
+        self.block_scopes.push(BlockScope {
+            init_stack_offset: self.stack_offset,
+            init_locals_len: self.locals.len(),
+            spilled_outer_scope: Vec::new(),
+        });
+    }
+    fn current_scope_mut(&mut self) -> Option<&mut BlockScope> {
+        if self.block_scopes.len() == 0 {
+            return None;
+        }
+        let idx = self.block_scopes.len() - 1;
+        Some(&mut self.block_scopes[idx])
+    }
+    fn spill_local_id(&mut self, id: usize, spill: EA) {
+        if let Some(scope) = self.current_scope_mut() {
+            if id < scope.init_locals_len {
+                scope.spilled_outer_scope.push((id, spill))
+            }
+        }
+    }
     fn scope_end(&mut self) {
-        // TODO: handle spills, deallocate stack
+        let scope = self.block_scopes.pop().unwrap();
+        // drop locals
+        let mut locals = std::mem::take(&mut self.locals);
+        for local in locals.drain(scope.init_locals_len..) {
+            local.free_transient(self);
+        }
+        self.locals = locals;
+        // expr stack should be cleared between statements
+        assert!(self.stack.is_empty());
+
+        // restore spilled registers
+        for (id, spill) in scope.spilled_outer_scope {
+            let local = self.locals[id];
+            let ty = local.ty();
+            let src = local.ea(self);
+            self.asm.mov(local.ty().op_size(), src, spill);
+            self.locals[id] = match spill {
+                EA::Data(d) => {
+                    self.data.take(d);
+                    Storage::Data(ty, d)
+                }
+                EA::Addr(a) => {
+                    self.addr.take(a);
+                    Storage::Addr(ty, a)
+                }
+                _ => unreachable!(),
+            };
+        }
+        // clean up stack
+        let to_drop = self.stack_offset - scope.init_stack_offset;
+        if to_drop > 0 {
+            self.asm
+                .add(Size::Long, EA::Immediate(to_drop as i32), EA::Addr(SP));
+        }
+        self.stack_offset = scope.init_stack_offset;
     }
 
     // utils
@@ -835,7 +887,7 @@ impl Memory {
         // TODO: make range an explicit config param
         let res = self.data.take_in_range(2..=7);
         if res.spilled {
-            todo!("spill register")
+            self.spill(EA::Data(res.register))
         }
         res.register
     }
@@ -843,7 +895,7 @@ impl Memory {
         // TODO: make range an explicit config param
         let res = self.addr.take_in_range(2..=4);
         if res.spilled {
-            todo!("spill register")
+            self.spill(EA::Addr(res.register))
         }
         res.register
     }
@@ -876,17 +928,38 @@ impl Memory {
         for (size, offset) in ty.iter_blocks().into_iter().rev() {
             let src = match src {
                 // when pushing from one part of the stack to another, the offset remains fixed
-                EA::Offset(Addr::A7, base_offset) => {
+                EA::Offset(SP, base_offset) => {
                     let fixed_offset =
                         base_offset + ty.stack_space() as i16 - size.align_bytes() as i16;
-                    EA::Offset(Addr::A7, fixed_offset)
+                    EA::Offset(SP, fixed_offset)
                 }
                 _ => src.offset(offset),
             };
-            self.asm.mov(size, src, EA::PreDec(Addr::A7))
+            self.asm.mov(size, src, EA::PreDec(SP))
         }
         self.stack_offset += ty.stack_space();
         Storage::Stack(ty, self.stack_offset)
+    }
+    fn spill(&mut self, spill: EA) {
+        let mut locals = std::mem::take(&mut self.locals);
+        for (id, local) in locals.iter_mut().enumerate() {
+            match (*local, spill) {
+                (Storage::Data(ty, x), EA::Data(y)) if x == y => {
+                    self.spill_local_id(id, spill);
+                    *local = self.storage_stack(ty, spill);
+                    self.locals = locals;
+                    return;
+                }
+                (Storage::Addr(ty, x), EA::Addr(y)) if x == y => {
+                    self.spill_local_id(id, spill);
+                    *local = self.storage_stack(ty, spill);
+                    self.locals = locals;
+                    return;
+                }
+                _ => {}
+            };
+        }
+        unreachable!("I guess we need to spill from the stack too")
     }
 }
 
@@ -1473,13 +1546,103 @@ mod test {
     fn logic() {
         let mut m = Memory::new();
 
-        // m.xor();
         m.push_bool(true);
         m.not();
         m.push_bool(false);
         m.assert_eq_u8();
 
-        let vm = run_vm(m.end());
-        vm.print_stack();
+        m.push_bool(true);
+        m.push_bool(true);
+        m.xor();
+        m.push_bool(false);
+        m.assert_eq_u8();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    fn spill_registers() {
+        let mut m = Memory::new();
+
+        m.push_i32(1);
+        let a = m.local();
+
+        m.push_i32(2);
+        m.local();
+
+        m.push_i32(3);
+        m.local();
+
+        m.push_i32(4);
+        m.local();
+
+        m.push_i32(5);
+        m.local();
+
+        m.push_i32(6);
+        m.local();
+
+        m.push_i32(7);
+        m.local();
+
+        m.push_i32(8);
+        m.local();
+
+        m.push_ident(a);
+        m.push_i32(1);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    fn spill_registers_scope() {
+        let mut m = Memory::new();
+
+        m.push_i32(1);
+        let a = m.local();
+
+        m.scope_begin();
+        {
+            m.push_i32(2);
+            m.local();
+
+            m.push_i32(3);
+            m.local();
+
+            m.push_i32(4);
+            m.local();
+
+            m.push_i32(5);
+            m.local();
+
+            m.push_i32(6);
+            m.local();
+
+            m.push_i32(7);
+            m.local();
+
+            m.push_i32(8);
+            m.local();
+
+            m.push_ident(a);
+            m.push_i32(1);
+            m.assert_eq();
+
+            m.push_ident(a);
+            m.push_i32(20);
+            m.assign();
+
+            m.push_ident(a);
+            m.push_i32(20);
+            m.assert_eq();
+        };
+        m.scope_end();
+
+        m.push_ident(a);
+        m.push_i32(20);
+        m.assert_eq();
+
+        run_vm(m.end());
     }
 }

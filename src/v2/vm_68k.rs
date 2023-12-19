@@ -280,7 +280,14 @@ impl VM {
                     self.pc = if_false
                 }
             }
-            // MOVEQ here
+            // MOVEQ
+            (0b0111, _, _) => {
+                self.pc += 2;
+                let value = i8::from_be_bytes([(instr & 0xFF) as u8]);
+                let src = EAView::Immediate(value as i32);
+                let dest = EAView::Data(reg);
+                self.ea_apply(dest, src, Size::Long, |_, x| x);
+            }
             // OR / DIV
             (0b1000, _, _) => {
                 let (size, src, dest) = match mode {
@@ -877,6 +884,16 @@ impl Asm {
         }
     }
     pub fn mov(&mut self, size: Size, src: EA, dest: EA) {
+        match (src, dest) {
+            (EA::Immediate(x), EA::Data(d)) if (x < 128) && (x >= -128) => {
+                self.tag4_reg3_mode3_ea(0b0111, d as u16, 0);
+                self.out.pop();
+                self.out.push((x as i8).to_be_bytes()[0]);
+                return;
+            }
+            _ => {}
+        };
+
         let tag = match size {
             Size::Byte => 0b0001,
             Size::Short => 0b0011,
