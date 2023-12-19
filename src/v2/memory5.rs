@@ -814,9 +814,10 @@ impl Memory {
             .push(Item::Storage(Storage::Data(Ty::bool(), data)));
     }
     pub fn test_bool(&mut self) {
-        // TODO: use bit test instead of cmp
-        self.push_bool(true);
-        self.cmp2();
+        let item = self.pop_item();
+        let ea = item.src_ea(self);
+        self.asm.btst(Size::Byte, EA::Immediate(0), ea);
+        item.free_transient(self);
     }
 
     // scope

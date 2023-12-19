@@ -16,13 +16,26 @@ trait Bits: Sized {
 impl Bits for u16 {
     fn bit_set(&self, idx: usize, value: bool) -> Self {
         if value {
-            self | 1 << idx as u16
+            self | 1 << idx as Self
         } else {
-            self & !(1 << idx) as u16
+            self & !(1 << idx) as Self
         }
     }
     fn bit_test(&self, idx: usize) -> bool {
-        self & (1 << idx) as u16 != 0
+        self & (1 << idx) as Self != 0
+    }
+}
+
+impl Bits for i32 {
+    fn bit_set(&self, idx: usize, value: bool) -> Self {
+        if value {
+            self | 1 << idx as Self
+        } else {
+            self & !(1 << idx) as Self
+        }
+    }
+    fn bit_test(&self, idx: usize) -> bool {
+        self & (1 << idx) as Self != 0
     }
 }
 
@@ -91,8 +104,17 @@ impl VM {
         let mode = (instr >> 6) & 0b111;
 
         match (tag, reg, mode) {
+            // BTST
+            (0b0000, 0b100, 0) => {
+                let src = self.ea_read(Size::Byte);
+                let bit = self.immediate_read(Size::Byte);
+                let value = self.ea_src(src, Size::Byte);
+                let idx = self.ea_src(bit, Size::Byte);
+                let test = value.bit_test(idx as usize);
+                self.status = self.status.bit_set(StatusFlag::Zero as usize, test);
+            }
             // immediate ops
-            (0b000, _, _) => {
+            (0b0000, _, _) => {
                 let (size, dest) = self.mode_read_0(mode);
                 let src = self.immediate_read(size);
                 let op = match reg {
@@ -435,18 +457,18 @@ impl VM {
         }
     }
     fn set_cond(&mut self, value: i32) {
-        // zero
-        self.status.bit_set_mut(2, value == 0);
-        // negative
-        self.status.bit_set_mut(3, value < 0);
+        self.status
+            .bit_set_mut(StatusFlag::Zero as usize, value == 0);
+        self.status
+            .bit_set_mut(StatusFlag::Negative as usize, value < 0);
         // TODO: carry, overflow flags
     }
     fn check_cond(&self, cond: Cond) -> bool {
         use Cond::*;
-        let c = self.status.bit_test(0);
-        let v = self.status.bit_test(1);
-        let z = self.status.bit_test(2);
-        let n = self.status.bit_test(3);
+        let c = self.status.bit_test(StatusFlag::Carry as usize);
+        let v = self.status.bit_test(StatusFlag::Overflow as usize);
+        let z = self.status.bit_test(StatusFlag::Zero as usize);
+        let n = self.status.bit_test(StatusFlag::Negative as usize);
         match cond {
             True => true,
             False => false,
@@ -1158,8 +1180,18 @@ impl Asm {
         // TRAP #2
         self.push_u16(0b0100_1110_0100_0010);
     }
+    // todo BSET, BCHG, BCLR
+    pub fn btst(&mut self, size: Size, src: EA, dest: EA) {
+        match (size, src) {
+            (Size::Byte, EA::Immediate(value)) => {
+                self.tag4_reg3_mode3_ea(0, 0b100, 0);
+                self.push_ea(Size::Byte, dest);
+                self.push_immediate(Size::Byte, value)
+            }
+            _ => unimplemented!(),
+        }
+    }
 
-    // todo BSET, BCHG, BCLR, BTST
     pub fn data(&mut self, data: &[u8]) -> usize {
         let here = self.here();
         for byte in data {
@@ -1706,5 +1738,20 @@ mod test {
         asm.halt();
 
         init_vm(&asm).run();
+    }
+
+    #[test]
+    fn btst() {
+        let mut asm = Asm::new();
+
+        asm.scc(Cond::True, Data(D0));
+        asm.btst(Size::Byte, Immediate(0), Data(D0));
+        asm.scc(Cond::Equal, Data(D1));
+        asm.halt();
+
+        let mut vm = init_vm(&asm);
+        vm.run();
+        assert_eq!(vm.data[0], 0xFF);
+        assert_eq!(vm.data[1], 0xFF);
     }
 }
