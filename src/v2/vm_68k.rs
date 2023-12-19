@@ -1,4 +1,7 @@
-use super::{ea::*, register::Addr};
+use super::{
+    ea::*,
+    register::{Addr, Data, SP},
+};
 
 const ADDRESS_MASK: i32 = 0x7FFF_FFFF;
 
@@ -74,8 +77,8 @@ impl VM {
     pub fn new(size: usize) -> Self {
         Self {
             memory: vec![0; size],
-            data: [0; 8],
-            addr: [0; 8],
+            data: [0x02020202; 8],
+            addr: [0x01010101; 8],
             pc: 0,
             status: 0,
             run_state: RunState::Halt,
@@ -162,6 +165,7 @@ impl VM {
                     }
                     // TRAP #1 : assert_eq
                     1 => {
+                        self.print_stack();
                         let left = self.pop_stack();
                         let right = self.pop_stack();
                         assert_eq!(left, right);
@@ -170,13 +174,13 @@ impl VM {
                     2 => {
                         let ptr = self.pop_stack();
                         let len = self.pop_stack();
+                        self.print_stack();
                         let chars = Vec::from(&self.memory[(ptr as usize)..((ptr + len) as usize)]);
                         let str = String::from_utf8(chars).unwrap();
                         println!("{}", str);
                     }
                     // RTS
                     0b110101 => {
-                        self.print_stack();
                         let ret = self.pop_stack();
                         self.pc = ret;
                     }
@@ -726,10 +730,27 @@ impl VM {
         }
     }
     pub fn print_stack(&self) {
+        println!();
         println!(
             "{:?}",
             &self.memory[(self.addr[7] as usize)..(self.mem_i32(0) as usize)]
         );
+        for (i, d) in self.data.iter().enumerate() {
+            if *d == 0x02020202 {
+                print!("D{}=       ", i);
+            } else {
+                print!("D{}={:6} ", i, d);
+            }
+        }
+        println!();
+        for (i, a) in self.addr.iter().enumerate() {
+            if *a == 0x01010101 {
+                print!("A{}=       ", i);
+            } else {
+                print!("A{}={:6} ", i, a);
+            }
+        }
+        println!();
     }
 }
 
@@ -1011,6 +1032,33 @@ impl Asm {
         self.out.push(bytes[0]);
         self.out.push(bytes[1]);
     }
+    // TODO: single instructions
+    pub fn link(&mut self, addr: Addr, disp: i32) {
+        self.mov(Size::Long, EA::Addr(addr), EA::PreDec(SP));
+        self.mov(Size::Long, EA::Addr(SP), EA::Addr(addr));
+        self.add(Size::Long, EA::Immediate(disp), EA::Addr(SP))
+    }
+    pub fn unlink(&mut self, addr: Addr) {
+        self.mov(Size::Long, EA::Addr(addr), EA::Addr(SP));
+        self.mov(Size::Long, EA::PostInc(SP), EA::Addr(addr));
+    }
+    pub fn movem_store(&mut self, data: &[Data], addr: &[Addr]) {
+        for d in data {
+            self.mov(Size::Long, EA::Data(*d), EA::PreDec(SP));
+        }
+        for a in addr {
+            self.mov(Size::Long, EA::Addr(*a), EA::PreDec(SP));
+        }
+    }
+    pub fn movem_load(&mut self, data: &[Data], addr: &[Addr]) {
+        for a in addr.iter().rev() {
+            self.mov(Size::Long, EA::PostInc(SP), EA::Addr(*a));
+        }
+        for d in data.iter().rev() {
+            self.mov(Size::Long, EA::PostInc(SP), EA::Data(*d));
+        }
+    }
+
     pub fn chk(&mut self, size: Size, src: EA, target: EA) {
         match target {
             EA::Data(d) => {

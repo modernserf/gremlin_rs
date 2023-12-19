@@ -456,6 +456,9 @@ pub struct Memory {
     stack_offset: usize,
     strings: Vec<(usize, String)>,
     block_scopes: Vec<BlockScope>,
+    // subroutines
+    ret_storage: Option<Storage>,
+    ret_to_drop: usize,
 }
 
 impl Memory {
@@ -901,6 +904,16 @@ impl Memory {
         }
         res.register
     }
+    fn storage_pointer(&mut self, ty: Ty, src: EA) -> Storage {
+        match src {
+            EA::Offset(_, _) => {
+                let r = self.get_addr_register();
+                self.asm.load_ea(src, EA::Addr(r));
+                Storage::Addr(ty.pointer(), r)
+            }
+            _ => unimplemented!(),
+        }
+    }
     fn storage_register(&mut self, ty: Ty, src: EA) -> Storage {
         match ty.storage_type() {
             StorageType::Data(size) => {
@@ -916,16 +929,6 @@ impl Memory {
             _ => unimplemented!(),
         }
     }
-    fn storage_pointer(&mut self, ty: Ty, src: EA) -> Storage {
-        match src {
-            EA::Offset(_, _) => {
-                let r = self.get_addr_register();
-                self.asm.load_ea(src, EA::Addr(r));
-                Storage::Addr(ty.pointer(), r)
-            }
-            _ => unimplemented!(),
-        }
-    }
     fn storage_stack(&mut self, ty: Ty, src: EA) -> Storage {
         for (size, offset) in ty.iter_blocks().into_iter().rev() {
             let src = match src {
@@ -935,7 +938,7 @@ impl Memory {
                         base_offset + ty.stack_space() as i16 - size.align_bytes() as i16;
                     EA::Offset(SP, fixed_offset)
                 }
-                _ => src.offset(offset),
+                _ => src.try_offset(offset),
             };
             self.asm.mov(size, src, EA::PreDec(SP))
         }
@@ -962,6 +965,115 @@ impl Memory {
             };
         }
         unreachable!("I guess we need to spill from the stack too")
+    }
+
+    fn module_begin(&mut self) {
+        self.asm.branch(Cond::True, Branch::Placeholder);
+    }
+    fn module_main(&mut self) {
+        self.asm.fixup_branch_to_here(0);
+    }
+    fn sub_stack(&mut self, params: Vec<Ty>, return_ty: Ty) -> usize {
+        let id = self.asm.here();
+        let mut frame_offset = 0;
+        for param in params {
+            self.locals.push(Storage::StackArg(param, frame_offset));
+            frame_offset += param.stack_space();
+        }
+        self.ret_to_drop = frame_offset;
+
+        if return_ty.base_size == 0 {
+            self.ret_storage = None;
+        } else {
+            let ret_storage = match return_ty.storage_type() {
+                StorageType::Data(_) => Storage::Data(return_ty, Data::D0),
+                StorageType::Addr => Storage::Addr(return_ty, Addr::A0),
+                StorageType::Stack(_) => Storage::StackArg(return_ty, frame_offset),
+            };
+            self.ret_storage = Some(ret_storage);
+        }
+        self.sub_prologue();
+        self.scope_begin();
+        id
+    }
+    fn sub_end(&mut self) {
+        self.scope_end();
+        self.asm.halt();
+        self.stack = Vec::new();
+        self.locals = Vec::new();
+        self.data = RegisterAllocator::new();
+        self.addr = RegisterAllocator::new();
+    }
+    fn call_stack(&mut self, sub: usize, return_ty: Ty) {
+        let args = std::mem::take(&mut self.stack);
+
+        let ret_storage = match return_ty.storage_type() {
+            StorageType::Data(_) => {
+                self.data.take(Data::D0);
+                Storage::Data(return_ty, Data::D0)
+            }
+            StorageType::Addr => {
+                self.addr.take(Addr::A0);
+                Storage::Addr(return_ty, Addr::A0)
+            }
+            StorageType::Stack(size) => {
+                self.asm
+                    .sub(Size::Long, EA::Immediate(size as i32), EA::Addr(SP));
+                self.stack_offset += size;
+                Storage::Stack(return_ty, self.stack_offset)
+            }
+        };
+        let prev_stack = self.stack_offset;
+        for arg in args {
+            arg.storage_stack(self);
+        }
+        self.asm.branch_sub(Branch::Line(sub));
+        self.stack_offset = prev_stack;
+        self.stack.push(Item::Storage(ret_storage));
+    }
+    fn ret_value(&mut self) {
+        let item = self.pop_item();
+        if let Some(storage) = self.ret_storage {
+            let spilled = match storage {
+                Storage::Data(_, d) => self.data.take(d),
+                Storage::Addr(_, a) => self.addr.take(a),
+                _ => false,
+            };
+            assert!(!spilled);
+            let dest = storage.ea(self);
+            for (size, offset) in storage.ty().iter_blocks() {
+                let src = item.src_ea(self).offset(offset);
+                let dest = dest.offset(offset);
+                self.asm.mov(size, src, dest);
+            }
+            item.free_transient(self);
+            match storage {
+                Storage::Data(_, d) => self.data.free(d),
+                Storage::Addr(_, a) => self.addr.free(a),
+                _ => {}
+            };
+            self.sub_epilogue();
+        } else {
+            unimplemented!()
+        }
+    }
+    fn sub_prologue(&mut self) {
+        use Addr::*;
+        use Data::*;
+        self.asm.link(FP, 0);
+        // TODO: write placeholder, rewrite to only used registers in sub_end
+        self.asm
+            .movem_store(&[D2, D3, D4, D5, D6, D7], &[A2, A3, A4]);
+    }
+    fn sub_epilogue(&mut self) {
+        use Addr::*;
+        use Data::*;
+        // TODO: run defer chain
+        // TODO: write placeholder, rewrite to only used registers in sub_end
+        self.asm
+            .movem_load(&[D2, D3, D4, D5, D6, D7], &[A2, A3, A4]);
+        self.asm.unlink(FP);
+        self.asm.ret(self.ret_to_drop as u16);
     }
 }
 
@@ -1643,6 +1755,34 @@ mod test {
 
         m.push_ident(a);
         m.push_i32(20);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    fn subroutine_stack_args() {
+        let mut m = Memory::new();
+        m.module_begin();
+
+        let add2 = m.sub_stack(vec![Ty::i32(), Ty::i32()], Ty::i32());
+        {
+            m.push_ident(0);
+            m.push_ident(1);
+            m.add();
+            m.ret_value();
+        }
+        m.sub_end();
+
+        m.module_main();
+        m.asm.mov(Size::Long, EA::Immediate(69), EA::Data(Data::D2));
+        m.data.take(Data::D2);
+
+        m.push_i32(1);
+        m.push_i32(2);
+        m.call_stack(add2, Ty::i32());
+
+        m.push_i32(3);
         m.assert_eq();
 
         run_vm(m.end());

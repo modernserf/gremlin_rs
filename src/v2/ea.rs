@@ -64,6 +64,12 @@ impl EA {
             _ => unimplemented!(),
         }
     }
+    pub fn try_offset(&self, offset: usize) -> EA {
+        match *self {
+            Self::Offset(a, o) => Self::Offset(a, o + offset as i16),
+            ea => ea,
+        }
+    }
     pub fn is_control_mode(&self) -> bool {
         match self {
             Self::Offset(_, _)
