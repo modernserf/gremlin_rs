@@ -440,6 +440,13 @@ struct BlockScope {
     spilled_outer_scope: Vec<(usize, EA)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubroutineRecord {
+    params: Vec<Ty>,
+    ret: Ty,
+    address: usize,
+}
+
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 struct Flags {}
 
@@ -457,6 +464,7 @@ pub struct Memory {
     strings: Vec<(usize, String)>,
     block_scopes: Vec<BlockScope>,
     // subroutines
+    subs: Vec<SubroutineRecord>,
     ret_storage: Option<Storage>,
     ret_to_drop: usize,
 }
@@ -1009,13 +1017,19 @@ impl Memory {
         self.asm.fixup_branch_to_here(0);
     }
     fn sub_stack(&mut self, params: Vec<Ty>, return_ty: Ty) -> usize {
-        let id = self.asm.here();
+        let address = self.asm.here();
         let mut frame_offset = 0;
-        for param in params {
-            self.locals.push(Storage::StackArg(param, frame_offset));
+        for param in params.iter() {
+            self.locals.push(Storage::StackArg(*param, frame_offset));
             frame_offset += param.stack_space();
         }
         self.ret_to_drop = frame_offset;
+        let id = self.subs.len();
+        self.subs.push(SubroutineRecord {
+            params,
+            ret: return_ty,
+            address,
+        });
 
         if return_ty.base_size == 0 {
             self.ret_storage = None;
@@ -1039,10 +1053,12 @@ impl Memory {
         self.data = RegisterAllocator::new();
         self.addr = RegisterAllocator::new();
     }
-    // TODO: you should be able to look up sub type (incl calling convention) from sub id
-    fn call_stack(&mut self, sub: usize, arity: usize, return_ty: Ty) {
+    fn call_sub(&mut self, sub_id: usize) {
+        let sub = self.subs[sub_id].clone();
+        let arity = sub.params.len();
         let len = self.stack.len() - arity;
         let args = self.stack.drain(len..).collect::<Vec<_>>();
+        let return_ty = sub.ret;
 
         let ret_storage = match return_ty.storage_type() {
             StorageType::Data(_) => {
@@ -1066,7 +1082,7 @@ impl Memory {
         for arg in args {
             arg.storage_stack(self);
         }
-        self.asm.branch_sub(Branch::Line(sub));
+        self.asm.branch_sub(Branch::Line(sub.address));
         self.stack_offset = prev_stack;
         self.stack.push(Item::Storage(ret_storage));
         match ret_storage {
@@ -1823,7 +1839,7 @@ mod test {
 
         m.push_i32(1);
         m.push_i32(2);
-        m.call_stack(add2, 2, Ty::i32());
+        m.call_sub(add2);
 
         m.push_i32(3);
         m.assert_eq();
@@ -1848,19 +1864,19 @@ mod test {
         m.module_main();
 
         m.push_i32(1);
-        m.call_stack(inc, 1, Ty::i32());
+        m.call_sub(inc);
         let a = m.local();
 
         m.push_i32(2);
-        m.call_stack(inc, 1, Ty::i32());
+        m.call_sub(inc);
         let b = m.local();
 
         m.push_ident(a);
-        m.call_stack(inc, 1, Ty::i32());
-        m.call_stack(inc, 1, Ty::i32());
+        m.call_sub(inc);
+        m.call_sub(inc);
 
         m.push_ident(b);
-        m.call_stack(inc, 1, Ty::i32());
+        m.call_sub(inc);
         m.assert_eq();
 
         run_vm(m.end());
