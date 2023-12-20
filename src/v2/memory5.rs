@@ -445,6 +445,12 @@ struct SubroutineRecord {
     params: Vec<Ty>,
     ret: Ty,
     address: usize,
+    cc: CallingConvention,
+}
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum CallingConvention {
+    Register,
+    Stack,
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -568,15 +574,11 @@ impl Memory {
         let ty = item.ty();
         let id = self.locals.len();
         let storage = match (item, ty.storage_type()) {
-            (Item::Storage(storage @ Storage::Data(_, r)), StorageType::Data(_))
-                if (r as usize) >= 2 =>
-            {
+            (Item::Storage(storage @ Storage::Data(_, r)), StorageType::Data(_)) => {
                 self.data.mark(r);
                 storage
             }
-            (Item::Storage(storage @ Storage::Addr(_, r)), StorageType::Addr)
-                if (r as usize) >= 2 =>
-            {
+            (Item::Storage(storage @ Storage::Addr(_, r)), StorageType::Addr) => {
                 self.addr.mark(r);
                 storage
             }
@@ -959,55 +961,79 @@ impl Memory {
         self.stack_offset += ty.stack_space();
         Storage::Stack(ty, self.stack_offset)
     }
-    fn spill(&mut self, spill: EA) {
+    fn iter_storage(
+        &mut self,
+        f: impl Fn(&mut Memory, Storage, Option<usize>) -> Option<Storage>,
+    ) -> Option<()> {
         let mut locals = std::mem::take(&mut self.locals);
         for (id, local) in locals.iter_mut().enumerate() {
-            match (*local, spill) {
-                (Storage::Data(ty, x), EA::Data(y)) if x == y => {
-                    self.spill_local_id(id, spill);
-                    *local = self.storage_stack(ty, spill);
-                    self.locals = locals;
-                    return;
-                }
-                (Storage::Addr(ty, x), EA::Addr(y)) if x == y => {
-                    self.spill_local_id(id, spill);
-                    *local = self.storage_stack(ty, spill);
-                    self.locals = locals;
-                    return;
-                }
-                _ => {}
-            };
+            if let Some(storage) = f(self, *local, Some(id)) {
+                *local = storage;
+                self.locals = locals;
+                return Some(());
+            }
         }
-        unreachable!("I guess we need to spill from the stack too")
-    }
-    fn spill_volatile(&mut self, spill: EA) {
-        // volatile registers never make it to locals
+        self.locals = locals;
         let mut stack = std::mem::take(&mut self.stack);
         for item in stack.iter_mut() {
-            *item = match (&item, spill) {
-                (Item::Storage(Storage::Data(ty, x)), EA::Data(y)) if *x == y => {
-                    if let Some(r) = self.data.take_free_in_range(2..=7) {
-                        self.asm.mov(Size::Long, spill, EA::Data(r));
-                        Item::Storage(Storage::Data(*ty, r))
-                    } else {
-                        Item::Storage(self.storage_stack(*ty, spill))
+            match item {
+                Item::Storage(storage) => {
+                    if let Some(storage) = f(self, *storage, None) {
+                        *item = Item::Storage(storage);
+                        self.stack = stack;
+                        return Some(());
                     }
                 }
-                (Item::Storage(Storage::Addr(ty, x)), EA::Addr(y)) if *x == y => {
-                    if let Some(r) = self.addr.take_free_in_range(2..=4) {
-                        self.asm.mov(Size::Long, spill, EA::Addr(r));
-                        Item::Storage(Storage::Addr(*ty, r))
-                    } else {
-                        Item::Storage(self.storage_stack(*ty, spill))
-                    }
-                }
-                _ => {
-                    continue;
-                }
-            };
-            self.stack = stack;
-            return;
+                _ => {}
+            }
         }
+        self.stack = stack;
+        return None;
+    }
+
+    fn spill(&mut self, spill: EA) {
+        self.iter_storage(|mem, storage, local| match (storage, spill) {
+            (Storage::Data(ty, x), EA::Data(y)) if x == y => {
+                if let Some(id) = local {
+                    mem.spill_local_id(id, spill);
+                }
+                Some(mem.storage_stack(ty, spill))
+            }
+            (Storage::Addr(ty, x), EA::Addr(y)) if x == y => {
+                if let Some(id) = local {
+                    mem.spill_local_id(id, spill);
+                }
+                Some(mem.storage_stack(ty, spill))
+            }
+            _ => None,
+        });
+    }
+    fn spill_volatile(&mut self, spill: EA) {
+        self.iter_storage(|mem, storage, local| match (storage, spill) {
+            (Storage::Data(ty, x), EA::Data(y)) if x == y => {
+                if let Some(id) = local {
+                    mem.spill_local_id(id, spill);
+                }
+                if let Some(r) = mem.data.take_free_in_range(2..=7) {
+                    mem.asm.mov(Size::Long, spill, EA::Data(r));
+                    Some(Storage::Data(ty, r))
+                } else {
+                    Some(mem.storage_stack(ty, spill))
+                }
+            }
+            (Storage::Addr(ty, x), EA::Addr(y)) if x == y => {
+                if let Some(id) = local {
+                    mem.spill_local_id(id, spill);
+                }
+                if let Some(r) = mem.addr.take_free_in_range(2..=4) {
+                    mem.asm.mov(Size::Long, spill, EA::Addr(r));
+                    Some(Storage::Addr(ty, r))
+                } else {
+                    Some(mem.storage_stack(ty, spill))
+                }
+            }
+            _ => None,
+        });
     }
 
     fn module_begin(&mut self) {
@@ -1015,6 +1041,49 @@ impl Memory {
     }
     fn module_main(&mut self) {
         self.asm.fixup_branch_to_here(0);
+    }
+    fn sub_register(&mut self, params: Vec<Ty>, return_ty: Ty) -> usize {
+        let address = self.asm.here();
+        let mut data = vec![Data::D1, Data::D0];
+        let mut addr = vec![Addr::A1, Addr::A0];
+        for param in params.iter() {
+            match param.storage_type() {
+                StorageType::Data(_) => {
+                    let r = data.pop().unwrap();
+                    self.data.take(r);
+                    self.locals.push(Storage::Data(*param, r));
+                }
+                StorageType::Addr => {
+                    let r = addr.pop().unwrap();
+                    self.addr.take(r);
+                    self.locals.push(Storage::Addr(*param, r));
+                }
+                StorageType::Stack(_) => unimplemented!(),
+            }
+        }
+        self.ret_to_drop = 0;
+        let id = self.subs.len();
+        self.subs.push(SubroutineRecord {
+            params,
+            ret: return_ty,
+            address,
+            cc: CallingConvention::Register,
+        });
+
+        if return_ty.base_size == 0 {
+            self.ret_storage = None;
+        } else {
+            let ret_storage = match return_ty.storage_type() {
+                StorageType::Data(_) => Storage::Data(return_ty, Data::D0),
+                StorageType::Addr => Storage::Addr(return_ty, Addr::A0),
+                StorageType::Stack(_) => unimplemented!(),
+            };
+            self.ret_storage = Some(ret_storage);
+        }
+
+        self.sub_prologue();
+        self.scope_begin();
+        id
     }
     fn sub_stack(&mut self, params: Vec<Ty>, return_ty: Ty) -> usize {
         let address = self.asm.here();
@@ -1029,6 +1098,7 @@ impl Memory {
             params,
             ret: return_ty,
             address,
+            cc: CallingConvention::Stack,
         });
 
         if return_ty.base_size == 0 {
@@ -1055,11 +1125,30 @@ impl Memory {
     }
     fn call_sub(&mut self, sub_id: usize) {
         let sub = self.subs[sub_id].clone();
-        let arity = sub.params.len();
-        let len = self.stack.len() - arity;
-        let args = self.stack.drain(len..).collect::<Vec<_>>();
+        // stash volatile registers
+        let mut data = vec![Data::D1, Data::D0];
+        let mut addr = vec![Addr::A1, Addr::A0];
+        let mut register_arg_dests = Vec::new();
+        if let CallingConvention::Register = sub.cc {
+            for param in &sub.params {
+                match param.storage_type() {
+                    StorageType::Data(_) => {
+                        let r = data.pop().unwrap();
+                        self.spill_volatile(EA::Data(r));
+                        register_arg_dests.push(EA::Data(r))
+                    }
+                    StorageType::Addr => {
+                        let r = addr.pop().unwrap();
+                        self.spill_volatile(EA::Addr(r));
+                        register_arg_dests.push(EA::Addr(r))
+                    }
+                    StorageType::Stack(_) => unimplemented!(),
+                }
+            }
+        }
+        // handle return type
+        let prev_stack = self.stack_offset;
         let return_ty = sub.ret;
-
         let ret_storage = match return_ty.storage_type() {
             StorageType::Data(_) => {
                 // self.data.take(Data::D0);
@@ -1078,10 +1167,34 @@ impl Memory {
                 Storage::Stack(return_ty, self.stack_offset)
             }
         };
-        let prev_stack = self.stack_offset;
-        for arg in args {
-            arg.storage_stack(self);
-        }
+
+        // load args
+        let len = self.stack.len() - sub.params.len();
+        let args = self.stack.drain(len..).collect::<Vec<_>>();
+        match sub.cc {
+            CallingConvention::Register => {
+                for (i, arg) in args.into_iter().enumerate() {
+                    let ty = arg.ty();
+                    let dest = register_arg_dests[i];
+                    match ty.storage_type() {
+                        StorageType::Data(size) => {
+                            let src = arg.src_ea(self);
+                            self.asm.mov(size, src, dest);
+                        }
+                        StorageType::Addr => {
+                            let src = arg.src_ea(self);
+                            self.asm.mov(Size::Long, src, dest);
+                        }
+                        StorageType::Stack(_) => unimplemented!(),
+                    }
+                }
+            }
+            CallingConvention::Stack => {
+                for arg in args {
+                    arg.storage_stack(self);
+                }
+            }
+        };
         self.asm.branch_sub(Branch::Line(sub.address));
         self.stack_offset = prev_stack;
         self.stack.push(Item::Storage(ret_storage));
@@ -1096,14 +1209,15 @@ impl Memory {
         };
     }
     fn ret_value(&mut self) {
-        let item = self.pop_item();
         let storage = self.ret_storage.unwrap();
-        let spilled = match storage {
+        // TODO: does it matter if these spill?
+        match storage {
             Storage::Data(_, d) => self.data.take(d),
             Storage::Addr(_, a) => self.addr.take(a),
             _ => false,
         };
-        assert!(!spilled);
+        let item = self.pop_item();
+
         let dest = storage.ea(self);
         for (size, offset) in storage.ty().iter_blocks() {
             let src = item.src_ea(self).offset(offset);
@@ -1853,6 +1967,41 @@ mod test {
         m.module_begin();
 
         let inc = m.sub_stack(vec![Ty::i32()], Ty::i32());
+        {
+            m.push_ident(0);
+            m.push_i32(1);
+            m.add();
+            m.ret_value();
+        }
+        m.sub_end();
+
+        m.module_main();
+
+        m.push_i32(1);
+        m.call_sub(inc);
+        let a = m.local();
+
+        m.push_i32(2);
+        m.call_sub(inc);
+        let b = m.local();
+
+        m.push_ident(a);
+        m.call_sub(inc);
+        m.call_sub(inc);
+
+        m.push_ident(b);
+        m.call_sub(inc);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    fn sub_registers() {
+        let mut m = Memory::new();
+        m.module_begin();
+
+        let inc = m.sub_register(vec![Ty::i32()], Ty::i32());
         {
             m.push_ident(0);
             m.push_i32(1);
