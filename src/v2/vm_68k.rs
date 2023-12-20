@@ -179,6 +179,10 @@ impl VM {
                         let str = String::from_utf8(chars).unwrap();
                         println!("{}", str);
                     }
+                    // TRAP #3 : print stack
+                    3 => {
+                        self.print_stack();
+                    }
                     // RTS
                     0b110101 => {
                         let ret = self.pop_stack();
@@ -239,8 +243,45 @@ impl VM {
                 let (size, dest) = self.mode_read_0(mode);
                 self.ea_apply_1(dest, size, |x| !x);
             }
+            // MOVEM reg -> memory
+            (0b0100, 0b100, 0b011) => {
+                // EA ignored, only supported EA is -(SP)
+                let rlist = self.mem_u16(self.pc + 2);
+                self.pc += 4;
+                for i in 0..=7 {
+                    if rlist.bit_test(15 - i) {
+                        println!("store D{}", i);
+                        self.push_stack(self.data[i]);
+                    }
+                }
+                for i in 0..8 {
+                    if rlist.bit_test(7 - i) {
+                        println!("store A{}", i);
+                        self.push_stack(self.addr[i]);
+                    }
+                }
+            }
+            // MOVEM memory -> reg
+            (0b0100, 0b110, 0b011) => {
+                // EA ignored, only supported EA is (SP)+
+                let rlist = self.mem_u16(self.pc + 2);
+                self.pc += 4;
+                for i in (0..=7).rev() {
+                    if rlist.bit_test(i + 8) {
+                        println!("load A{}", i);
+                        self.addr[i] = self.pop_stack();
+                    }
+                }
+                for i in (0..=7).rev() {
+                    if rlist.bit_test(i) {
+                        println!("load D{}", i);
+                        self.data[i] = self.pop_stack();
+                    }
+                }
+            }
+
             // CHK
-            (0b0100, _, _) => {
+            (0b0100, _, 0b100 | 0b110) => {
                 let (size, src) = match mode {
                     0b110 => (Size::Short, self.ea_read(Size::Short)),
                     0b100 => (Size::Long, self.ea_read(Size::Long)),
@@ -1043,22 +1084,29 @@ impl Asm {
         self.mov(Size::Long, EA::PostInc(SP), EA::Addr(addr));
     }
     pub fn movem_store(&mut self, data: &[Data], addr: &[Addr]) {
-        for d in data {
-            self.mov(Size::Long, EA::Data(*d), EA::PreDec(SP));
+        self.tag4_reg3_mode3_ea(0b0100, 0b100, 0b011);
+        self.push_ea(Size::Long, EA::PreDec(SP));
+        let mut mask = 0;
+        for d in data.iter() {
+            mask += 1 << (15 - (*d as i16));
         }
         for a in addr {
-            self.mov(Size::Long, EA::Addr(*a), EA::PreDec(SP));
+            mask += 1 << (15 - ((*a as i16) + 8));
         }
+        self.push_u16(mask);
     }
     pub fn movem_load(&mut self, data: &[Data], addr: &[Addr]) {
-        for a in addr.iter().rev() {
-            self.mov(Size::Long, EA::PostInc(SP), EA::Addr(*a));
+        self.tag4_reg3_mode3_ea(0b0100, 0b110, 0b011);
+        self.push_ea(Size::Long, EA::PostInc(SP));
+        let mut mask = 0;
+        for d in data.iter() {
+            mask += 1 << (*d as i16);
         }
-        for d in data.iter().rev() {
-            self.mov(Size::Long, EA::PostInc(SP), EA::Data(*d));
+        for a in addr {
+            mask += 1 << ((*a as i16) + 8);
         }
+        self.push_u16(mask);
     }
-
     pub fn chk(&mut self, size: Size, src: EA, target: EA) {
         match target {
             EA::Data(d) => {
@@ -1227,6 +1275,10 @@ impl Asm {
     pub fn println(&mut self) {
         // TRAP #2
         self.push_u16(0b0100_1110_0100_0010);
+    }
+    pub fn info(&mut self) {
+        // TRAP #3
+        self.push_u16(0b0100_1110_0100_0011);
     }
     // todo BSET, BCHG, BCLR
     pub fn btst(&mut self, size: Size, src: EA, dest: EA) {
@@ -1801,5 +1853,32 @@ mod test {
         vm.run();
         assert_eq!(vm.data[0], 0xFF);
         assert_eq!(vm.data[1], 0xFF);
+    }
+
+    #[test]
+    fn movem() {
+        let mut asm = Asm::new();
+        asm.mov(Size::Long, Immediate(10), Data(D0));
+        asm.mov(Size::Long, Immediate(13), Data(D3));
+        asm.mov(Size::Long, Immediate(21), Addr(A1));
+        asm.mov(Size::Long, Immediate(25), Addr(A5));
+
+        asm.movem_store(&[D0, D3], &[A1, A5]);
+
+        asm.mov(Size::Long, Immediate(0), Data(D0));
+        asm.mov(Size::Long, Immediate(0), Data(D3));
+        asm.mov(Size::Long, Immediate(0), Addr(A1));
+        asm.mov(Size::Long, Immediate(0), Addr(A5));
+
+        asm.movem_load(&[D0, D3], &[A1, A5]);
+
+        asm.halt();
+
+        let mut vm = init_vm(&asm);
+        vm.run();
+        assert_eq!(vm.data[0], 10);
+        assert_eq!(vm.data[3], 13);
+        assert_eq!(vm.addr[1], 21);
+        assert_eq!(vm.addr[5], 25);
     }
 }
