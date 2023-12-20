@@ -106,7 +106,7 @@ impl<R: From<usize> + Into<usize> + Copy + std::fmt::Debug> RegisterAllocator<R>
         }
     }
     pub fn mark(&mut self, r: R) {
-        println!("mark {:?}", r);
+        // println!("mark {:?}", r);
         match self.rs[r.into()] {
             RegisterUse::NeverUsed | RegisterUse::Free => panic!("marked unused register"),
             RegisterUse::LastUsed(_) => {}
@@ -124,11 +124,11 @@ impl<R: From<usize> + Into<usize> + Copy + std::fmt::Debug> RegisterAllocator<R>
         }
     }
     pub fn free(&mut self, r: R) {
-        println!("free {:?}", r);
+        // println!("free {:?}", r);
         self.rs[r.into()] = RegisterUse::Free
     }
     pub fn take(&mut self, r: R) -> bool {
-        println!("take {:?}", r);
+        // println!("take {:?}", r);
         match self.rs[r.into()] {
             RegisterUse::LastUsed(_) => {
                 self.set_used(r.into());
@@ -145,7 +145,7 @@ impl<R: From<usize> + Into<usize> + Copy + std::fmt::Debug> RegisterAllocator<R>
         let min = self.find_min(range);
         self.set_used(min.0);
 
-        println!("take in range {:?}", R::from(min.0));
+        // println!("take in range {:?}", R::from(min.0));
         Response {
             register: R::from(min.0),
             spilled: match min.1 {
@@ -160,7 +160,7 @@ impl<R: From<usize> + Into<usize> + Copy + std::fmt::Debug> RegisterAllocator<R>
             RegisterUse::LastUsed(_) => None,
             RegisterUse::NeverUsed | RegisterUse::Free => {
                 self.set_used(min.0);
-                println!("take free in range {:?}", R::from(min.0));
+                // println!("take free in range {:?}", R::from(min.0));
                 Some(R::from(min.0))
             }
         }

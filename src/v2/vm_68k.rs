@@ -153,10 +153,12 @@ impl VM {
                 let dest = self.ea_read_inner(Size::Long, mode, reg);
                 self.ea_apply(dest, src, Size::Long, |_, r| r);
             }
-            // RTS/RTD/TRAP
+            // LINK/UNLK/RTS/RTD/TRAP
             (0b0100, 0b111, 0b001) => {
                 self.pc += 2;
                 let lo6 = instr & 0b111111;
+                let lo3 = instr & 0b111;
+
                 match lo6 {
                     // TODO: "in-universe" traps
                     // TRAP #0 : halt
@@ -183,13 +185,27 @@ impl VM {
                     3 => {
                         self.print_stack();
                     }
+                    // LINK
+                    0b010_000..=0b010_111 => {
+                        let disp = self.mem_i16(self.pc);
+                        self.pc += 2;
+                        dbg!(disp);
+                        self.push_stack(self.addr[lo3 as usize]);
+                        self.addr[lo3 as usize] = self.addr[7];
+                        self.addr[7] += disp as i32;
+                    }
+                    // UNLK
+                    0b011_000..=0b011_111 => {
+                        self.addr[7] = self.addr[lo3 as usize];
+                        self.addr[lo3 as usize] = self.pop_stack();
+                    }
                     // RTS
-                    0b110101 => {
+                    0b110_101 => {
                         let ret = self.pop_stack();
                         self.pc = ret;
                     }
                     // RTD
-                    0b110100 => {
+                    0b110_100 => {
                         let disp = self.mem_u16(self.pc) as i32;
                         self.pc += 2;
                         let ret = self.pop_stack();
@@ -1073,15 +1089,12 @@ impl Asm {
         self.out.push(bytes[0]);
         self.out.push(bytes[1]);
     }
-    // TODO: single instructions
     pub fn link(&mut self, addr: Addr, disp: i32) {
-        self.mov(Size::Long, EA::Addr(addr), EA::PreDec(SP));
-        self.mov(Size::Long, EA::Addr(SP), EA::Addr(addr));
-        self.add(Size::Long, EA::Immediate(disp), EA::Addr(SP))
+        self.push_u16(0b0100_1110_0101_0000 + addr as u16);
+        self.push_immediate(Size::Short, disp);
     }
     pub fn unlink(&mut self, addr: Addr) {
-        self.mov(Size::Long, EA::Addr(addr), EA::Addr(SP));
-        self.mov(Size::Long, EA::PostInc(SP), EA::Addr(addr));
+        self.push_u16(0b0100_1110_0101_1000 + addr as u16);
     }
     pub fn movem_store(&mut self, data: &[Data], addr: &[Addr]) {
         self.tag4_reg3_mode3_ea(0b0100, 0b100, 0b011);
