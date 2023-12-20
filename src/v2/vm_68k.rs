@@ -117,7 +117,7 @@ impl VM {
                 self.status = self.status.bit_set(StatusFlag::Zero as usize, test);
             }
             // immediate ops
-            (0b0000, _, _) => {
+            (0b0000, 0..=0b110, 0b00 | 0b001 | 0b010) => {
                 let (size, dest) = self.mode_read_0(mode);
                 let src = self.immediate_read(size);
                 let op = match reg {
@@ -156,63 +156,69 @@ impl VM {
             // LINK/UNLK/RTS/RTD/TRAP
             (0b0100, 0b111, 0b001) => {
                 self.pc += 2;
-                let lo6 = instr & 0b111111;
-                let lo3 = instr & 0b111;
+                let hi3 = (instr >> 3) & 0b111;
+                let lo3 = (instr & 0b111) as usize;
 
-                match lo6 {
+                match (hi3, lo3) {
+                    // TRAP
                     // TODO: "in-universe" traps
-                    // TRAP #0 : halt
-                    0 => {
-                        self.run_state = RunState::Halt;
-                    }
-                    // TRAP #1 : assert_eq
-                    1 => {
-                        self.print_stack();
-                        let left = self.pop_stack();
-                        let right = self.pop_stack();
-                        assert_eq!(left, right);
-                    }
-                    // TRAP #2 : println
-                    2 => {
-                        let ptr = self.pop_stack();
-                        let len = self.pop_stack();
-                        self.print_stack();
-                        let chars = Vec::from(&self.memory[(ptr as usize)..((ptr + len) as usize)]);
-                        let str = String::from_utf8(chars).unwrap();
-                        println!("{}", str);
-                    }
-                    // TRAP #3 : print stack
-                    3 => {
-                        self.print_stack();
+                    (0b000..=0b001, _) => {
+                        match instr & 0b1111 {
+                            // TRAP #0 : halt
+                            0 => {
+                                self.run_state = RunState::Halt;
+                            }
+                            // TRAP #1 : assert_eq
+                            1 => {
+                                self.print_stack();
+                                let left = self.pop_stack();
+                                let right = self.pop_stack();
+                                assert_eq!(left, right);
+                            }
+                            // TRAP #2 : println
+                            2 => {
+                                let ptr = self.pop_stack();
+                                let len = self.pop_stack();
+                                self.print_stack();
+                                let chars =
+                                    Vec::from(&self.memory[(ptr as usize)..((ptr + len) as usize)]);
+                                let str = String::from_utf8(chars).unwrap();
+                                println!("{}", str);
+                            }
+                            // TRAP #3 : print stack
+                            3 => {
+                                self.print_stack();
+                            }
+                            _ => unimplemented!(),
+                        }
                     }
                     // LINK
-                    0b010_000..=0b010_111 => {
+                    (0b010, _) => {
                         let disp = self.mem_i16(self.pc);
                         self.pc += 2;
-                        dbg!(disp);
-                        self.push_stack(self.addr[lo3 as usize]);
-                        self.addr[lo3 as usize] = self.addr[7];
+                        self.push_stack(self.addr[lo3]);
+                        self.addr[lo3] = self.addr[7];
                         self.addr[7] += disp as i32;
                     }
                     // UNLK
-                    0b011_000..=0b011_111 => {
-                        self.addr[7] = self.addr[lo3 as usize];
-                        self.addr[lo3 as usize] = self.pop_stack();
+                    (0b011, _) => {
+                        self.addr[7] = self.addr[lo3];
+                        self.addr[lo3] = self.pop_stack();
                     }
                     // RTS
-                    0b110_101 => {
+                    (0b110, 0b101) => {
                         let ret = self.pop_stack();
                         self.pc = ret;
                     }
                     // RTD
-                    0b110_100 => {
+                    (0b110, 0b100) => {
                         let disp = self.mem_u16(self.pc) as i32;
                         self.pc += 2;
                         let ret = self.pop_stack();
                         self.addr[7] += disp;
                         self.pc = ret;
                     }
-                    _ => {}
+                    _ => unimplemented!(),
                 }
             }
             // JSR
@@ -250,12 +256,12 @@ impl VM {
                 self.ea_apply(dest, EAView::Immediate(addr), Size::Long, |_, x| x);
             }
             // NEG
-            (0b0100, 0b010, _) => {
+            (0b0100, 0b010, 0b00 | 0b001 | 0b010) => {
                 let (size, dest) = self.mode_read_0(mode);
                 self.ea_apply_1(dest, size, |x| -x);
             }
             // NOT
-            (0b0100, 0b011, _) => {
+            (0b0100, 0b011, 0b00 | 0b001 | 0b010) => {
                 let (size, dest) = self.mode_read_0(mode);
                 self.ea_apply_1(dest, size, |x| !x);
             }
@@ -295,7 +301,6 @@ impl VM {
                     }
                 }
             }
-
             // CHK
             (0b0100, _, 0b100 | 0b110) => {
                 let (size, src) = match mode {
@@ -309,7 +314,13 @@ impl VM {
                     panic!("CHK exception")
                 }
             }
-            // Control flow goes here
+            // Scc
+            (0b0101, _, 0b011 | 0b111) => {
+                let cond = Cond::from((instr >> 8) & 0xF);
+                let dest = self.ea_read(Size::Byte);
+                let value = if self.check_cond(cond) { 0xFF } else { 0 };
+                self.ea_apply(dest, EAView::Immediate(value), Size::Byte, |_, x| x);
+            }
             // ADDQ / SUBQ
             (0b0101, _, _) => {
                 let quick = (instr >> 9) & 0b111;
@@ -323,14 +334,6 @@ impl VM {
                     0b100 => (Size::Byte, self.ea_read(Size::Byte), false),
                     0b101 => (Size::Short, self.ea_read(Size::Short), false),
                     0b110 => (Size::Long, self.ea_read(Size::Long), false),
-                    // Scc
-                    0b011 | 0b111 => {
-                        let cond = Cond::from((instr >> 8) & 0xF);
-                        let dest = self.ea_read(Size::Byte);
-                        let value = if self.check_cond(cond) { 0xFF } else { 0 };
-                        self.ea_apply(dest, EAView::Immediate(value), Size::Byte, |_, x| x);
-                        return;
-                    }
                     _ => unreachable!(),
                 };
                 if is_add {
@@ -371,7 +374,9 @@ impl VM {
                 let dest = EAView::Data(reg);
                 self.ea_apply(dest, src, Size::Long, |_, x| x);
             }
-            // OR / DIV
+            // DIV
+            (0b1000, _, 0b011 | 0b111) => unimplemented!(),
+            // OR
             (0b1000, _, _) => {
                 let (size, src, dest) = match mode {
                     0b000 => (Size::Byte, self.ea_read(Size::Byte), EAView::Data(reg)),
@@ -389,11 +394,22 @@ impl VM {
                 let (size, src, dest) = self.mode_read_data_dir(mode, reg);
                 self.ea_apply(dest, src, size, |l, r| l - r);
             }
-            // A-traps go here
-            // CMP / CMPA / CMPM / EOR
+            // A-traps
+            (0b1010, _, _) => unimplemented!(),
+            // EOR
+            (0b1011, _, 0b100 | 0b101 | 0b110) => {
+                let size = match mode {
+                    0b100 => Size::Byte,
+                    0b101 => Size::Short,
+                    0b110 => Size::Long,
+                    _ => unreachable!(),
+                };
+                let dest = self.ea_read(size);
+                self.ea_apply(dest, EAView::Data(reg), size, |l, r| l ^ r);
+            }
+            // CMP / CMPA / CMPM
             (0b1011, _, _) => {
                 let reg_ay = (instr & 0b111) as usize;
-                let is_cmpm = (instr & 0b111000) == 0b00100;
 
                 let (size, src, dest) = match mode {
                     0b000 => (Size::Byte, self.ea_read(Size::Byte), EAView::Data(reg)),
@@ -402,11 +418,6 @@ impl VM {
                     0b011 => (Size::Short, self.ea_read(Size::Short), EAView::Addr(reg)),
                     0b111 => (Size::Long, self.ea_read(Size::Long), EAView::Addr(reg)),
                     0b100 => {
-                        if !is_cmpm {
-                            let dest = self.ea_read(Size::Byte);
-                            self.ea_apply(dest, EAView::Data(reg), Size::Byte, |l, r| l ^ r);
-                            return;
-                        }
                         self.pc += 2;
                         let src = EAView::Memory(self.addr[reg]);
                         self.addr[reg] += 1;
@@ -415,11 +426,6 @@ impl VM {
                         (Size::Byte, src, dest)
                     }
                     0b101 => {
-                        if !is_cmpm {
-                            let dest = self.ea_read(Size::Short);
-                            self.ea_apply(dest, EAView::Data(reg), Size::Short, |l, r| l ^ r);
-                            return;
-                        }
                         self.pc += 2;
                         let src = EAView::Memory(self.addr[reg]);
                         self.addr[reg] += 2;
@@ -428,11 +434,6 @@ impl VM {
                         (Size::Short, src, dest)
                     }
                     0b110 => {
-                        if !is_cmpm {
-                            let dest = self.ea_read(Size::Long);
-                            self.ea_apply(dest, EAView::Data(reg), Size::Long, |l, r| l ^ r);
-                            return;
-                        }
                         self.pc += 2;
                         let src = EAView::Memory(self.addr[reg]);
                         self.addr[reg] += 4;
@@ -446,43 +447,38 @@ impl VM {
                 let right = self.ea_src(src, size);
                 self.set_cond(left - right);
             }
-            // AND / MUL
+            // MUL
+            (0b1100, _, 0b011 | 0b111) => unimplemented!(),
+            // AND / EXG
             (0b1100, _, _) => {
-                let exg_mode = instr >> 3 & 0b11111;
+                let exg_mode = instr >> 3 & 0b111_111;
                 let exg_reg = (instr & 0b111) as usize;
-
-                let (size, src, dest) = match mode {
-                    0b000 => (Size::Byte, self.ea_read(Size::Byte), EAView::Data(reg)),
-                    0b001 => (Size::Short, self.ea_read(Size::Short), EAView::Data(reg)),
-                    0b010 => (Size::Long, self.ea_read(Size::Long), EAView::Data(reg)),
-                    0b011 => todo!("MULU"),
-                    0b100 => (Size::Byte, EAView::Data(reg), self.ea_read(Size::Byte)),
-                    0b101 => match exg_mode {
-                        0b01000 => {
-                            self.pc += 2;
-                            self.ea_exg(EAView::Data(reg), EAView::Data(exg_reg));
-                            return;
-                        }
-                        0b01001 => {
-                            self.pc += 2;
-                            self.ea_exg(EAView::Addr(reg), EAView::Addr(exg_reg));
-                            return;
-                        }
-                        _ => (Size::Short, EAView::Data(reg), self.ea_read(Size::Short)),
-                    },
-                    0b110 => match exg_mode {
-                        0b10001 => {
-                            self.pc += 2;
-                            self.ea_exg(EAView::Data(reg), EAView::Addr(exg_reg));
-                            return;
-                        }
-                        _ => (Size::Long, EAView::Data(reg), self.ea_read(Size::Long)),
-                    },
-                    0b111 => todo!("MULS"),
-
-                    _ => unreachable!(),
-                };
-                self.ea_apply(dest, src, size, |l, r| l & r);
+                match exg_mode {
+                    0b101_000 => {
+                        self.pc += 2;
+                        self.ea_exg(EAView::Data(reg), EAView::Data(exg_reg));
+                    }
+                    0b101_001 => {
+                        self.pc += 2;
+                        self.ea_exg(EAView::Addr(reg), EAView::Addr(exg_reg));
+                    }
+                    0b110_001 => {
+                        self.pc += 2;
+                        self.ea_exg(EAView::Data(reg), EAView::Addr(exg_reg));
+                    }
+                    _ => {
+                        let (size, src, dest) = match mode {
+                            0b000 => (Size::Byte, self.ea_read(Size::Byte), EAView::Data(reg)),
+                            0b001 => (Size::Short, self.ea_read(Size::Short), EAView::Data(reg)),
+                            0b010 => (Size::Long, self.ea_read(Size::Long), EAView::Data(reg)),
+                            0b100 => (Size::Byte, EAView::Data(reg), self.ea_read(Size::Byte)),
+                            0b101 => (Size::Short, EAView::Data(reg), self.ea_read(Size::Short)),
+                            0b110 => (Size::Long, EAView::Data(reg), self.ea_read(Size::Long)),
+                            _ => unreachable!(),
+                        };
+                        self.ea_apply(dest, src, size, |l, r| l & r);
+                    }
+                }
             }
             // ADD / ADDA
             (0b1101, _, _) => {
