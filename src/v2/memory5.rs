@@ -496,6 +496,12 @@ pub struct Memory {
     ret_to_drop: usize,
 }
 
+// High memory
+// Code    <-- InitPC
+// Globals <-- A5
+// Stack
+// Low memory
+
 impl Memory {
     pub fn new() -> Self {
         Self::default()
@@ -503,11 +509,12 @@ impl Memory {
     pub fn end(mut self) -> CompileResult {
         self.asm.stop();
         self.resolve_strings();
-        // TODO: this should go in the heap instead of the end of the code segment
         if self.is_module {
-            let len = self.asm.here();
             self.asm.fixup(0, |asm| {
-                asm.load_ea(EA::PCOffset(PC::Line(len)), EA::Addr(GP));
+                asm.load_ea(
+                    EA::PCOffset(PC::Displacement(-(self.global_offset as i16))),
+                    EA::Addr(GP),
+                );
             });
         }
 
@@ -1323,14 +1330,15 @@ mod test {
     use crate::v2::vm_68k::VM;
 
     fn run_vm(res: CompileResult) -> VM {
-        let mut vm = VM::new(256);
-        let init_sp = 128;
-        let init_pc = init_sp + res.entry_point;
+        let size = 256;
+        let mut vm = VM::new(size);
+        let init_pc = size - res.out.len();
+        let init_sp = init_pc - res.globals_size;
+
         vm.load_memory(0, &(init_sp as i32).to_be_bytes());
         vm.load_memory(4, &(init_pc as i32).to_be_bytes());
+        vm.load_memory(init_pc, &res.out);
         vm.reset();
-
-        vm.load_memory(init_pc as usize, &res.out);
         vm.run();
         vm
     }
