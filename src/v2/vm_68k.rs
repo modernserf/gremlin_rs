@@ -153,7 +153,7 @@ impl VM {
                 let dest = self.ea_read_inner(Size::Long, mode, reg);
                 self.ea_apply(dest, src, Size::Long, |_, r| r);
             }
-            // LINK/UNLK/RTS/RTD/TRAP
+            // LINK/UNLK/RTS/TRAP
             (0b0100, 0b111, 0b001) => {
                 self.pc += 2;
                 let hi3 = (instr >> 3) & 0b111;
@@ -205,17 +205,15 @@ impl VM {
                         self.addr[7] = self.addr[lo3];
                         self.addr[lo3] = self.pop_stack();
                     }
+                    // STOP
+                    (0b110, 0b010) => {
+                        self.status = self.mem_u16(self.pc);
+                        self.pc += 2;
+                        self.run_state = RunState::Halt;
+                    }
                     // RTS
                     (0b110, 0b101) => {
                         let ret = self.pop_stack();
-                        self.pc = ret;
-                    }
-                    // RTD
-                    (0b110, 0b100) => {
-                        let disp = self.mem_u16(self.pc) as i32;
-                        self.pc += 2;
-                        let ret = self.pop_stack();
-                        self.addr[7] += disp;
                         self.pc = ret;
                     }
                     _ => unimplemented!(),
@@ -1261,21 +1259,26 @@ impl Asm {
         }
     }
     pub fn ret(&mut self, to_drop: u16) {
-        if to_drop == 0 {
-            self.push_u16(0b0100_1110_0111_0101);
-        } else {
-            self.push_u16(0b0100_1110_0111_0100);
-            self.push_u16(to_drop);
+        if to_drop > 0 {
+            self.mov(
+                Size::Long,
+                EA::PostInc(SP),
+                EA::Offset(SP, (to_drop as i16) - 4),
+            );
         }
+        if to_drop > 4 {
+            self.add(Size::Long, EA::Immediate(to_drop as i32 - 4), EA::Addr(SP));
+        }
+        self.push_u16(0b0100_1110_0111_0101);
     }
     pub fn scc(&mut self, cond: Cond, dest: EA) {
         let instr = 0b0101_0000_1100_0000 + ((cond as u16) << 8);
         self.push_u16(instr);
         self.push_ea(Size::Byte, dest);
     }
-    pub fn halt(&mut self) {
-        // TRAP #0
-        self.push_u16(0b0100_1110_0100_0000);
+    pub fn stop(&mut self) {
+        self.push_u16(0b0100_1110_0111_0010);
+        self.push_u16(0);
     }
     pub fn assert_eq(&mut self) {
         // TRAP #1
@@ -1470,7 +1473,7 @@ mod test {
         };
 
         op(&mut asm, size, src_ea, dest_ea);
-        asm.halt();
+        asm.stop();
 
         let mut vm = init_vm(&asm);
         vm.run();
@@ -1498,7 +1501,7 @@ mod test {
         asm.add(Byte, PCOffset(PC::Displacement(0)), Data(D0));
         asm.add(Byte, PCOffset(PC::Displacement(0)), Data(D0));
         asm.add(Byte, PCOffset(PC::Displacement(0)), Data(D0));
-        asm.halt();
+        asm.stop();
 
         let data = asm.here();
         asm.data(&[10, 20, 30]);
@@ -1527,7 +1530,7 @@ mod test {
         asm.and(Long, Offset(A7, 4), Data(D1));
         // immediate to memory
         asm.and(Long, Immediate(0b0101), Offset(A7, 4));
-        asm.halt();
+        asm.stop();
 
         let mut vm = init_vm(&asm);
         vm.run();
@@ -1547,11 +1550,11 @@ mod test {
         asm.mov(Long, Immediate(4), Data(D1));
         asm.asl(Long, Data(D1), Data(D0));
         asm.asl(Long, Immediate(1), Data(D0));
-        asm.halt();
+        asm.stop();
 
         asm.asr(Long, Data(D1), Data(D0));
         asm.asr(Long, Immediate(1), Data(D0));
-        asm.halt();
+        asm.stop();
 
         let mut vm = init_vm(&asm);
         vm.run();
@@ -1568,7 +1571,7 @@ mod test {
         let branch = asm.branch(Cond::True, Branch::Placeholder);
         asm.mov(Long, Immediate(2), Data(D0));
         asm.fixup_branch_to_here(branch);
-        asm.halt();
+        asm.stop();
 
         let mut vm = init_vm(&asm);
         vm.run();
@@ -1585,7 +1588,7 @@ mod test {
         let branch = asm.branch(Cond::Equal, Branch::Placeholder);
         asm.mov(Long, Immediate(2), Data(D0));
         asm.fixup_branch_to_here(branch);
-        asm.halt();
+        asm.stop();
 
         let mut vm = init_vm(&asm);
         vm.run();
@@ -1597,7 +1600,7 @@ mod test {
         let mut asm = Asm::new();
         asm.mov(Long, Immediate(10), Data(D0));
         asm.chk(Long, Immediate(20), Data(D0));
-        asm.halt();
+        asm.stop();
         let mut vm = init_vm(&asm);
         vm.run();
         assert_eq!(vm.data[0], 10);
@@ -1609,7 +1612,7 @@ mod test {
         let mut asm = Asm::new();
         asm.mov(Long, Immediate(100), Data(D0));
         asm.chk(Long, Immediate(20), Data(D0));
-        asm.halt();
+        asm.stop();
         let mut vm = init_vm(&asm);
         vm.run();
     }
@@ -1620,7 +1623,7 @@ mod test {
         let mut asm = Asm::new();
         asm.mov(Long, Immediate(-1), Data(D0));
         asm.chk(Long, Immediate(20), Data(D0));
-        asm.halt();
+        asm.stop();
         let mut vm = init_vm(&asm);
         vm.run();
     }
@@ -1632,7 +1635,7 @@ mod test {
         asm.mov(Long, Immediate(0b0010), Data(D1));
         asm.or(Long, Data(D1), Data(D0));
         asm.or(Long, Immediate(0b1000), Data(D1));
-        asm.halt();
+        asm.stop();
 
         let mut vm = init_vm(&asm);
         vm.run();
@@ -1647,7 +1650,7 @@ mod test {
         asm.mov(Long, Immediate(0b0011), Data(D1));
         asm.xor(Long, Data(D1), Data(D0));
         asm.xor(Long, Immediate(0b1010), Data(D1));
-        asm.halt();
+        asm.stop();
 
         let mut vm = init_vm(&asm);
         vm.run();
@@ -1662,7 +1665,7 @@ mod test {
         asm.neg(Long, Data(D0));
         asm.mov(Long, Immediate(1), Data(D1));
         asm.not(Long, Data(D1));
-        asm.halt();
+        asm.stop();
 
         let mut vm = init_vm(&asm);
         vm.run();
@@ -1707,7 +1710,7 @@ mod test {
         let mut asm = Asm::new();
         asm.load_ea(EA::Absolute(1234), EA::Addr(A0));
         asm.load_ea(EA::Absolute(5678), EA::PreDec(A7));
-        asm.halt();
+        asm.stop();
 
         let mut vm = init_vm(&asm);
         vm.run();
@@ -1750,7 +1753,7 @@ mod test {
                 _ => unreachable!(),
             };
             asm.exg(left_ea, right_ea);
-            asm.halt();
+            asm.stop();
             let mut vm = init_vm(&asm);
             vm.run();
             let left_result = match src {
@@ -1805,7 +1808,7 @@ mod test {
         asm.mov(Long, Immediate(15), PreDec(A7));
         asm.assert_eq();
 
-        asm.halt();
+        asm.stop();
 
         init_vm(&asm).run();
     }
@@ -1827,7 +1830,7 @@ mod test {
         asm.load_ea(PCOffset(PC::Line(str)), PreDec(A7));
         asm.println();
 
-        asm.halt();
+        asm.stop();
 
         init_vm(&asm).run();
     }
@@ -1844,7 +1847,7 @@ mod test {
         asm.mov(Long, Immediate(0xFF), PreDec(A7));
         asm.assert_eq();
 
-        asm.halt();
+        asm.stop();
 
         init_vm(&asm).run();
     }
@@ -1856,7 +1859,7 @@ mod test {
         asm.scc(Cond::True, Data(D0));
         asm.btst(Size::Byte, Immediate(0), Data(D0));
         asm.scc(Cond::Equal, Data(D1));
-        asm.halt();
+        asm.stop();
 
         let mut vm = init_vm(&asm);
         vm.run();
@@ -1881,7 +1884,7 @@ mod test {
 
         asm.movem_load(&[D0, D3], &[A1, A5]);
 
-        asm.halt();
+        asm.stop();
 
         let mut vm = init_vm(&asm);
         vm.run();

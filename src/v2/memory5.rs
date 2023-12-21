@@ -480,7 +480,7 @@ impl Memory {
         Self::default()
     }
     pub fn end(mut self) -> Asm {
-        self.asm.halt();
+        self.asm.stop();
         self.resolve_strings();
         self.asm
     }
@@ -1117,7 +1117,7 @@ impl Memory {
     }
     fn sub_end(&mut self) {
         self.scope_end();
-        self.asm.halt();
+        self.asm.stop();
         self.stack = Vec::new();
         self.locals = Vec::new();
         self.data = RegisterAllocator::new();
