@@ -1,7 +1,7 @@
 use std::{collections::HashMap, rc::Rc};
 
-use super::vm_68k::{Asm, Cond};
-use crate::v2::memory5::Memory;
+use super::vm_68k::Cond;
+use crate::v2::memory5::{CompileResult, Memory};
 
 type Compile<T> = Result<T, CompileError>;
 
@@ -322,7 +322,7 @@ impl Compiler {
         c.scope.begin();
         c
     }
-    pub fn end(mut self) -> Asm {
+    pub fn end(mut self) -> CompileResult {
         self.scope.end();
         self.memory.end()
     }
@@ -562,7 +562,7 @@ mod test {
         call(ident("assert_eq"), vec![left, right])
     }
 
-    fn run_vm(asm: Asm) -> VM {
+    fn run_vm(res: CompileResult) -> VM {
         let mut vm = VM::new(256);
         let init_sp = 120;
         let init_pc = 128;
@@ -570,7 +570,7 @@ mod test {
         vm.load_memory(0, &init_memory);
         vm.reset();
 
-        vm.load_memory(init_pc as usize, &asm.out);
+        vm.load_memory(init_pc as usize, &res.out);
         vm.run();
         vm
     }

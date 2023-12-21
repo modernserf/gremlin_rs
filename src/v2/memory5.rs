@@ -139,6 +139,12 @@ impl Item {
         self.free_transient(memory);
         next
     }
+    fn storage_global(self, memory: &mut Memory) -> Storage {
+        let src = self.src_ea(memory);
+        let next = memory.storage_global(self.ty(), src);
+        self.free_transient(memory);
+        next
+    }
     fn free_transient(self, memory: &mut Memory) {
         match self {
             Self::Storage(storage) => storage.free_transient(memory),
@@ -170,6 +176,8 @@ enum Storage {
     StackArg(Ty, usize),
     // positive offset from end of stored registers
     Stack(Ty, usize),
+    // positive offset from A5 register
+    Global(Ty, usize),
 }
 
 impl Storage {
@@ -180,12 +188,14 @@ impl Storage {
             Self::Addr(ty, _) => ty,
             Self::StackArg(ty, _) => ty,
             Self::Stack(ty, _) => ty,
+            Self::Global(ty, _) => ty,
         }
     }
     fn field(&self, field: Field) -> Storage {
         match *self {
             Self::StackArg(_, base) => Self::StackArg(field.ty, base + field.offset),
             Self::Stack(_, base) => Self::Stack(field.ty, base - field.offset),
+            Self::Global(_, base) => Self::Global(field.ty, base + field.offset),
             _ => unimplemented!(),
         }
     }
@@ -202,6 +212,7 @@ impl Storage {
             }
             Self::StackArg(_, idx) => EA::Offset(FP, (8 + idx) as i16),
             Self::Stack(_, idx) => EA::Offset(SP, (memory.stack_offset - idx) as i16),
+            Self::Global(_, idx) => EA::Offset(GP, idx as i16),
         }
     }
     fn register(&self, memory: &mut Memory) -> Storage {
@@ -458,6 +469,13 @@ struct Flags {}
 
 impl Flags {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompileResult {
+    pub out: Vec<u8>,
+    pub entry_point: usize,
+    pub globals_size: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct Memory {
     flags: Flags,
@@ -469,6 +487,9 @@ pub struct Memory {
     stack_offset: usize,
     strings: Vec<(usize, String)>,
     block_scopes: Vec<BlockScope>,
+    entry_point: usize,
+    global_offset: usize,
+    is_module: bool,
     // subroutines
     subs: Vec<SubroutineRecord>,
     ret_storage: Option<Storage>,
@@ -479,10 +500,22 @@ impl Memory {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn end(mut self) -> Asm {
+    pub fn end(mut self) -> CompileResult {
         self.asm.stop();
         self.resolve_strings();
-        self.asm
+        // TODO: this should go in the heap instead of the end of the code segment
+        if self.is_module {
+            let len = self.asm.here();
+            self.asm.fixup(0, |asm| {
+                asm.load_ea(EA::PCOffset(PC::Line(len)), EA::Addr(GP));
+            });
+        }
+
+        CompileResult {
+            out: self.asm.out,
+            entry_point: self.entry_point,
+            globals_size: self.global_offset,
+        }
     }
     // values
     pub fn push_i32(&mut self, value: i32) {
@@ -612,6 +645,20 @@ impl Memory {
         };
         self.locals.push(storage);
         return id;
+    }
+
+    pub fn local_static(&mut self) -> LocalId {
+        assert!(self.is_module);
+        let item = self.pop_item();
+        let id = self.locals.len();
+        let storage = item.storage_global(self);
+        self.locals.push(storage);
+        return id;
+    }
+
+    pub fn drop(&mut self) {
+        let item = self.pop_item();
+        item.free_transient(self);
     }
 
     pub fn if_begin(&mut self, cond: Cond) -> IfIdx {
@@ -961,6 +1008,18 @@ impl Memory {
         self.stack_offset += ty.stack_space();
         Storage::Stack(ty, self.stack_offset)
     }
+    fn storage_global(&mut self, ty: Ty, src: EA) -> Storage {
+        let out = Storage::Global(ty, self.global_offset);
+        for (size, offset) in ty.iter_blocks() {
+            self.asm.mov(
+                size,
+                src.try_offset(offset),
+                EA::Offset(GP, self.global_offset as i16),
+            );
+            self.global_offset += offset;
+        }
+        out
+    }
     fn iter_storage(
         &mut self,
         f: impl Fn(&mut Memory, Storage, Option<usize>) -> Option<Storage>,
@@ -1037,12 +1096,14 @@ impl Memory {
     }
 
     fn module_begin(&mut self) {
-        self.asm.branch(Cond::True, Branch::Placeholder);
+        self.is_module = true;
+        // placeholder
+        self.asm
+            .load_ea(EA::PCOffset(PC::Displacement(0)), EA::Addr(GP));
     }
-    fn module_main(&mut self) {
-        self.asm.fixup_branch_to_here(0);
-    }
+    fn module_main(&mut self) {}
     fn sub_register(&mut self, params: Vec<Ty>, return_ty: Ty) -> usize {
+        self.asm.branch(Cond::True, Branch::Placeholder);
         let address = self.asm.here();
         let mut data = vec![Data::D1, Data::D0];
         let mut addr = vec![Addr::A1, Addr::A0];
@@ -1086,6 +1147,7 @@ impl Memory {
         id
     }
     fn sub_stack(&mut self, params: Vec<Ty>, return_ty: Ty) -> usize {
+        self.asm.branch(Cond::True, Branch::Placeholder);
         let address = self.asm.here();
         let mut frame_offset = 0;
         for param in params.iter() {
@@ -1118,8 +1180,11 @@ impl Memory {
     fn sub_end(&mut self) {
         self.scope_end();
         self.asm.stop();
+        let current_sub_id: usize = self.subs.len() - 1;
+        let jump_over = self.subs[current_sub_id].address - 4;
+        self.asm.fixup_branch_to_here(jump_over);
+
         self.stack = Vec::new();
-        self.locals = Vec::new();
         self.data = RegisterAllocator::new();
         self.addr = RegisterAllocator::new();
     }
@@ -1257,15 +1322,15 @@ mod test {
     use super::*;
     use crate::v2::vm_68k::VM;
 
-    fn run_vm(asm: Asm) -> VM {
+    fn run_vm(res: CompileResult) -> VM {
         let mut vm = VM::new(256);
-        let init_sp = 120;
-        let init_pc = 128;
-        let init_memory = vec![0, 0, 0, init_sp, 0, 0, 0, init_pc];
-        vm.load_memory(0, &init_memory);
+        let init_sp = 128;
+        let init_pc = init_sp + res.entry_point;
+        vm.load_memory(0, &(init_sp as i32).to_be_bytes());
+        vm.load_memory(4, &(init_pc as i32).to_be_bytes());
         vm.reset();
 
-        vm.load_memory(init_pc as usize, &asm.out);
+        vm.load_memory(init_pc as usize, &res.out);
         vm.run();
         vm
     }
@@ -2026,6 +2091,37 @@ mod test {
 
         m.push_ident(b);
         m.call_sub(inc);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    fn statics() {
+        let mut m = Memory::new();
+        m.module_begin();
+
+        m.push_i32(0);
+        let counter = m.local_static();
+
+        let inc = m.sub_register(vec![], Ty::i32());
+        m.push_ident(counter);
+        m.push_i32(1);
+        m.add_assign();
+        m.push_ident(counter);
+        m.ret_value();
+        m.sub_end();
+
+        m.module_main();
+        m.call_sub(inc);
+        m.drop();
+        m.call_sub(inc);
+        m.drop();
+        m.call_sub(inc);
+        m.drop();
+
+        m.call_sub(inc);
+        m.push_i32(4);
         m.assert_eq();
 
         run_vm(m.end());

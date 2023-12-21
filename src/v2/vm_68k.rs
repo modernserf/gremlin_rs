@@ -90,10 +90,11 @@ impl VM {
             run_state: RunState::Halt,
         }
     }
-    pub fn load_memory(&mut self, offset: usize, memory: &[u8]) {
+    pub fn load_memory(&mut self, offset: usize, memory: &[u8]) -> usize {
         for (i, byte) in memory.iter().enumerate() {
             self.memory[offset + i] = *byte
         }
+        offset + memory.len()
     }
     pub fn reset(&mut self) {
         self.addr[7] = self.mem_i32(0);
@@ -274,13 +275,13 @@ impl VM {
                 self.pc += 4;
                 for i in 0..=7 {
                     if rlist.bit_test(15 - i) {
-                        println!("store D{}", i);
+                        // println!("store D{}", i);
                         self.push_stack(self.data[i]);
                     }
                 }
                 for i in 0..8 {
                     if rlist.bit_test(7 - i) {
-                        println!("store A{}", i);
+                        // println!("store A{}", i);
                         self.push_stack(self.addr[i]);
                     }
                 }

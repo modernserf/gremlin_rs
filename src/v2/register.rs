@@ -50,6 +50,7 @@ pub enum Addr {
     A7,
 }
 
+pub const GP: Addr = Addr::A5;
 pub const FP: Addr = Addr::A6;
 pub const SP: Addr = Addr::A7;
 
