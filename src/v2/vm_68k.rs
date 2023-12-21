@@ -293,13 +293,13 @@ impl VM {
                 self.pc += 4;
                 for i in (0..=7).rev() {
                     if rlist.bit_test(i + 8) {
-                        println!("load A{}", i);
+                        // println!("load A{}", i);
                         self.addr[i] = self.pop_stack();
                     }
                 }
                 for i in (0..=7).rev() {
                     if rlist.bit_test(i) {
-                        println!("load D{}", i);
+                        // println!("load D{}", i);
                         self.data[i] = self.pop_stack();
                     }
                 }

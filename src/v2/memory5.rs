@@ -14,6 +14,13 @@ struct Ty {
 }
 
 impl Ty {
+    // only used for fn signatures
+    fn void() -> Self {
+        Self {
+            base_size: 0,
+            ref_level: 0,
+        }
+    }
     fn bool() -> Self {
         Self {
             base_size: 1,
@@ -494,6 +501,7 @@ pub struct Memory {
     subs: Vec<SubroutineRecord>,
     ret_storage: Option<Storage>,
     ret_to_drop: usize,
+    defer_stack: Vec<usize>,
 }
 
 // High memory
@@ -954,6 +962,34 @@ impl Memory {
         self.stack_offset = scope.init_stack_offset;
     }
 
+    fn defer_begin(&mut self) -> usize {
+        self.asm.branch(Cond::True, Branch::Placeholder);
+        let defer_idx = self.asm.here();
+        self.scope_begin();
+        defer_idx
+    }
+    fn defer_end(&mut self, defer_idx: usize) {
+        self.scope_end();
+        self.return_or_defer_unwind();
+        self.asm.fixup_branch_to_here(defer_idx - 4);
+        self.defer_stack.push(defer_idx);
+    }
+    fn return_or_defer_unwind(&mut self) {
+        if let Some(defer_idx) = self.previous_defer_idx() {
+            self.asm.branch(Cond::True, Branch::Line(defer_idx));
+        } else {
+            self.sub_epilogue();
+        }
+    }
+    fn previous_defer_idx(&self) -> Option<usize> {
+        let len = self.defer_stack.len();
+        if len > 0 {
+            Some(self.defer_stack[len - 1])
+        } else {
+            None
+        }
+    }
+
     // utils
     fn pop_item(&mut self) -> Item {
         self.stack.pop().unwrap()
@@ -1302,7 +1338,7 @@ impl Memory {
             Storage::Addr(_, a) => self.addr.free(a),
             _ => {}
         };
-        self.sub_epilogue();
+        self.return_or_defer_unwind();
     }
     fn sub_prologue(&mut self) {
         use Addr::*;
@@ -1315,7 +1351,6 @@ impl Memory {
     fn sub_epilogue(&mut self) {
         use Addr::*;
         use Data::*;
-        // TODO: run defer chain
         // TODO: write placeholder, rewrite to only used registers in sub_end
         self.asm
             .movem_load(&[D2, D3, D4, D5, D6, D7], &[A2, A3, A4]);
@@ -2130,6 +2165,50 @@ mod test {
 
         m.call_sub(inc);
         m.push_i32(4);
+        m.assert_eq();
+
+        run_vm(m.end());
+    }
+
+    #[test]
+    fn defer() {
+        let mut m = Memory::new();
+        m.module_begin();
+
+        let add2then1 = m.sub_stack(vec![Ty::i32().pointer()], Ty::i32());
+        {
+            let idx = m.defer_begin();
+            {
+                m.log("in defer");
+                m.push_ident(0);
+                m.deref();
+                m.push_i32(1);
+                m.add_assign();
+            }
+            m.defer_end(idx);
+
+            m.push_ident(0);
+            m.deref();
+            m.push_i32(2);
+            m.add_assign();
+
+            m.log("in sub");
+
+            m.push_i32(0);
+            m.ret_value();
+        }
+        m.sub_end();
+
+        m.module_main();
+        m.push_i32(10);
+        let val = m.local_stack();
+
+        m.push_ident(val);
+        m.pointer();
+        m.call_sub(add2then1);
+
+        m.push_ident(val);
+        m.push_i32(13);
         m.assert_eq();
 
         run_vm(m.end());
