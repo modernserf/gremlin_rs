@@ -64,6 +64,12 @@ enum StatusFlag {
     Extend = 4,
 }
 
+enum InterruptVector {
+    InitSP = 0,
+    InitPC = 4,
+    ATrap = 0x28,
+}
+
 pub struct VM {
     memory: Vec<u8>,
     data: [i32; 8],
@@ -161,13 +167,11 @@ impl VM {
 
                 match (hi3, lo3) {
                     // TRAP
-                    // TODO: "in-universe" traps
+                    // TODO: traps have some purpose distinct from A-line traps
                     (0b000..=0b001, _) => {
                         match instr & 0b1111 {
-                            // TRAP #0 : halt
-                            0 => {
-                                self.run_state = RunState::Halt;
-                            }
+                            // TRAP #0 (moved to  STOP)
+                            0 => unimplemented!(),
                             // TRAP #1 : assert_eq
                             1 => {
                                 self.print_stack();
@@ -393,7 +397,14 @@ impl VM {
                 self.ea_apply(dest, src, size, |l, r| l - r);
             }
             // A-traps
-            (0b1010, _, _) => unimplemented!(),
+            (0b1010, _, _) => {
+                self.pc += 2;
+                self.push_stack(self.pc);
+                let idx = (instr & 0x0FFF) << 2;
+                let a_traps = self.mem_i32(InterruptVector::ATrap as i32);
+                let offset = self.mem_i32(idx as i32 + a_traps);
+                self.pc = a_traps + offset;
+            }
             // EOR
             (0b1011, _, 0b100 | 0b101 | 0b110) => {
                 let size = match mode {
@@ -1892,5 +1903,57 @@ mod test {
         assert_eq!(vm.data[3], 13);
         assert_eq!(vm.addr[1], 21);
         assert_eq!(vm.addr[5], 25);
+    }
+
+    #[test]
+    fn a_traps() {
+        let a_traps = {
+            let mut asm = Asm::new();
+
+            let jump_table = asm.data_32(&[0, 0]);
+
+            let inc = asm.here();
+            asm.add(Size::Long, EA::Immediate(1), EA::Data(D0));
+            asm.ret(0);
+            let dec = asm.here();
+            asm.sub(Size::Long, EA::Immediate(1), EA::Data(D0));
+            asm.ret(0);
+            asm.fixup(jump_table, |asm| {
+                asm.data_32(&[(inc - jump_table) as i32, (dec - jump_table) as i32]);
+            });
+            asm
+        };
+
+        let program = {
+            let mut asm = Asm::new();
+            asm.mov(Size::Long, EA::Immediate(123), EA::Data(D0));
+            asm.push_u16(0xA000);
+            asm.mov(Size::Long, EA::Data(D0), EA::PreDec(A7));
+            asm.mov(Size::Long, EA::Immediate(124), EA::PreDec(A7));
+            asm.assert_eq();
+
+            asm.mov(Size::Long, EA::Immediate(456), EA::Data(D0));
+            asm.push_u16(0xA001);
+            asm.mov(Size::Long, EA::Data(D0), EA::PreDec(A7));
+            asm.mov(Size::Long, EA::Immediate(455), EA::PreDec(A7));
+            asm.assert_eq();
+
+            asm.stop();
+            asm
+        };
+
+        let mut vm = VM::new(512);
+        let init_pc: i32 = 256;
+        let a_traps_idx: i32 = 128;
+        vm.load_memory(InterruptVector::InitSP as usize, &init_pc.to_be_bytes());
+        vm.load_memory(InterruptVector::InitPC as usize, &init_pc.to_be_bytes());
+        vm.load_memory(InterruptVector::ATrap as usize, &a_traps_idx.to_be_bytes());
+
+        vm.reset();
+
+        vm.load_memory(a_traps_idx as usize, &a_traps.out);
+        vm.load_memory(init_pc as usize, &program.out);
+
+        vm.run();
     }
 }
