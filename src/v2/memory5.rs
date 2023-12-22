@@ -393,7 +393,7 @@ impl MatchBuilder {
             EA::Data(d),
         );
         // jump to dest
-        memory.asm.jmp(EA::PCIdxData(d, PC::Displacement(0)));
+        memory.asm.jmp(EA::PCIdxData(d, PC::Placeholder));
         memory.data.free(d);
         // make space for jump table
         let jmp_idx = memory.asm.data_16(&vec![0; case_count]);
@@ -521,10 +521,7 @@ impl Memory {
     }
     pub fn module() -> Self {
         let mut m = Self::new();
-        // placeholder
-        m.asm
-            .load_ea(EA::PCOffset(PC::Displacement(0)), EA::Addr(GP));
-
+        m.asm.load_ea(EA::PCOffset(PC::Placeholder), EA::Addr(GP));
         m
     }
     pub fn end(mut self) -> CompileResult {
@@ -574,7 +571,7 @@ impl Memory {
             .mov(Size::Long, EA::Immediate(str.len() as i32), EA::PreDec(SP));
         let to_fixup = self.asm.here();
         self.asm
-            .load_ea(EA::PCOffset(PC::Displacement(0)), EA::PreDec(SP));
+            .load_ea(EA::PCOffset(PC::Placeholder), EA::PreDec(SP));
 
         self.strings.push((to_fixup, str));
 
@@ -871,7 +868,7 @@ impl Memory {
             .mov(Size::Long, EA::Immediate(str.len() as i32), EA::PreDec(SP));
         let to_fixup = self.asm.here();
         self.asm
-            .load_ea(EA::PCOffset(PC::Displacement(0)), EA::PreDec(SP));
+            .load_ea(EA::PCOffset(PC::Placeholder), EA::PreDec(SP));
         self.asm.println();
 
         self.strings.push((to_fixup, str.to_string()));

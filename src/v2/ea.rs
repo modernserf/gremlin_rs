@@ -19,6 +19,7 @@ impl Size {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PC {
+    Placeholder,
     Displacement(i16),
     Line(usize),
 }
@@ -26,12 +27,14 @@ pub enum PC {
 impl PC {
     fn resolve_16(&self, here: usize) -> [u8; 2] {
         match *self {
+            Self::Placeholder => [0, 0],
             Self::Displacement(x) => x.to_be_bytes(),
             Self::Line(line) => ((line as isize - here as isize) as i16).to_be_bytes(),
         }
     }
     fn resolve_8(&self, here: usize) -> u8 {
         match *self {
+            Self::Placeholder => 0,
             Self::Displacement(x) => (x as i8).to_be_bytes()[0],
             Self::Line(line) => ((line as isize - here as isize) as i8).to_be_bytes()[0],
         }
