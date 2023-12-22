@@ -905,7 +905,11 @@ impl From<u16> for Cond {
 }
 
 pub enum Branch {
+    // branching back to a known destination, variable sized
     Line(usize),
+    // fixing a forward branch placeholder, always 16 bit
+    LineFixup(usize),
+    // placeholder for a forward branch, always 16 bit
     Placeholder,
 }
 
@@ -1084,16 +1088,35 @@ impl Asm {
     fn branch_internal(&mut self, cond: Cond, branch: Branch) {
         let here = self.here() + 2;
 
-        let offset = match branch {
-            Branch::Line(line) => line as i32 - here as i32,
-            Branch::Placeholder => 0,
+        let (size, offset) = match branch {
+            Branch::LineFixup(line) => (Size::Short, line as i32 - here as i32),
+            Branch::Line(line) => {
+                let disp = line as i32 - here as i32;
+                let size = if (disp <= i8::MAX as i32) && (disp >= i8::MIN as i32) {
+                    Size::Byte
+                } else if (disp <= i16::MAX as i32) && (disp >= i16::MIN as i32) {
+                    Size::Short
+                } else {
+                    Size::Long
+                };
+                (size, disp)
+            }
+            Branch::Placeholder => (Size::Short, 0),
         };
-        // TODO: allow byte / long branches
-        self.tag4_cond_4_disp8(0b0110, cond as u8, 0);
 
-        let bytes = (offset as i16).to_be_bytes();
-        self.out.push(bytes[0]);
-        self.out.push(bytes[1]);
+        match size {
+            Size::Byte => {
+                self.tag4_cond_4_disp8(0b0110, cond as u8, offset as i8);
+            }
+            Size::Short => {
+                self.tag4_cond_4_disp8(0b0110, cond as u8, 0);
+                self.out.extend((offset as i16).to_be_bytes());
+            }
+            Size::Long => {
+                self.tag4_cond_4_disp8(0b0110, cond as u8, -1);
+                self.out.extend(offset.to_be_bytes());
+            }
+        }
     }
     pub fn link(&mut self, addr: Addr, disp: i32) {
         self.push_u16(0b0100_1110_0101_0000 + addr as u16);
@@ -1358,7 +1381,7 @@ impl Asm {
         let cond = Cond::from(self.out[at - self.base_offset] as u16 & 0x0F);
         let here = self.here();
         self.fixup(at, |asm| {
-            asm.branch(cond, Branch::Line(here));
+            asm.branch(cond, Branch::LineFixup(here));
         });
     }
 
