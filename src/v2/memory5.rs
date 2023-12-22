@@ -497,7 +497,6 @@ pub struct Memory {
     block_scopes: Vec<BlockScope>,
     entry_point: usize,
     global_offset: usize,
-    is_module: bool,
     // subroutines
     subs: Vec<SubroutineRecord>,
     ret_storage: Option<Storage>,
@@ -515,17 +514,28 @@ impl Memory {
     pub fn new() -> Self {
         Self::default()
     }
+    pub fn script() -> Self {
+        let mut m = Self::module();
+        m.module_main();
+        m
+    }
+    pub fn module() -> Self {
+        let mut m = Self::new();
+        // placeholder
+        m.asm
+            .load_ea(EA::PCOffset(PC::Displacement(0)), EA::Addr(GP));
+
+        m
+    }
     pub fn end(mut self) -> CompileResult {
         self.asm.stop();
         self.resolve_strings();
-        if self.is_module {
-            self.asm.fixup(0, |asm| {
-                asm.load_ea(
-                    EA::PCOffset(PC::Displacement(-(self.global_offset as i16))),
-                    EA::Addr(GP),
-                );
-            });
-        }
+        self.asm.fixup(0, |asm| {
+            asm.load_ea(
+                EA::PCOffset(PC::Displacement(-(self.global_offset as i16))),
+                EA::Addr(GP),
+            );
+        });
 
         CompileResult {
             out: self.asm.out,
@@ -664,7 +674,6 @@ impl Memory {
     }
 
     pub fn local_static(&mut self) -> LocalId {
-        assert!(self.is_module);
         let item = self.pop_item();
         let id = self.locals.len();
         let storage = item.storage_global(self);
@@ -1142,13 +1151,9 @@ impl Memory {
         });
     }
 
-    fn module_begin(&mut self) {
-        self.is_module = true;
-        // placeholder
-        self.asm
-            .load_ea(EA::PCOffset(PC::Displacement(0)), EA::Addr(GP));
+    pub fn module_main(&mut self) {
+        self.scope_begin();
     }
-    fn module_main(&mut self) {}
     fn sub_register(&mut self, params: Vec<Ty>, return_ty: Ty) -> usize {
         self.asm.branch(Cond::True, Branch::Placeholder);
         let address = self.asm.here();
@@ -1393,9 +1398,15 @@ mod test {
         vm
     }
 
+    fn script() -> Memory {
+        let mut m_ = Memory::module();
+        m_.module_main();
+        m_
+    }
+
     #[test]
     fn smoke_test() {
-        let mut m = Memory::new();
+        let mut m = Memory::script();
 
         m.push_i32(123);
         let a = m.local();
@@ -1414,7 +1425,7 @@ mod test {
 
     #[test]
     fn assign() {
-        let mut m = Memory::new();
+        let mut m = Memory::script();
 
         m.push_i32(123);
         let a = m.local();
@@ -1433,7 +1444,7 @@ mod test {
     #[test]
     #[should_panic]
     fn assign_rvalue() {
-        let mut m = Memory::new();
+        let mut m = Memory::script();
         m.push_i32(10);
         m.push_i32(20);
         m.assign();
@@ -1441,7 +1452,7 @@ mod test {
 
     #[test]
     fn pointers() {
-        let mut m = Memory::new();
+        let mut m = Memory::script();
 
         m.push_i32(123);
         let a = m.local_stack();
@@ -1473,7 +1484,7 @@ mod test {
 
     #[test]
     fn mut_pointer() {
-        let mut m = Memory::new();
+        let mut m = Memory::script();
 
         m.push_i32(123);
         let a = m.local_stack();
@@ -1497,7 +1508,7 @@ mod test {
     #[test]
     #[should_panic]
     fn pointer_register() {
-        let mut m = Memory::new();
+        let mut m = Memory::script();
 
         m.push_i32(123);
         let a = m.local();
@@ -1514,7 +1525,7 @@ mod test {
         };
         let int = super::super::ast::Ty::int();
 
-        let mut m = Memory::new();
+        let mut m = Memory::script();
 
         m.push_struct(point.stack_space());
         // x
@@ -1563,7 +1574,7 @@ mod test {
         };
         let int = super::super::ast::Ty::int();
 
-        let mut m = Memory::new();
+        let mut m = Memory::script();
         m.push_struct(point.size_bytes());
         let p = m.local();
 
@@ -1597,7 +1608,8 @@ mod test {
 
     #[test]
     fn if_() {
-        let mut m = Memory::new();
+        let mut m = Memory::script();
+
         m.push_i32(2);
         let cmp = m.local();
         m.push_i32(0);
@@ -1621,8 +1633,7 @@ mod test {
 
     #[test]
     fn if_else() {
-        let mut m = Memory::new();
-
+        let mut m = Memory::script();
         m.push_i32(2);
         let cmp = m.local();
 
@@ -1651,8 +1662,7 @@ mod test {
 
     #[test]
     fn loops() {
-        let mut m = Memory::new();
-
+        let mut m = Memory::script();
         m.push_i32(0);
         let i = m.local();
 
@@ -1685,8 +1695,7 @@ mod test {
 
     #[test]
     fn match_case() {
-        let mut m = Memory::new();
-
+        let mut m = Memory::script();
         m.push_i32(2);
         let case = m.local();
         m.push_i32(0);
@@ -1724,8 +1733,7 @@ mod test {
 
     #[test]
     fn match_default_case() {
-        let mut m = Memory::new();
-
+        let mut m = Memory::script();
         m.push_i32(1);
         let case = m.local();
         m.push_i32(0);
@@ -1763,8 +1771,7 @@ mod test {
 
     #[test]
     fn match_default_case_empty() {
-        let mut m = Memory::new();
-
+        let mut m = Memory::script();
         m.push_i32(1);
         let case = m.local();
         m.push_i32(1);
@@ -1797,8 +1804,7 @@ mod test {
     #[test]
     #[should_panic]
     fn missing_case() {
-        let mut m = Memory::new();
-
+        let mut m = Memory::script();
         m.push_i32(1);
         let case = m.local();
         m.push_i32(0);
@@ -1825,8 +1831,7 @@ mod test {
     #[test]
     #[should_panic]
     fn duplicate_case() {
-        let mut m = Memory::new();
-
+        let mut m = Memory::script();
         m.push_i32(1);
         let case = m.local();
         m.push_i32(0);
@@ -1865,8 +1870,7 @@ mod test {
     #[test]
     #[should_panic]
     fn case_index_out_of_range() {
-        let mut m = Memory::new();
-
+        let mut m = Memory::script();
         m.push_i32(10);
         let case = m.local();
         m.push_i32(0);
@@ -1904,8 +1908,7 @@ mod test {
 
     #[test]
     fn strings() {
-        let mut m = Memory::new();
-
+        let mut m = Memory::script();
         m.push_string("Hello, world!".to_string());
         let hello = m.local();
 
@@ -1919,7 +1922,7 @@ mod test {
 
     #[test]
     fn bools() {
-        let mut m = Memory::new();
+        let mut m = Memory::script();
 
         m.push_i32(1);
         m.push_i32(2);
@@ -1956,7 +1959,7 @@ mod test {
 
     #[test]
     fn logic() {
-        let mut m = Memory::new();
+        let mut m = Memory::script();
 
         m.push_bool(true);
         m.not();
@@ -1974,7 +1977,7 @@ mod test {
 
     #[test]
     fn spill_registers() {
-        let mut m = Memory::new();
+        let mut m = Memory::script();
 
         m.push_i32(1);
         let a = m.local();
@@ -2009,7 +2012,7 @@ mod test {
 
     #[test]
     fn spill_registers_scope() {
-        let mut m = Memory::new();
+        let mut m = Memory::script();
 
         m.push_i32(1);
         let a = m.local();
@@ -2060,8 +2063,7 @@ mod test {
 
     #[test]
     fn subroutine_stack_args() {
-        let mut m = Memory::new();
-        m.module_begin();
+        let mut m = Memory::module();
 
         let add2 = m.sub_stack(vec![Ty::i32(), Ty::i32()], Ty::i32());
         {
@@ -2073,21 +2075,22 @@ mod test {
         m.sub_end();
 
         m.module_main();
+        {
+            m.push_i32(1);
+            m.push_i32(2);
+            m.call_sub(add2);
 
-        m.push_i32(1);
-        m.push_i32(2);
-        m.call_sub(add2);
-
-        m.push_i32(3);
-        m.assert_eq();
+            m.push_i32(3);
+            m.assert_eq();
+        }
+        m.sub_end();
 
         run_vm(m.end());
     }
 
     #[test]
     fn volatile_registers() {
-        let mut m = Memory::new();
-        m.module_begin();
+        let mut m = Memory::module();
 
         let inc = m.sub_stack(vec![Ty::i32()], Ty::i32());
         {
@@ -2099,30 +2102,31 @@ mod test {
         m.sub_end();
 
         m.module_main();
+        {
+            m.push_i32(1);
+            m.call_sub(inc);
+            let a = m.local();
 
-        m.push_i32(1);
-        m.call_sub(inc);
-        let a = m.local();
+            m.push_i32(2);
+            m.call_sub(inc);
+            let b = m.local();
 
-        m.push_i32(2);
-        m.call_sub(inc);
-        let b = m.local();
+            m.push_ident(a);
+            m.call_sub(inc);
+            m.call_sub(inc);
 
-        m.push_ident(a);
-        m.call_sub(inc);
-        m.call_sub(inc);
-
-        m.push_ident(b);
-        m.call_sub(inc);
-        m.assert_eq();
+            m.push_ident(b);
+            m.call_sub(inc);
+            m.assert_eq();
+        }
+        m.sub_end();
 
         run_vm(m.end());
     }
 
     #[test]
     fn sub_registers() {
-        let mut m = Memory::new();
-        m.module_begin();
+        let mut m = Memory::module();
 
         let inc = m.sub_register(vec![Ty::i32()], Ty::i32());
         {
@@ -2134,61 +2138,66 @@ mod test {
         m.sub_end();
 
         m.module_main();
+        {
+            m.push_i32(1);
+            m.call_sub(inc);
+            let a = m.local();
 
-        m.push_i32(1);
-        m.call_sub(inc);
-        let a = m.local();
+            m.push_i32(2);
+            m.call_sub(inc);
+            let b = m.local();
 
-        m.push_i32(2);
-        m.call_sub(inc);
-        let b = m.local();
+            m.push_ident(a);
+            m.call_sub(inc);
+            m.call_sub(inc);
 
-        m.push_ident(a);
-        m.call_sub(inc);
-        m.call_sub(inc);
-
-        m.push_ident(b);
-        m.call_sub(inc);
-        m.assert_eq();
+            m.push_ident(b);
+            m.call_sub(inc);
+            m.assert_eq();
+        }
+        m.sub_end();
 
         run_vm(m.end());
     }
 
     #[test]
     fn statics() {
-        let mut m = Memory::new();
-        m.module_begin();
+        let mut m = Memory::module();
 
         m.push_i32(0);
         let counter = m.local_static();
 
         let inc = m.sub_register(vec![], Ty::i32());
-        m.push_ident(counter);
-        m.push_i32(1);
-        m.add_assign();
-        m.push_ident(counter);
-        m.ret_value();
+        {
+            m.push_ident(counter);
+            m.push_i32(1);
+            m.add_assign();
+            m.push_ident(counter);
+            m.ret_value();
+        }
         m.sub_end();
 
         m.module_main();
-        m.call_sub(inc);
-        m.drop();
-        m.call_sub(inc);
-        m.drop();
-        m.call_sub(inc);
-        m.drop();
+        {
+            m.call_sub(inc);
+            m.drop();
+            m.call_sub(inc);
+            m.drop();
+            m.call_sub(inc);
+            m.drop();
 
-        m.call_sub(inc);
-        m.push_i32(4);
-        m.assert_eq();
+            m.call_sub(inc);
+            m.push_i32(4);
+            m.assert_eq();
+        }
+        m.sub_end();
 
         run_vm(m.end());
     }
 
     #[test]
     fn defer() {
-        let mut m = Memory::new();
-        m.module_begin();
+        let mut m = Memory::module();
 
         let add2then1 = m.sub_stack(vec![Ty::i32().pointer()], Ty::void());
         {
@@ -2223,6 +2232,7 @@ mod test {
         m.push_ident(val);
         m.push_i32(13);
         m.assert_eq();
+        m.sub_end();
 
         run_vm(m.end());
     }

@@ -318,7 +318,10 @@ impl Compiler {
         Self::default()
     }
     pub fn script() -> Self {
-        let mut c = Self::new();
+        let mut c = Self {
+            scope: Scope::default(),
+            memory: Memory::script(),
+        };
         c.scope.begin();
         c
     }
