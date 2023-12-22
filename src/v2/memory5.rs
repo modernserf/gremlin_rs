@@ -455,6 +455,7 @@ impl MatchBuilder {
 struct BlockScope {
     init_stack_offset: usize,
     init_locals_len: usize,
+    init_defer_stack_len: usize,
     spilled_outer_scope: Vec<(usize, EA)>,
 }
 
@@ -907,6 +908,7 @@ impl Memory {
         self.block_scopes.push(BlockScope {
             init_stack_offset: self.stack_offset,
             init_locals_len: self.locals.len(),
+            init_defer_stack_len: self.defer_stack.len(),
             spilled_outer_scope: Vec::new(),
         });
     }
@@ -926,6 +928,8 @@ impl Memory {
     }
     fn scope_end(&mut self) {
         let scope = self.block_scopes.pop().unwrap();
+        self.defer_stack.truncate(scope.init_defer_stack_len);
+
         // drop locals
         let mut locals = std::mem::take(&mut self.locals);
         for local in locals.drain(scope.init_locals_len..) {
@@ -1257,23 +1261,28 @@ impl Memory {
         // handle return type
         let prev_stack = self.stack_offset;
         let return_ty = sub.ret;
-        let ret_storage = match return_ty.storage_type() {
-            StorageType::Data(_) => {
-                // self.data.take(Data::D0);
-                self.spill_volatile(EA::Data(Data::D0));
-                Storage::Data(return_ty, Data::D0)
-            }
-            StorageType::Addr => {
-                // self.addr.take(Addr::A0);
-                self.spill_volatile(EA::Addr(Addr::A0));
-                Storage::Addr(return_ty, Addr::A0)
-            }
-            StorageType::Stack(size) => {
-                self.asm
-                    .sub(Size::Long, EA::Immediate(size as i32), EA::Addr(SP));
-                self.stack_offset += size;
-                Storage::Stack(return_ty, self.stack_offset)
-            }
+        let ret_storage = if return_ty.size_bytes() > 0 {
+            let s = match return_ty.storage_type() {
+                StorageType::Data(_) => {
+                    // self.data.take(Data::D0);
+                    self.spill_volatile(EA::Data(Data::D0));
+                    Storage::Data(return_ty, Data::D0)
+                }
+                StorageType::Addr => {
+                    // self.addr.take(Addr::A0);
+                    self.spill_volatile(EA::Addr(Addr::A0));
+                    Storage::Addr(return_ty, Addr::A0)
+                }
+                StorageType::Stack(size) => {
+                    self.asm
+                        .sub(Size::Long, EA::Immediate(size as i32), EA::Addr(SP));
+                    self.stack_offset += size;
+                    Storage::Stack(return_ty, self.stack_offset)
+                }
+            };
+            Some(s)
+        } else {
+            None
         };
 
         // load args
@@ -1305,16 +1314,19 @@ impl Memory {
         };
         self.asm.branch_sub(Branch::Line(sub.address));
         self.stack_offset = prev_stack;
-        self.stack.push(Item::Storage(ret_storage));
-        match ret_storage {
-            Storage::Data(_, r) => {
-                self.data.take(r);
-            }
-            Storage::Addr(_, r) => {
-                self.addr.take(r);
-            }
-            _ => {}
-        };
+
+        if let Some(ret_storage) = ret_storage {
+            self.stack.push(Item::Storage(ret_storage));
+            match ret_storage {
+                Storage::Data(_, r) => {
+                    self.data.take(r);
+                }
+                Storage::Addr(_, r) => {
+                    self.addr.take(r);
+                }
+                _ => {}
+            };
+        }
     }
     fn ret_value(&mut self) {
         let storage = self.ret_storage.unwrap();
@@ -1338,6 +1350,9 @@ impl Memory {
             Storage::Addr(_, a) => self.addr.free(a),
             _ => {}
         };
+        self.return_or_defer_unwind();
+    }
+    fn ret_void(&mut self) {
         self.return_or_defer_unwind();
     }
     fn sub_prologue(&mut self) {
@@ -2175,7 +2190,7 @@ mod test {
         let mut m = Memory::new();
         m.module_begin();
 
-        let add2then1 = m.sub_stack(vec![Ty::i32().pointer()], Ty::i32());
+        let add2then1 = m.sub_stack(vec![Ty::i32().pointer()], Ty::void());
         {
             let idx = m.defer_begin();
             {
@@ -2193,9 +2208,7 @@ mod test {
             m.add_assign();
 
             m.log("in sub");
-
-            m.push_i32(0);
-            m.ret_value();
+            m.ret_void();
         }
         m.sub_end();
 
