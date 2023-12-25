@@ -48,6 +48,7 @@ pub enum EA {
     Offset(Addr, i16),
     PreDec(Addr),
     PostInc(Addr),
+    // Should these be i8?
     IdxData(Addr, Data, u8),
     IdxAddr(Addr, Addr, u8),
     Absolute(i32),
@@ -63,6 +64,7 @@ impl EA {
             return *self;
         }
         match *self {
+            Self::Absolute(o) => Self::Absolute(o + offset as i32),
             Self::Offset(a, o) => Self::Offset(a, o + offset as i16),
             _ => unimplemented!(),
         }

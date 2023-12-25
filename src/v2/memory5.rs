@@ -15,31 +15,23 @@ struct Ty {
 
 impl Ty {
     // only used for fn signatures
-    fn void() -> Self {
-        Self {
-            base_size: 0,
-            ref_level: 0,
-        }
-    }
-    fn bool() -> Self {
-        Self {
-            base_size: 1,
-            ref_level: 0,
-        }
-    }
-    fn i32() -> Self {
-        Self {
-            base_size: 4,
-            ref_level: 0,
-        }
-    }
+    const VOID: Self = Self {
+        base_size: 0,
+        ref_level: 0,
+    };
+    const BOOL: Self = Self {
+        base_size: 1,
+        ref_level: 0,
+    };
+    const INT: Self = Self {
+        base_size: 4,
+        ref_level: 0,
+    };
     // (len: i32, str: &[u8])
-    fn string() -> Self {
-        Self {
-            base_size: 8,
-            ref_level: 0,
-        }
-    }
+    const STRING: Self = Self {
+        base_size: 8,
+        ref_level: 0,
+    };
     fn size_bytes(&self) -> usize {
         if self.ref_level > 0 {
             4
@@ -543,12 +535,12 @@ impl Memory {
     // values
     pub fn push_i32(&mut self, value: i32) {
         self.stack
-            .push(Item::Storage(Storage::Constant(Ty::i32(), value)))
+            .push(Item::Storage(Storage::Constant(Ty::INT, value)))
     }
     pub fn push_bool(&mut self, value: bool) {
         let val = if value { -1 } else { 0 };
         self.stack
-            .push(Item::Storage(Storage::Constant(Ty::bool(), val)))
+            .push(Item::Storage(Storage::Constant(Ty::BOOL, val)))
     }
     pub fn push_ident(&mut self, id: LocalId) {
         let original = self.locals[id];
@@ -576,10 +568,8 @@ impl Memory {
         self.strings.push((to_fixup, str));
 
         self.stack_offset += 8;
-        self.stack.push(Item::Storage(Storage::Stack(
-            Ty::string(),
-            self.stack_offset,
-        )));
+        self.stack
+            .push(Item::Storage(Storage::Stack(Ty::STRING, self.stack_offset)));
     }
     // operators
     // TODO: use shortcuts if flags enabled (e.g. constant folding)
@@ -858,7 +848,7 @@ impl Memory {
 
     pub fn println(&mut self) {
         let item = self.pop_item();
-        assert_eq!(item.ty(), Ty::string());
+        assert_eq!(item.ty(), Ty::STRING);
         item.storage_stack(self);
         self.asm.println();
         self.stack_offset -= 8;
@@ -900,7 +890,7 @@ impl Memory {
         let data = self.get_data_register();
         self.asm.scc(cond, EA::Data(data));
         self.stack
-            .push(Item::Storage(Storage::Data(Ty::bool(), data)));
+            .push(Item::Storage(Storage::Data(Ty::BOOL, data)));
     }
     pub fn test_bool(&mut self) {
         let item = self.pop_item();
@@ -2062,7 +2052,7 @@ mod test {
     fn subroutine_stack_args() {
         let mut m = Memory::module();
 
-        let add2 = m.sub_stack(vec![Ty::i32(), Ty::i32()], Ty::i32());
+        let add2 = m.sub_stack(vec![Ty::INT, Ty::INT], Ty::INT);
         {
             m.push_ident(0);
             m.push_ident(1);
@@ -2089,7 +2079,7 @@ mod test {
     fn volatile_registers() {
         let mut m = Memory::module();
 
-        let inc = m.sub_stack(vec![Ty::i32()], Ty::i32());
+        let inc = m.sub_stack(vec![Ty::INT], Ty::INT);
         {
             m.push_ident(0);
             m.push_i32(1);
@@ -2125,7 +2115,7 @@ mod test {
     fn sub_registers() {
         let mut m = Memory::module();
 
-        let inc = m.sub_register(vec![Ty::i32()], Ty::i32());
+        let inc = m.sub_register(vec![Ty::INT], Ty::INT);
         {
             m.push_ident(0);
             m.push_i32(1);
@@ -2164,7 +2154,7 @@ mod test {
         m.push_i32(0);
         let counter = m.local_static();
 
-        let inc = m.sub_register(vec![], Ty::i32());
+        let inc = m.sub_register(vec![], Ty::INT);
         {
             m.push_ident(counter);
             m.push_i32(1);
@@ -2196,7 +2186,7 @@ mod test {
     fn defer() {
         let mut m = Memory::module();
 
-        let add2then1 = m.sub_stack(vec![Ty::i32().pointer()], Ty::void());
+        let add2then1 = m.sub_stack(vec![Ty::INT.pointer()], Ty::VOID);
         {
             let idx = m.defer_begin();
             {

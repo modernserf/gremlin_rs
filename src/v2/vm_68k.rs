@@ -171,20 +171,25 @@ impl VM {
                     // TODO: traps have some purpose distinct from A-line traps
                     (0b000..=0b001, _) => {
                         match instr & 0b1111 {
-                            // TRAP #0 (moved to  STOP)
-                            0 => unimplemented!(),
-                            // TRAP #1 : assert_eq
+                            // TRAP #0 : assert_zero (condition code)
+                            0 => {
+                                if !self.check_cond(Cond::Equal) {
+                                    todo!("Fatal error: assert zero. core dump goes here")
+                                }
+                            }
+                            // TRAP #1 : assert_eq (values on stack)
                             1 => {
-                                self.print_stack();
                                 let left = self.pop_stack();
                                 let right = self.pop_stack();
-                                assert_eq!(left, right);
+                                if left != right {
+                                    self.print_stack();
+                                    assert_eq!(left, right);
+                                }
                             }
                             // TRAP #2 : println
                             2 => {
                                 let ptr = self.pop_stack();
                                 let len = self.pop_stack();
-                                self.print_stack();
                                 let chars =
                                     Vec::from(&self.memory[(ptr as usize)..((ptr + len) as usize)]);
                                 let str = String::from_utf8(chars).unwrap();
@@ -798,36 +803,43 @@ impl VM {
             "{:?}",
             &self.memory[(self.addr[7] as usize)..(self.mem_i32(0) as usize)]
         );
+        print!("SR=");
+        if self.status.bit_test(StatusFlag::Negative as usize) {
+            print!("N");
+        } else {
+            print!("n");
+        }
+        if self.status.bit_test(StatusFlag::Zero as usize) {
+            print!("Z");
+        } else {
+            print!("z");
+        }
+        println!();
+
         for (i, d) in self.data.iter().enumerate() {
             if *d == 0x02020202 {
-                print!("D{}=       ", i);
+                print!("D{}=         ", i);
             } else {
-                print!("D{}={:6} ", i, d);
+                print!("D{}={:8} ", i, d);
             }
         }
         println!();
         for (i, a) in self.addr.iter().enumerate() {
             if *a == 0x01010101 {
-                print!("A{}=       ", i);
+                print!("A{}=         ", i);
             } else {
-                print!("A{}={:6} ", i, a);
+                print!("A{}={:8} ", i, a);
             }
         }
         println!();
     }
 }
 
-type Quick = u16; // 3
+type Quick = u16;
 fn quick_positive(word: i32) -> Option<Quick> {
     match word {
         1..=7 => Some(word as Quick),
         8 => Some(0 as Quick),
-        _ => None,
-    }
-}
-fn quick_zero(word: i32) -> Option<Quick> {
-    match word {
-        0..=7 => Some(word as Quick),
         _ => None,
     }
 }
@@ -1314,6 +1326,9 @@ impl Asm {
     pub fn stop(&mut self) {
         self.push_u16(0b0100_1110_0111_0010);
         self.push_u16(0);
+    }
+    pub fn trap(&mut self, idx: usize) {
+        self.push_u16(0b0100_1110_0100_0000 + (idx & 0x0F) as u16);
     }
     pub fn assert_eq(&mut self) {
         // TRAP #1
